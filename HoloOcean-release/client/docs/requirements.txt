@@ -1,0 +1,6 @@
+autodocsumm==0.2.12
+numpy
+posix_ipc
+sphinx_rtd_theme==2.0.0
+doc8
+sphinx-copybutton==0.5.2
