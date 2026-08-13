@@ -49,6 +49,9 @@ scenario = {
     "name": "testing",
     "world": "Dam",
     "package_name": "Ocean",
+    "current":{
+        "vehicle_debugging": True
+    },
     "agents": [{
         "agent_name": "rov",
         "agent_type": "BlueROV2",
@@ -254,7 +257,7 @@ def sonar_read(imu_pose):
         raw = np.array(state["sidescan"], dtype=np.float32)
         if (dr_position[2]<-63.0):
             print("This affected the depth")
-            imu_correct(imu_pose[0], imu_pose[1], -60.0)
+            #imu_correct(imu_pose[0], imu_pose[1], -60.0)
         mn, mx = raw.min(), raw.max()
         vis = (raw - mn) / (mx - mn) if mx > mn else np.zeros_like(raw)
         vis = (vis * 255).astype(np.uint8)
@@ -287,13 +290,13 @@ def sonar_read(imu_pose):
         if (dr_position[2]<-63.0):
             print("Terrain - Terrain - Terrain")
             calc_z = 60.0
-            #imu_correct(imu_pose[0], -imu_pose[1], 60.0)
+            imu_correct(imu_pose[0], -imu_pose[1], 60.0)
         if offset > 3.0 or offset < -3.0:
             print("pose mismatch")
-            calc_x = (imu_pose[0] + imu_pose2[0]) / 2.0
-            calc_y = (imu_pose[1] + imu_pose2[1]) / 2.0
-            calc_z = (imu_pose[2] + imu_pose2[2]) / 2.0
-            #imu_correct(imu_pose2[0], imu_pose2[1], imu_pose2[2])
+            calc_x = imu_pose2[0]  #(imu_pose[0] + imu_pose2[0]) / 2.0
+            calc_y = imu_pose2[1]  #(imu_pose[1] + imu_pose2[1]) / 2.0
+            calc_z = imu_pose2[2]  #(imu_pose[2] + imu_pose2[2]) / 2.0
+            imu_correct(imu_pose2[0], imu_pose2[1], imu_pose2[2])
         elif dist < 50.0:
             obs = pred(sonar_coord[0], sonar_coord[1], sonar_coord[2])
             calc_x = obs[0]
@@ -380,7 +383,7 @@ waypoints = [
     [-14.0, -10.0, -40.0],
     [-22.0, -18.0, -60.0],
     [-30.0, -28.0, -60.0],
-    [-40.0, -15.0, -60.0]
+    [-35.0, -35.0, -60.0]
 ]
 global_points =[]
 global_intensity = []
@@ -423,11 +426,11 @@ dr_path_corrected = dr_path.copy()
 errors = np.linalg.norm(gt_path - dr_path_corrected, axis=1)
 
 plt.figure(figsize=(12, 8))
-plt.plot(gt_path[:, 0], gt_path[:, 2], label="Ground Truth Path", color='blue')
-plt.plot(dr_path[:, 0], dr_path[:, 2], label="Dead Reckoning Path", color='orange')
-plt.scatter(gt_path[-1,0], gt_path[-1,2], color='black', s=100, label='End')
+plt.plot(gt_path[:, 0], gt_path[:, 1], label="Ground Truth Path", color='blue')
+plt.plot(dr_path[:, 0], dr_path[:, 1], label="Dead Reckoning Path", color='orange')
+plt.scatter(gt_path[-1,0], gt_path[-1,1], color='black', s=100, label='End')
 plt.xlabel("X Position (m)")
-plt.ylabel("Z Position (m)")
+plt.ylabel("Y Position (m)")
 plt.title("Ground Truth vs Dead Reckoning Path with correction")
 plt.legend()
 plt.grid(True)
