@@ -26,6 +26,18 @@ scenario = {
                         "ReturnBias": True
                     }
                 },
+
+                {
+                    "sensor_name": "depth",
+                    "sensor_type": "DepthSensor",
+                    "socket": "DepthSocket",
+                    "Hz": 30,
+                    "configuration": {
+                        "DepthSigma": 0.1,
+                        "ReturnBias": True,
+                        "AddNoise": True
+                    }
+                }
                 {
                     "sensor_name": "imu_2",
                     "sensor_type": "IMUSensor",
