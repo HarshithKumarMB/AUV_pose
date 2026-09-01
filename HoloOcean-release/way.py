@@ -31,6 +31,12 @@ scenario = {
                     "sensor_type": "PoseSensor"
                 },
                 {
+                    "sensor_name": "depthsensor",
+                    "sensor_type": "DepthSensor",
+                    "socket": "IMUSocket",
+                    "Hz": 30
+                },
+                {
                     "sensor_name": "imu_1",
                     "sensor_type": "IMUSensor",
                     "socket": "IMUSocket",
@@ -66,6 +72,7 @@ scenario = {
 class EKF:
 
     def __init__(self):
+        print("Initializing EKF...")
 
         self.x = np.zeros((6,1))
 
@@ -76,8 +83,16 @@ class EKF:
             0.5,
             0.5
         ])
+        self.filtered_x = []
+        self.filtered_P = []
+
+        self.predicted_x = []
+        self.predicted_P = []
+
+        self.F_history = []
 
     def predict(self, acc, dt):
+        print(f"Predicting with dt={dt:.3f} seconds")
 
         F = np.array([
             [1,0,0,dt,0,0],
@@ -107,7 +122,12 @@ class EKF:
 
         self.P = F @ self.P @ F.T + Q
 
+        self.filtered_x.append(self.x.copy())
+        self.filtered_P.append(self.P.copy())
+        self.F_history.append(F.copy())
+
     def update(self, position_meas):
+        print("Updating with position measurement")
 
         H = np.array([
             [1,0,0,0,0,0],
@@ -128,8 +148,36 @@ class EKF:
         I = np.eye(6)
 
         self.P = (I - K @ H) @ self.P
+        self.filtered_x.append(self.x.copy())
+        self.filtered_P.append(self.P.copy())
 
         return self.x
+
+    def rts_smoother(self):
+        print("Running RTS smoother...")
+        n_filt = len(self.filtered_x)
+        n_pred = len(self.predicted_x)
+        print(f"Number of filtered states: {n_filt}")
+        print(f"Number of predicted states: {n_pred}")
+        #N = len(self.filtered_x)
+        N = min(n_filt, n_pred)
+        smoothed_x = [None] * N
+        smoothed_P = [None] * N
+        smoothed_x[-1] = self.filtered_x[-1]
+        smoothed_P[-1] = self.filtered_P[-1]
+        for k in range(N-2, -1, -1):
+            Pk = self.filtered_P[k]
+            Pk1_pred = self.predicted_P[k+1]
+            Fk = self.F_history[k]
+            Ck = Pk @ Fk.T @ np.linalg.inv(Pk1_pred)
+            smoothed_x[k] = (self.filtered_x[k] + Ck @ (smoothed_x[k+1]-self.predicted_x[k+1]))
+            smoothed_P[k] = (self.filtered_P[k]+Ck @ (smoothed_P[k+1]-self.predicted_P[k+1]) @ Ck.T)
+        return smoothed_x, smoothed_P
+
+# ====================================================
+# RTS smoother
+# ====================================================
+
 
 # ====================================================
 # ENVIRONMENT
@@ -273,6 +321,9 @@ with open("wp_c.csv", "w", newline="") as f:
         # ============================================
 
         pose = state["pose"]
+        depth_sensor = state["depthsensor"]
+        deep = depth_sensor[0]
+
 
         position = np.array([
             pose[0][3],
@@ -336,6 +387,8 @@ with open("wp_c.csv", "w", newline="") as f:
         depth = depth * y_std + y_mean
         print(depth[0], sonar_depth)
         dr_p[2] = (sonar_depth + depth[0])
+        dr1_p = dr_p.copy()
+        dr1_p[2] = deep
 
         # ============================================
         # EKF
@@ -344,6 +397,7 @@ with open("wp_c.csv", "w", newline="") as f:
         ekf.predict(imu_read, dt)
 
         ekf_state = ekf.update(dr_p)
+        ekf_state = ekf.update(dr1_p)
         #ekf_state = ekf.x
 
         ekf_x = ekf_state[0,0]
@@ -448,7 +502,35 @@ with open("wp_c.csv", "w", newline="") as f:
 
 print("Finished. Data saved to wp_c.csv")
 
+'''smoothed_x, smoothed_P = ekf.rts_smoother()
 
+sx = []
+sy = []
+sz = []
+
+for s in smoothed_x:
+    sx.append(s[0,0])
+    sy.append(s[1,0])
+    sz.append(s[2,0])
+
+plt.plot(
+    sx,
+    sy,
+    color="magenta",
+    linewidth=3,
+    label="RTS Smoothed"
+)
+
+smooth_df = pd.DataFrame({
+    "rts_x": sx,
+    "rts_y": sy,
+    "rts_z": sz
+})
+
+smooth_df.to_csv(
+    "rts_smoothed.csv",
+    index=False
+)'''
 # Load CSV
 df = pd.read_csv("wp_c.csv")
 
