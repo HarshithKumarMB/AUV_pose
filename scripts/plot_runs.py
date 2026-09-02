@@ -55,6 +55,7 @@ def load(path: Path) -> dict:
   ekf = frame[["ekf_x", "ekf_y", "ekf_z"]].to_numpy()
   dead_reckoned = frame[["dr_x", "dr_y", "dr_z"]].to_numpy()
   true_velocity = np.gradient(truth, DT, axis=0)
+  sigma = frame[["ekf_sx", "ekf_sy", "ekf_sz"]].to_numpy()
 
   return {
     "t": frame["step"].to_numpy() / HZ,
@@ -67,6 +68,11 @@ def load(path: Path) -> dict:
       true_velocity - frame[["ekf_vx", "ekf_vy", "ekf_vz"]].to_numpy(), axis=1
     ),
     "att": frame["att_err_deg"].to_numpy(),
+    # Signed, because the point of showing it against a sigma band is whether
+    # the error sits inside the uncertainty the filter claims.
+    "z_err": ekf[:, 2] - truth[:, 2],
+    "sigma_z": sigma[:, 2],
+    "sigma_pos": np.linalg.norm(sigma, axis=1),
   }
 
 
@@ -96,6 +102,31 @@ def label_end(ax, x, y, text: str, dy: float = 0) -> None:
   )
 
 
+def label_ends(ax, entries, min_gap: float = 11.0) -> None:
+  """Label each curve's final value, nudged apart where they would collide.
+
+  Configurations that used to differ by metres now differ by centimetres, so
+  hand-tuned offsets need re-tuning on every regeneration. Spread them in
+  display space instead, which needs the axis limits and scale to be set first.
+  """
+  if not entries:
+    return
+
+  placed = sorted(
+    (ax.transData.transform((x, y))[1], x, y, text) for x, y, text in entries
+  )
+  offsets = [0.0] * len(placed)
+  for i in range(1, len(placed)):
+    gap = (placed[i][0] + offsets[i]) - (placed[i - 1][0] + offsets[i - 1])
+    if gap < min_gap:
+      offsets[i] += min_gap - gap
+
+  # Centre the stack so a crowded panel does not drift its labels upward.
+  shift = sum(offsets) / len(offsets)
+  for offset, (_, x, y, text) in zip(offsets, placed, strict=True):
+    label_end(ax, x, y, text, offset - shift)
+
+
 def main() -> None:
   args = parse_args()
   data = {name: load(args.logs / f"{key}.csv") for name, key, _, _ in RUNS}
@@ -108,40 +139,45 @@ def main() -> None:
     fontsize=14,
     x=0.055,
     ha="left",
-    y=0.982,
+    y=0.988,
   )
   fig.text(
     0.055,
-    0.918,
-    "One 300-step run per configuration. Dead reckoning is no longer the weak "
-    "point: it was 7.5 m before the DVL was used to initialise velocity and to "
-    "keep the attitude filter\nfrom mistaking a manoeuvre for a tilt. Guidance "
-    "closes on the estimate, so each run flies a different trajectory -- read "
-    "sub-metre differences as noise.",
+    0.902,
+    "One 300-step run per configuration. Dead reckoning was 7.5 m before the "
+    "DVL was used to initialise velocity and to keep the attitude filter from "
+    "mistaking a manoeuvre for a tilt;\nwithout a DVL neither fix is available "
+    "and it still drifts. Guidance closes on the estimate, so each run flies a "
+    "different trajectory -- read sub-metre\ndifferences as noise. The vehicle "
+    "holds a constant attitude throughout: none of these runs rotate it.",
     color=INK_2,
     fontsize=9.5,
     ha="left",
   )
 
-  # The fixed run and its truth-attitude bound now land within centimetres of
-  # each other, so their end labels have to be pulled apart by hand.
-  apart = {"all fixed": 6, "truth attitude (bound)": -6}
-
   ax = axes[0][0]
+  # The filter's own account of how wrong it thinks it is. Error curves sitting
+  # well below it mean the filter is pessimistic; above it, overconfident --
+  # and nothing in this figure used to say which.
+  ax.plot(
+    data["all fixed"]["t"],
+    data["all fixed"]["sigma_pos"],
+    color=INK_2,
+    linewidth=1.2,
+    linestyle=":",
+    label="EKF $\\sigma$, all fixed",
+  )
+  ends = []
   for name, _, colour, linestyle in RUNS:
     run = data[name]
     ax.plot(
       run["t"], run["pos"], color=colour, linewidth=2, linestyle=linestyle
     )
-    label_end(
-      ax,
-      run["t"][-1],
-      run["pos"][-1],
-      f"{run['pos'][-1]:.2f} m",
-      apart.get(name, 0),
-    )
+    ends.append((run["t"][-1], run["pos"][-1], f"{run['pos'][-1]:.2f} m"))
   ax.set_yscale("log")
   ax.set_xlim(0, 11.6)
+  ax.legend(frameon=False, fontsize=8, labelcolor=INK, loc="lower right")
+  label_ends(ax, ends)
   style(
     ax,
     "time (s)",
@@ -150,18 +186,13 @@ def main() -> None:
   )
 
   ax = axes[0][1]
+  ends = []
   for name, _, colour, linestyle in RUNS:
     run = data[name]
     ax.plot(
       run["t"], run["dr_err"], color=colour, linewidth=2, linestyle=linestyle
     )
-    label_end(
-      ax,
-      run["t"][-1],
-      run["dr_err"][-1],
-      f"{run['dr_err'][-1]:.2f} m",
-      apart.get(name, 0),
-    )
+    ends.append((run["t"][-1], run["dr_err"][-1], f"{run['dr_err'][-1]:.2f} m"))
   ax.set_yscale("log")
   ax.set_xlim(0, 11.6)
   # Every run starts at exactly zero error, which on a log axis pulls the floor
@@ -173,27 +204,35 @@ def main() -> None:
     "dead-reckoning error (m)",
     "b.  Dead reckoning, once the DVL also feeds attitude",
   )
+  label_ends(ax, ends)
 
   ax = axes[1][0]
-  nudge = {"all fixed": 8, "truth attitude (bound)": -8}
+  fixed = data["all fixed"]
+  ax.fill_between(
+    fixed["t"],
+    -fixed["sigma_z"],
+    fixed["sigma_z"],
+    color="#2a78d6",
+    alpha=0.13,
+    linewidth=0,
+    label="EKF $\\pm1\\sigma_z$, all fixed",
+  )
+  ax.axhline(0, color=INK_2, linewidth=0.8, alpha=0.5)
+  ends = []
   for name, _, colour, linestyle in RUNS:
     run = data[name]
     ax.plot(
-      run["t"], run["vel"], color=colour, linewidth=2, linestyle=linestyle
+      run["t"], run["z_err"], color=colour, linewidth=2, linestyle=linestyle
     )
-    label_end(
-      ax,
-      run["t"][-1],
-      run["vel"][-1],
-      f"{run['vel'][-1]:.2f}",
-      nudge.get(name, 0),
-    )
+    ends.append((run["t"][-1], run["z_err"][-1], f"{run['z_err'][-1]:+.2f} m"))
   ax.set_xlim(0, 11.6)
+  ax.legend(frameon=False, fontsize=8, labelcolor=INK, loc="lower left")
+  label_ends(ax, ends)
   style(
     ax,
     "time (s)",
-    "velocity error (m/s)",
-    "c.  Velocity error - what the DVL buys",
+    "EKF depth error (m)",
+    "c.  Depth - the only directly observed axis",
   )
 
   ax = axes[1][1]
@@ -267,11 +306,11 @@ def main() -> None:
     labelcolor=INK,
     ncol=4,
     loc="upper left",
-    bbox_to_anchor=(0.045, 0.885),
+    bbox_to_anchor=(0.045, 0.862),
     columnspacing=2.2,
   )
 
-  fig.tight_layout(rect=(0.02, 0.01, 0.99, 0.855))
+  fig.tight_layout(rect=(0.02, 0.01, 0.99, 0.832))
   args.out.parent.mkdir(parents=True, exist_ok=True)
   fig.savefig(args.out, dpi=200, facecolor=SURFACE)
   print(f"Wrote {args.out}")
