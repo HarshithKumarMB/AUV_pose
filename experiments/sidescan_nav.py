@@ -18,9 +18,10 @@ import holoocean
 import numpy as np
 
 from auv_pose.mapping.sonar import range_bins
-from auv_pose.smoothing.ekf import ConstantVelocityEKF
+from auv_pose.smoothing.filters import ConstantVelocityEKF, position
 from auv_pose.smoothing.quaternion import rotmat_to_quat
 from auv_pose.smoothing.strapdown import StrapdownIntegrator
+from auv_pose.smoothing.typing import Measurement
 from experiments.guidance import WaypointFollower
 from experiments.obstacle_map import ObstacleMap
 from experiments.scenarios import (
@@ -130,7 +131,8 @@ def main() -> None:
   start_position = np.array(state["pose"])[:3, 3]
   attitude = rotmat_to_quat(np.array(state["orient"], dtype=float))
 
-  ekf = ConstantVelocityEKF(x0=np.concatenate([start_position, np.zeros(3)]))
+  ekf = ConstantVelocityEKF()
+  estimate = ekf.initial(start_position)
   dead_reckoning = StrapdownIntegrator(start_position, attitude)
   measurement_noise = np.eye(3) * args.sigma_match**2
 
@@ -141,19 +143,32 @@ def main() -> None:
     state = env.step(command)
     accel_body, gyro_body = np.array(state["imu_1"], dtype=float)[:2]
 
-    ekf.predict(dead_reckoning.step(gyro_body, accel_body, dt), dt)
-    estimate = ekf.position
+    accel_world = dead_reckoning.step(gyro_body, accel_body, dt)
+
+    # Returns are projected from where we think we are, so the prior is needed
+    # before conditioning. predict is pure, so step() recomputing it below is
+    # two matmuls, not a correctness concern.
+    prior = ekf.predict(estimate, accel_world, dt)
 
     points = project_returns(
-      np.asarray(state["sidescan"], dtype=float), estimate, ranges, angles
+      np.asarray(state["sidescan"], dtype=float),
+      position(prior),
+      ranges,
+      angles,
     )
+
+    observations = []
     if points.size:
       match = obstacles.nearest(points.mean(axis=0))
       if match is not None and match.distance < MATCH_RADIUS:
-        ekf.update(match.position, POSITION_H, measurement_noise)
-        estimate = ekf.position
+        observations.append(
+          Measurement(match.position, POSITION_H, measurement_noise)
+        )
 
-    next_command = follower.command(estimate)
+    estimate = ekf.step(estimate, accel_world, dt, observations)
+    estimated_position = position(estimate)
+
+    next_command = follower.command(estimated_position)
     if next_command is None:
       if follower.finished:
         print(f"step {step}: course complete")
@@ -164,7 +179,10 @@ def main() -> None:
 
     if step % 100 == 0:
       truth = np.array(state["pose"])[:3, 3]
-      print(f"step {step} | error {np.linalg.norm(truth - estimate):.2f} m")
+      print(
+        f"step {step} | error "
+        f"{np.linalg.norm(truth - estimated_position):.2f} m"
+      )
 
 
 if __name__ == "__main__":

@@ -28,9 +28,14 @@ import numpy as np
 from auv_pose.io.checkpoints import load_map
 from auv_pose.io.logs import CsvLogger
 from auv_pose.mapping.sonar import bottom_return_range, range_bins
-from auv_pose.smoothing.ekf import ConstantVelocityEKF
+from auv_pose.smoothing.filters import (
+  ConstantVelocityEKF,
+  position,
+  velocity,
+)
 from auv_pose.smoothing.quaternion import rotmat_to_quat
 from auv_pose.smoothing.strapdown import StrapdownIntegrator
+from auv_pose.smoothing.typing import Measurement
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
   depth_sensor,
@@ -146,9 +151,8 @@ def main() -> None:
   start_position = np.array(state["pose"])[:3, 3]
   attitude = rotmat_to_quat(np.array(state["orient"], dtype=float))
 
-  ekf = ConstantVelocityEKF(
-    x0=np.concatenate([start_position, np.zeros(3)]), accel_process_sigma=0.5
-  )
+  ekf = ConstantVelocityEKF(accel_process_sigma=0.5)
+  estimate = ekf.initial(start_position)
   dead_reckoning = StrapdownIntegrator(start_position, attitude)
 
   measurement_noise = np.diag([args.sigma_map**2, args.sigma_depth**2])
@@ -168,8 +172,6 @@ def main() -> None:
       # world-frame acceleration the filter needs as its control input.
       accel_world = dead_reckoning.step(gyro_body, accel_body, dt)
 
-      ekf.predict(accel_world, dt)
-
       sonar_range = bottom_return_range(np.asarray(state["singlebeam"]), ranges)
       depth = float(np.asarray(state["depthsensor"]).ravel()[0])
 
@@ -177,15 +179,20 @@ def main() -> None:
         # No echo: the depth sensor alone. Skipping the GP here matters --
         # it is the most expensive operation in the tick.
         map_depth = float("nan")
-        ekf.update([depth], DEPTH_H[:1], depth_only_noise)
+        observations = [Measurement([depth], DEPTH_H[:1], depth_only_noise)]
       else:
-        map_depth = float(bathymetry.predict(ekf.position[None, :2])[0])
-        ekf.update([sonar_range + map_depth, depth], DEPTH_H, measurement_noise)
+        map_depth = float(bathymetry.predict(position(estimate)[None, :2])[0])
+        observations = [
+          Measurement(
+            [sonar_range + map_depth, depth], DEPTH_H, measurement_noise
+          )
+        ]
 
-      estimate = ekf.position
-      velocity = ekf.velocity
+      estimate = ekf.step(estimate, accel_world, dt, observations)
+      estimated_position = position(estimate)
+      estimated_velocity = velocity(estimate)
 
-      command_or_none = follower.command(estimate)
+      command_or_none = follower.command(estimated_position)
       if command_or_none is None:
         if follower.finished:
           print(f"step {step}: course complete")
@@ -204,12 +211,12 @@ def main() -> None:
         x=truth[0],
         y=truth[1],
         z=truth[2],
-        ekf_x=estimate[0],
-        ekf_y=estimate[1],
-        ekf_z=estimate[2],
-        ekf_vx=velocity[0],
-        ekf_vy=velocity[1],
-        ekf_vz=velocity[2],
+        ekf_x=estimated_position[0],
+        ekf_y=estimated_position[1],
+        ekf_z=estimated_position[2],
+        ekf_vx=estimated_velocity[0],
+        ekf_vy=estimated_velocity[1],
+        ekf_vz=estimated_velocity[2],
         dr_x=dead_reckoning.position[0],
         dr_y=dead_reckoning.position[1],
         dr_z=dead_reckoning.position[2],

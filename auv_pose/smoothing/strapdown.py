@@ -52,14 +52,16 @@ class StrapdownIntegrator:
   ) -> NDArray[np.float64]:
     """Advance by one IMU sample.
 
-    Args:
-        gyro: Body angular rate, rad/s.
-        accel_body: Body specific force, m/s^2, as an accelerometer reports it.
-        dt: Interval, seconds.
+    An accelerometer measures specific force ``f = a - g``, so at rest it reads
+    ``-G_NED`` and the kinematic acceleration is recovered by **adding** gravity
+    back: ``a = R f + G_NED``.
 
-    Returns:
-        World-frame linear acceleration, gravity removed -- the quantity a
-        position filter wants as its control input.
+    :param gyro: Body angular rate in rad/s.
+    :param accel_body: Body specific force in m/s^2, as an accelerometer
+        reports it.
+    :param dt: Interval in seconds.
+    :return: World-frame linear acceleration with gravity removed -- the
+        quantity a position filter wants as its control input.
     """
     self.attitude = quat_normalize(
       quat_multiply(self.attitude, quat_from_gyro(gyro, dt))
@@ -68,7 +70,7 @@ class StrapdownIntegrator:
     accel_world = quat_to_rotmat(self.attitude) @ np.asarray(
       accel_body, dtype=float
     )
-    accel_world = accel_world - G_NED
+    accel_world = accel_world + G_NED
 
     self.velocity = self.velocity + accel_world * dt
     self.position = self.position + self.velocity * dt

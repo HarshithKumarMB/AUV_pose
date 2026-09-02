@@ -62,7 +62,7 @@ with `--obstacles`.
 
 ```
 auv_pose/                    # algorithms -- importable, no I/O, no simulator
-  smoothing/                 # quaternions, attitude determination, EKF + RTS
+  smoothing/                 # quaternion, wahba, strapdown, filters, smoothers
   mapping/                   # SVGP bathymetry, sonar range extraction
   io/                        # soundings, checkpoints, run logs
 experiments/                 # runnable scripts composing auv_pose
@@ -78,7 +78,7 @@ HoloOcean lives in `experiments/`.
 ## Tests
 
 ```
-nix develop --command pytest      # 118 tests, none need the simulator
+nix develop --command pytest      # 135 tests, none need the simulator
 nix flake check                   # the same suite, in a sandbox
 ```
 
@@ -86,6 +86,12 @@ Note that `experiments/` is excluded from collection: several of its scripts ope
 world at import time, so collecting them would launch the simulator.
 
 ## Conventions
+
+`auv_pose/smoothing/` is organised by causality: `filters.py` holds causal
+recursive estimators, `smoothers.py` the non-causal backward pass, and `wahba.py`
+the memoryless attitude solvers. State is a value passed through
+`predict(state, ...)` and `condition(state, obs)`, so a run's history is a list of
+values and smoothing is a pure function over it.
 
 World frame is **NED** — x north, y east, **z down** — matching HoloOcean's sensors
 in the `IMUSocket`, with gravity `[0, 0, +9.81]`. Quaternions are scalar-first

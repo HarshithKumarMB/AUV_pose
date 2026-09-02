@@ -1,20 +1,19 @@
-"""Attitude determination.
+"""Static attitude determination.
 
-The two Wahba solvers are independent implementations, so their agreement is
-meaningful evidence that both are right -- hence the assertion rather than a
-printed diagnostic.
+The two solvers are independent implementations, so their agreement is
+meaningful evidence that both are right -- hence an assertion rather than the
+printed diagnostic the original code carried.
 """
 
 import numpy as np
 import pytest
 
-from auv_pose.smoothing.attitude import (
-  AttitudeFilter,
+from auv_pose.smoothing.quaternion import quat_to_rotmat, rotmat_to_quat
+from auv_pose.smoothing.wahba import (
   accel_weight,
   wahba_davenport,
   wahba_svd,
 )
-from auv_pose.smoothing.quaternion import quat_to_rotmat, rotmat_to_quat
 
 DOWN = np.array([0.0, 0.0, 1.0])
 
@@ -81,43 +80,3 @@ def test_accel_weight_peaks_at_one_g():
   assert accel_weight([0.0, 0.0, 1.0]) == pytest.approx(1.0)
   assert accel_weight([0.0, 0.0, 2.0]) < accel_weight([0.0, 0.0, 1.2])
   assert accel_weight([0.0, 0.0, 1.2]) < 1.0
-
-
-def test_filter_stays_level_when_at_rest():
-  """Gravity-only observations with no rotation: attitude must not wander."""
-  filt = AttitudeFilter(kp=1.0, ki=0.05)
-  for _ in range(200):
-    filt.update(np.zeros(3), [DOWN, DOWN], dt=0.01)
-  np.testing.assert_allclose(filt.rotation, np.eye(3), atol=1e-6)
-
-
-def test_filter_tracks_pure_gyro_rotation():
-  """With no usable accelerometer, the estimate is the gyro integral."""
-  filt = AttitudeFilter()
-  omega = np.array([0.0, 0.0, np.pi / 2])
-  for _ in range(100):
-    filt.update(omega, [np.zeros(3)], dt=0.01)
-
-  np.testing.assert_allclose(
-    filt.rotation @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0], atol=1e-6
-  )
-
-
-def test_filter_corrects_an_initial_tilt_error():
-  """Starting wrong, level accelerometers should pull the estimate back."""
-  tilt = rotmat_to_quat(quat_to_rotmat([np.cos(0.1), np.sin(0.1), 0.0, 0.0]))
-  filt = AttitudeFilter(kp=1.0, q0=tilt)
-
-  start = abs(filt.rotation[2, 2])
-  for _ in range(500):
-    filt.update(np.zeros(3), [DOWN], dt=0.01)
-
-  assert abs(filt.rotation[2, 2]) > start
-  assert abs(filt.rotation[2, 2]) == pytest.approx(1.0, abs=1e-4)
-
-
-def test_cross_check_reports_solver_agreement():
-  """The diagnostic is opt-in; both solvers must still agree when it is on."""
-  filt = AttitudeFilter(cross_check=True)
-  filt.update(np.zeros(3), [DOWN, DOWN], dt=0.01)
-  assert filt.solver_disagreement < 1e-6
