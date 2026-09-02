@@ -54,7 +54,6 @@
         build-system = [ python.pkgs.setuptools ];
         dependencies = with python.pkgs; [
           numpy
-          scipy
           pandas
           torch
           gpytorch
@@ -72,8 +71,6 @@
         torch
         gpytorch
         scikit-learn
-        lightgbm
-        joblib
         posix-ipc
         tkinter # plt.show() needs a backend
         pytest

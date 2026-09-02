@@ -9,7 +9,6 @@ description = "Terrain-aided pose estimation for an underwater vehicle"
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
-    "scipy",
     "pandas",
     "torch",
     "gpytorch",
@@ -19,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Used by experiments/, not by the auv_pose package itself.
-experiments = ["matplotlib", "lightgbm", "joblib"]
+experiments = ["matplotlib"]
 test = ["pytest"]
 
 [tool.setuptools.packages.find]

@@ -4,8 +4,6 @@ Organised by causality:
 
 ``quaternion``
     Rotation algebra.
-``wahba``
-    Static attitude determination -- observations in, attitude out, no state.
 ``strapdown``
     Open-loop inertial propagation. No correction, no uncertainty.
 ``filters``
@@ -33,7 +31,6 @@ Quaternions
 """
 
 from auv_pose.estimation.filters import (
-  AttitudeFilter,
   ConstantVelocityEKF,
   Filter,
   position,
@@ -52,22 +49,15 @@ from auv_pose.estimation.quaternion import (
 from auv_pose.estimation.smoothers import rts_smooth
 from auv_pose.estimation.strapdown import StrapdownIntegrator
 from auv_pose.estimation.typing import GaussianState, Measurement, Step
-from auv_pose.estimation.wahba import (
-  accel_weight,
-  wahba_davenport,
-  wahba_svd,
-)
 
 __all__ = [
   "G_NED",
-  "AttitudeFilter",
   "ConstantVelocityEKF",
   "Filter",
   "GaussianState",
   "Measurement",
   "Step",
   "StrapdownIntegrator",
-  "accel_weight",
   "position",
   "quat_conjugate",
   "quat_from_gyro",
@@ -78,6 +68,4 @@ __all__ = [
   "rts_smooth",
   "skew",
   "velocity",
-  "wahba_davenport",
-  "wahba_svd",
 ]

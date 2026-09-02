@@ -5,6 +5,9 @@
 result
 result-*
 
+# Generated plots -- regenerate with train_map.py / plot_trajectory.py
+*.png
+
 # Python
 __pycache__/
 *.pyc

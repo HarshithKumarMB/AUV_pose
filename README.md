@@ -24,7 +24,7 @@ client on `PYTHONPATH`.
 the simulator environment, use the package form:
 
 ```
-nix run .#sim -- -c "python map.py"
+nix run .#sim -- -c "python experiments/navigate.py"
 ```
 
 The simulator worlds are a **5.2 GB** download, not included. Once:
@@ -50,19 +50,14 @@ soundings). Every script takes `--help`.
 
 ### Other experiments
 
-- `sidescan_nav.py` — navigation corrected by matching sidescan returns against a
-  labelled obstacle map (`obstacle_train.py`, `obstacle_predict.py`).
 - `sonar_survey.py` — live sonar viewer, imaging or sidescan, with optional IMU
-  dead reckoning.
-
-These need labelled obstacle CSVs that are **not in this repository**; pass them
-with `--obstacles`.
+  dead reckoning. For inspecting raw returns; not part of the pipeline.
 
 ## Layout
 
 ```
 auv_pose/                    # algorithms -- importable, no I/O, no simulator
-  smoothing/                 # quaternion, wahba, strapdown, filters, smoothers
+  estimation/                # quaternion, strapdown, filters, smoothers
   mapping/                   # SVGP bathymetry, sonar range extraction
   io/                        # soundings, checkpoints, run logs
 experiments/                 # runnable scripts composing auv_pose
@@ -78,7 +73,7 @@ HoloOcean lives in `experiments/`.
 ## Tests
 
 ```
-nix develop --command pytest      # 135 tests, none need the simulator
+nix develop --command pytest      # 109 tests, none need the simulator
 nix flake check                   # the same suite, in a sandbox
 ```
 
@@ -88,10 +83,9 @@ world at import time, so collecting them would launch the simulator.
 ## Conventions
 
 `auv_pose/estimation/` is organised by causality: `filters.py` holds causal
-recursive estimators, `smoothers.py` the non-causal backward pass, and `wahba.py`
-the memoryless attitude solvers. State is a value passed through
-`predict(state, ...)` and `condition(state, obs)`, so a run's history is a list of
-values and smoothing is a pure function over it.
+recursive estimators and `smoothers.py` the non-causal backward pass. State is a
+value passed through `predict(state, ...)` and `condition(state, obs)`, so a run's
+history is a list of values and smoothing is a pure function over it.
 
 World frame is **NED** — x north, y east, **z down** — matching HoloOcean's sensors
 in the `IMUSocket`, with gravity `[0, 0, +9.81]`. Quaternions are scalar-first
