@@ -5,8 +5,10 @@
 result
 result-*
 
-# Generated plots -- regenerate with train_map.py / plot_trajectory.py
+# Generated plots -- regenerate with train_map.py / plot_trajectory.py.
+# visuals/ is the exception: figures kept deliberately, not scratch output.
 *.png
+!visuals/*.png
 
 # Python
 __pycache__/
