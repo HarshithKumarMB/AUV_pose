@@ -219,6 +219,15 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--raw-dvl-axes",
+    action="store_true",
+    help=(
+      "read the DVL without applying DVL_AXES. Its y and z are inverted "
+      "relative to the OrientationSensor frame, so this reproduces the runs "
+      "where adding a DVL bought nothing"
+    ),
+  )
+  parser.add_argument(
     "--sigma-dvl",
     type=float,
     default=0.02,
@@ -401,7 +410,8 @@ def main() -> None:
       if not args.no_dvl:
         # Body-frame velocity over ground, rotated into the world by the
         # current attitude estimate.
-        dvl_body = np.asarray(state["dvl"], dtype=float)[:3] * DVL_AXES
+        axes = 1.0 if args.raw_dvl_axes else DVL_AXES
+        dvl_body = np.asarray(state["dvl"], dtype=float)[:3] * axes
         dvl_world = dead_reckoning.rotation @ dvl_body
 
         # The reading itself is good -- measured speed matches truth to under
