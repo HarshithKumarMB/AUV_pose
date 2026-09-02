@@ -150,6 +150,74 @@ def test_set_attitude_overrides_an_attached_filter():
   assert np.allclose(injected.attitude, turned, atol=1e-3)
 
 
+def test_initial_velocity_is_carried():
+  """Starting from an assumed rest is a bias, not an offset.
+
+  The simulated vehicle is dropped in negatively buoyant and is still sinking
+  at 0.4 m/s when the first tick returns. An integrator started at rest there
+  does not begin 0.4 m/s wrong and recover -- nothing observes velocity in the
+  open loop, so it stays 0.4 m/s wrong and integrates that into 4 m of drift
+  over 10 s.
+  """
+  dr = StrapdownIntegrator(np.zeros(3), LEVEL, velocity=[0.0, 0.0, -0.4])
+
+  for _ in range(1000):
+    dr.step(np.zeros(3), AT_REST, dt=0.01)
+
+  np.testing.assert_allclose(dr.velocity, [0.0, 0.0, -0.4], atol=1e-12)
+  np.testing.assert_allclose(dr.position, [0.0, 0.0, -4.0], atol=1e-9)
+
+
+def test_kinematic_accel_reaches_the_attitude_filter():
+  """Level and accelerating: the tilt the reading implies must not be taken.
+
+  This is the coupling that made dead reckoning come out short. Without the
+  compensation the attitude filter reads the manoeuvre as tilt, and ``step``
+  then rotates by that tilt and cancels most of the same acceleration back out.
+  """
+  from auv_pose.estimation.filters import AttitudeFilter
+
+  accel = np.array([0.5, 0.0, 0.0])
+  reading = AT_REST + accel
+
+  chased = StrapdownIntegrator(
+    np.zeros(3), LEVEL, attitude_filter=AttitudeFilter(kp=1.0, ki=0.0)
+  )
+  compensated = StrapdownIntegrator(
+    np.zeros(3), LEVEL, attitude_filter=AttitudeFilter(kp=1.0, ki=0.0)
+  )
+
+  chased_accel = np.zeros(3)
+  compensated_accel = np.zeros(3)
+  for _ in range(300):
+    chased_accel = chased.step(np.zeros(3), reading, 1 / 30)
+    compensated_accel = compensated.step(np.zeros(3), reading, 1 / 30, accel)
+
+  # Most of the acceleration has been rotated away by the time the attitude
+  # filter has settled on the manoeuvre.
+  assert chased_accel[0] < 0.2
+  np.testing.assert_allclose(compensated_accel, accel, atol=1e-4)
+
+
+def test_kinematic_accel_does_not_enter_the_integration():
+  """It is a gravity reference, not a velocity source.
+
+  Subtracting it from the reading being integrated would quietly turn dead
+  reckoning into a doubly-integrated DVL, which is not the baseline this
+  exists to measure.
+  """
+  from auv_pose.estimation.filters import AttitudeFilter
+
+  dr = StrapdownIntegrator(
+    np.zeros(3), LEVEL, attitude_filter=AttitudeFilter(kp=0.0, ki=0.0)
+  )
+  accel_world = dr.step(
+    np.zeros(3), AT_REST + [1.0, 0.0, 0.0], 0.01, [7.0, 0.0, 0.0]
+  )
+
+  np.testing.assert_allclose(accel_world, [1.0, 0.0, 0.0], atol=1e-9)
+
+
 def test_set_attitude_without_a_filter():
   """Same contract when attitude comes from the gyro alone."""
   integrator = StrapdownIntegrator(np.zeros(3), LEVEL)

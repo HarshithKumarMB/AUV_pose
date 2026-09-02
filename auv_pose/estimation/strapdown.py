@@ -67,7 +67,11 @@ class StrapdownIntegrator:
       attitude_filter.q = self.attitude
 
   def step(
-    self, gyro: ArrayLike, accel_body: ArrayLike, dt: float
+    self,
+    gyro: ArrayLike,
+    accel_body: ArrayLike,
+    dt: float,
+    kinematic_accel: ArrayLike | None = None,
   ) -> NDArray[np.float64]:
     """Advance by one IMU sample.
 
@@ -80,11 +84,20 @@ class StrapdownIntegrator:
     :param accel_body: Body specific force in m/s^2, as an accelerometer
         reports it.
     :param dt: Interval in seconds.
+    :param kinematic_accel: The vehicle's own body-frame acceleration, if some
+        other sensor measures it. Used only to give the attitude filter a
+        gravity reference that survives a manoeuvre -- see
+        :meth:`auv_pose.estimation.filters.AttitudeFilter.update`. Gravity is
+        still removed from the raw ``accel_body`` below, because that is the
+        reading being integrated; subtracting it here as well would integrate
+        the DVL and call the result inertial.
     :return: World-frame linear acceleration with gravity removed -- the
         quantity a position filter wants as its control input.
     """
     if self.attitude_filter is not None:
-      self.attitude = self.attitude_filter.update(gyro, accel_body, dt)
+      self.attitude = self.attitude_filter.update(
+        gyro, accel_body, dt, kinematic_accel
+      )
     else:
       self.attitude = quat_normalize(
         quat_multiply(self.attitude, quat_from_gyro(gyro, dt))

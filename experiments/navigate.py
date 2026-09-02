@@ -17,6 +17,13 @@ Three properties worth knowing before comparing runs:
   direction error tracks the attitude error almost exactly, so the observation
   noise is built as ``sigma_dvl^2 + (speed * sigma_heading)^2``. Nothing here
   observes heading, so that second term is an assumption.
+* **The DVL also feeds the attitude filter**, which is a separate job from
+  aiding velocity. An accelerometer is a gravity reference only at rest;
+  under a manoeuvre the specific force tilts by ``atan(a_h / g)`` and a
+  complementary filter chases that tilt, which then rotates the same
+  acceleration back out of the strapdown. Differentiating the DVL gives the
+  vehicle's own acceleration, so it can be subtracted first. Without a DVL
+  there is nothing to subtract and this is unfixed -- see ``--no-dvl``.
 * **Guidance runs on the estimate**, not on ground truth, so tracking error
   reflects estimator quality honestly.
 
@@ -36,6 +43,7 @@ import numpy as np
 
 from auv_pose.estimation.filters import (
   AttitudeFilter,
+  BodyAcceleration,
   ConstantVelocityEKF,
   position,
   velocity,
@@ -44,6 +52,7 @@ from auv_pose.estimation.quaternion import (
   GRAVITY_NED,
   GRAVITY_NWU,
   quat_angle,
+  quat_to_rotmat,
   rotmat_to_quat,
 )
 from auv_pose.estimation.strapdown import StrapdownIntegrator
@@ -223,8 +232,33 @@ def parse_args() -> argparse.Namespace:
     "--no-dvl",
     action="store_true",
     help=(
-      "drop the DVL velocity measurement. The unaided baseline: velocity is "
-      "then unobservable and position drifts quadratically"
+      "drop the DVL entirely. The unaided baseline: velocity is then "
+      "unobservable and position drifts quadratically, the run starts from an "
+      "assumed rest, and the attitude filter loses its manoeuvre compensation"
+    ),
+  )
+  parser.add_argument(
+    "--settle-steps",
+    type=int,
+    default=60,
+    help=(
+      "ticks with a zero command before the estimators are initialised. The "
+      "vehicle is dropped in negatively buoyant and is still sinking at "
+      "0.4 m/s when the first tick returns; starting an integrator from an "
+      "assumed rest there costs 4 m of vertical drift over 10 s"
+    ),
+  )
+  parser.add_argument(
+    "--dvl-accel-tau",
+    type=float,
+    default=0.1,
+    help=(
+      "time constant of the low-pass on DVL velocity before it is differenced "
+      "for the attitude filter's manoeuvre compensation, s. Lag and noise pull "
+      "opposite ways and the minimum-error choice is the wrong one: 0.3-0.5 "
+      "minimises rms error on the acceleration but lags it by 30-40%%, and that "
+      "shortfall is systematic where the noise at 0.1 is not. Measured mean "
+      "attitude error over a run: 0.56 deg at 0.5, 0.28 at 0.1, 0.38 at 0.05"
     ),
   )
   parser.add_argument(
@@ -365,27 +399,51 @@ def main() -> None:
   )
   state = env.tick()
 
+  # The vehicle is dropped in negatively buoyant and has not settled by the
+  # first tick -- it is sinking at 0.4 m/s. Let it ride that out under no
+  # thrust, then start from what the DVL says it is actually doing. Both
+  # matter: an integrator started from an assumed rest carries that 0.4 m/s as
+  # a bias for the whole run, which is 4 m of vertical drift over 10 s and was
+  # the entire dead-reckoning error in the vertical channel.
+  command = np.zeros(8)
+  for _ in range(args.settle_steps):
+    state = env.step(command)
+
   start_position = np.array(state["pose"])[:3, 3]
   attitude = rotmat_to_quat(np.array(state["orient"], dtype=float))
+
+  if args.no_dvl:
+    start_velocity = np.zeros(3)
+  else:
+    start_velocity = (
+      quat_to_rotmat(attitude) @ np.asarray(state["dvl"], dtype=float)[:3]
+    )
 
   gravity = GRAVITY_NED if args.legacy_frames else GRAVITY_NWU
 
   ekf = ConstantVelocityEKF(accel_process_sigma=0.5)
-  estimate = ekf.initial(start_position)
+  estimate = ekf.initial(start_position, start_velocity)
   attitude_filter = (
     None
     if args.gyro_only
     else AttitudeFilter(kp=args.attitude_kp, q0=attitude, gravity=gravity)
   )
   dead_reckoning = StrapdownIntegrator(
-    start_position, attitude, attitude_filter=attitude_filter, gravity=gravity
+    start_position,
+    attitude,
+    velocity=start_velocity,
+    attitude_filter=attitude_filter,
+    gravity=gravity,
   )
+  # Feeds the attitude filter the vehicle's own acceleration so it is not
+  # mistaken for tilt. Unused under --no-dvl, where there is nothing to
+  # measure it with.
+  body_acceleration = BodyAcceleration(tau=args.dvl_accel_tau)
 
   measurement_noise = np.diag([args.sigma_map**2, args.sigma_depth**2])
   depth_only_noise = measurement_noise[1:, 1:]
 
   follower = WaypointFollower(WAYPOINTS, args.arrival_radius)
-  command = np.zeros(8)
 
   with CsvLogger(args.out, COLUMNS) as log:
     for step in range(args.max_steps):
@@ -402,9 +460,24 @@ def main() -> None:
         # a single sample of error rather than none.
         dead_reckoning.set_attitude(truth_attitude)
 
+      # Read the DVL before the strapdown, not after: the attitude filter
+      # inside it needs the vehicle's own acceleration to tell a manoeuvre
+      # apart from a tilt. Rotating the reading into the world stays below, so
+      # the velocity measurement still uses the post-update attitude.
+      if args.no_dvl:
+        dvl_body = None
+        kinematic_accel = None
+      else:
+        dvl_body = np.asarray(state["dvl"], dtype=float)[:3]
+        if args.legacy_frames:
+          dvl_body = dvl_body * np.array([1.0, -1.0, -1.0])
+        kinematic_accel = body_acceleration.update(dvl_body, gyro_body, dt)
+
       # Strapdown gives both the honest dead-reckoning baseline and the
       # world-frame acceleration the filter needs as its control input.
-      accel_world = dead_reckoning.step(gyro_body, accel_body, dt)
+      accel_world = dead_reckoning.step(
+        gyro_body, accel_body, dt, kinematic_accel
+      )
       attitude_error = np.degrees(
         quat_angle(dead_reckoning.attitude, truth_attitude)
       )
@@ -425,12 +498,9 @@ def main() -> None:
           )
         ]
 
-      if not args.no_dvl:
+      if dvl_body is not None:
         # Body-frame velocity over ground, rotated into the world by the
         # current attitude estimate.
-        dvl_body = np.asarray(state["dvl"], dtype=float)[:3]
-        if args.legacy_frames:
-          dvl_body = dvl_body * np.array([1.0, -1.0, -1.0])
         dvl_world = dead_reckoning.rotation @ dvl_body
 
         # The reading itself is good -- measured speed matches truth to under

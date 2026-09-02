@@ -5,6 +5,7 @@ import pytest
 
 from auv_pose.estimation.filters import (
   AttitudeFilter,
+  BodyAcceleration,
   ConstantVelocityEKF,
   gravity_trust,
   position,
@@ -269,3 +270,89 @@ def test_attitude_filter_ignores_a_dead_accelerometer():
   np.testing.assert_allclose(
     filt.rotation @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0], atol=1e-6
   )
+
+
+def test_gravity_trust_is_blind_to_a_horizontal_manoeuvre():
+  """Why distrusting on magnitude was not enough.
+
+  A horizontal component adds to gravity in quadrature, so the acceleration an
+  AUV actually flies barely moves ``|f|`` -- while tilting it by degrees. The
+  20 m/s^2 case above is the one a magnitude test can see; this is the one that
+  matters, and it sails straight through.
+  """
+  cruise = LEVEL_ACCEL + np.array([0.5, 0.0, 0.0])
+
+  assert gravity_trust(cruise) > 0.99
+  assert np.degrees(np.arctan(0.5 / 9.81)) == pytest.approx(2.9, abs=0.1)
+
+
+def test_attitude_filter_chases_an_unmodelled_manoeuvre():
+  """The defect ``kinematic_accel`` exists to fix.
+
+  Level, perfect gyro, accelerating gently forward. The specific force tilts by
+  ``atan(a/g)`` and the filter follows it, because from one accelerometer a
+  manoeuvre and a tilt are the same observation. What makes this expensive is
+  not the attitude error itself but that the strapdown integrating the same
+  reading then rotates the acceleration back out from under itself, so dead
+  reckoning comes out short rather than merely noisy.
+  """
+  accel = np.array([0.5, 0.0, 0.0])
+  reading = LEVEL_ACCEL + accel
+
+  filt = AttitudeFilter(kp=1.0, ki=0.0)
+  for _ in range(300):
+    filt.update(np.zeros(3), reading, dt=1 / 30)
+
+  assert np.degrees(quat_angle(filt.q, IDENTITY_Q)) == pytest.approx(
+    np.degrees(np.arctan(0.5 / 9.81)), abs=0.2
+  )
+
+
+def test_kinematic_accel_makes_the_reference_survive_a_manoeuvre():
+  """The same run, told what the vehicle is doing."""
+  accel = np.array([0.5, 0.0, 0.0])
+  reading = LEVEL_ACCEL + accel
+
+  filt = AttitudeFilter(kp=1.0, ki=0.0)
+  for _ in range(300):
+    filt.update(np.zeros(3), reading, dt=1 / 30, kinematic_accel=accel)
+
+  assert np.degrees(quat_angle(filt.q, IDENTITY_Q)) < 0.01
+  assert filt.trust > 0.999
+
+
+def test_body_acceleration_recovers_a_straight_line_acceleration():
+  """Differencing the DVL, once the low-pass has caught up."""
+  body_accel = BodyAcceleration(tau=0.2)
+  dt = 1 / 30
+
+  speed = 0.0
+  for _ in range(300):
+    speed += 0.5 * dt
+    recovered = body_accel.update([speed, 0.0, 0.0], np.zeros(3), dt)
+
+  np.testing.assert_allclose(recovered, [0.5, 0.0, 0.0], atol=0.01)
+
+
+def test_body_acceleration_includes_the_transport_term():
+  """A body frame turning under a constant body velocity still accelerates.
+
+  ``omega x v`` needs no differencing and no smoothing, so it is exact from the
+  second sample -- and in a turn at speed it is the larger of the two terms.
+  """
+  body_accel = BodyAcceleration(tau=0.5)
+  velocity_body = np.array([1.0, 0.0, 0.0])
+  omega = np.array([0.0, 0.0, 0.5])
+  dt = 1 / 30
+
+  body_accel.update(velocity_body, omega, dt)
+  recovered = body_accel.update(velocity_body, omega, dt)
+
+  np.testing.assert_allclose(recovered, [0.0, 0.5, 0.0], atol=1e-12)
+
+
+def test_body_acceleration_starts_at_zero():
+  """One sample cannot be differenced; say so rather than inventing a step."""
+  body_accel = BodyAcceleration()
+  first = body_accel.update([1.0, 2.0, 3.0], np.zeros(3), 1 / 30)
+  np.testing.assert_allclose(first, np.zeros(3))

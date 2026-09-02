@@ -30,6 +30,7 @@ from auv_pose.estimation.typing import (
 
 __all__ = [
   "AttitudeFilter",
+  "BodyAcceleration",
   "ConstantVelocityEKF",
   "Filter",
   "gravity_trust",
@@ -256,6 +257,16 @@ def gravity_trust(accel_body: ArrayLike, sharpness: float = 5.0) -> float:
   while the vehicle is unaccelerated. The further its magnitude departs from
   ``g``, the more of what it reads is manoeuvre rather than gravity.
 
+  **A magnitude test is nearly blind to the acceleration that matters.** A
+  horizontal component adds to ``g`` in quadrature, so 0.5 m/s^2 sideways moves
+  ``|f|`` by 0.13% and leaves this at 0.99 -- while tilting the vector by 2.9
+  degrees, which is the whole error. What it detects well is acceleration
+  *along* gravity, the one direction that induces no tilt at all. It is a
+  sanity check on a reference, not a substitute for one: pass
+  :class:`AttitudeFilter` a ``kinematic_accel`` so this is applied to a
+  compensated vector, where a large residual really does mean the compensation
+  failed.
+
   :param accel_body: Body-frame specific force in m/s^2.
   :param sharpness: How quickly trust falls away from 1 g.
   :return: Weight in ``(0, 1]``, exactly 1 at ``|a| = g``.
@@ -263,6 +274,58 @@ def gravity_trust(accel_body: ArrayLike, sharpness: float = 5.0) -> float:
   magnitude = float(np.linalg.norm(accel_body))
   gravity = GRAVITY
   return float(np.exp(-sharpness * abs(magnitude / gravity - 1.0)))
+
+
+class BodyAcceleration:
+  """The vehicle's own acceleration in the body frame, from a DVL and a gyro.
+
+  A body-frame velocity differentiates as ``a = dv/dt + omega x v``: the second
+  term is there because the frame itself is turning. It costs nothing -- no
+  differencing, no smoothing -- and during a turn it is the larger of the two,
+  so it is worth having even where the first term is too noisy to use.
+
+  The first term is not free: differencing the raw reading at 30 Hz gives about
+  1.3 m/s^2 of noise against a signal of order 0.2, so the velocity is
+  low-passed first. **Do not tune ``tau`` to minimise error on the
+  acceleration.** That lands around 0.3-0.5 s, where the estimate also lags the
+  truth by 30-40% -- and a shortfall that tracks the manoeuvre is exactly the
+  systematic error being removed here, while the noise traded for it is
+  zero-mean and averages out in the proportional gain downstream. Measured on a
+  10 s run, mean attitude error goes 0.56 deg at ``tau = 0.5``, 0.28 at 0.1,
+  0.38 at 0.05, where the minimum-rms choice would have picked 0.5.
+
+  :param tau: Time constant of the low-pass on velocity, seconds. Also roughly
+      the lag of the differenced term.
+  """
+
+  def __init__(self, tau: float = 0.1) -> None:
+    self.tau = tau
+    self.velocity: NumpyArray | None = None
+
+  def update(
+    self, velocity_body: ArrayLike, gyro: ArrayLike, dt: float
+  ) -> NumpyArray:
+    """Advance by one DVL sample.
+
+    :param velocity_body: Velocity over ground in the body frame, m/s.
+    :param gyro: Body angular rate in rad/s.
+    :param dt: Interval in seconds.
+    :return: Body-frame acceleration, m/s^2. Zero on the first sample, where
+        there is nothing to difference against.
+    """
+    measured = np.asarray(velocity_body, dtype=float)
+
+    if self.velocity is None:
+      self.velocity = measured
+      return np.zeros(3)
+
+    previous = self.velocity
+    alpha = dt / (self.tau + dt)
+    self.velocity = previous + alpha * (measured - previous)
+
+    return (self.velocity - previous) / dt + np.cross(
+      np.asarray(gyro, dtype=float), self.velocity
+    )
 
 
 class AttitudeFilter:
@@ -280,6 +343,15 @@ class AttitudeFilter:
   returns an attitude whose yaw error equals the true yaw exactly, because it
   always answers "zero heading". Roll and pitch are bounded here; heading still
   drifts with the gyro and needs a magnetometer, a DVL, or terrain to bound it.
+
+  **An accelerometer is only a gravity reference at rest.** Specific force is
+  ``f = a - g``, so under a horizontal manoeuvre ``a_h`` it tilts away from
+  ``-g`` by ``atan(a_h / g)`` and this filter chases that tilt as if it were
+  orientation. That is not a small effect and it is not zero-mean: it tracks the
+  manoeuvre, so the strapdown integrating the same reading has the acceleration
+  rotated back out from under it. Pass ``kinematic_accel`` -- the vehicle's own
+  acceleration, from a DVL -- to subtract it first and leave a reference that is
+  valid while accelerating. See :meth:`update`.
 
   :param kp: Proportional gain on the tilt error, 1/s.
   :param ki: Integral gain feeding the gyro bias estimate, 1/s^2.
@@ -309,26 +381,40 @@ class AttitudeFilter:
     self.trust = 0.0
 
   def update(
-    self, gyro: ArrayLike, accel_body: ArrayLike, dt: float
+    self,
+    gyro: ArrayLike,
+    accel_body: ArrayLike,
+    dt: float,
+    kinematic_accel: ArrayLike | None = None,
   ) -> NumpyArray:
     """Advance the estimate by one IMU sample.
 
     :param gyro: Body angular rate in rad/s.
     :param accel_body: Body-frame specific force in m/s^2.
     :param dt: Interval in seconds.
+    :param kinematic_accel: The vehicle's own acceleration in the body frame,
+        m/s^2. Subtracted from the specific force before it is used as a gravity
+        reference, which is what makes the correction valid under a manoeuvre
+        rather than merely gated off during one. Omit it and the reference is
+        the raw accelerometer, tilt error and all.
     :return: Updated orientation quaternion.
     """
     accel_body = np.asarray(accel_body, dtype=float)
     omega = np.asarray(gyro, dtype=float) - self.bias
 
-    magnitude = np.linalg.norm(accel_body)
+    # What the accelerometer would read if the vehicle were not manoeuvring.
+    reference = accel_body
+    if kinematic_accel is not None:
+      reference = reference - np.asarray(kinematic_accel, dtype=float)
+
+    magnitude = np.linalg.norm(reference)
     if magnitude > 1e-6:
       # At rest the accelerometer reads -g, so measured "down" is -a.
-      measured_down = -accel_body / magnitude
+      measured_down = -reference / magnitude
       # Where the current estimate says "down" is, in the body frame.
       predicted_down = quat_to_rotmat(self.q).T @ self.down
 
-      self.trust = gravity_trust(accel_body)
+      self.trust = gravity_trust(reference)
       error = self.trust * np.cross(measured_down, predicted_down)
 
       self.bias = self.bias - self.ki * error * dt
