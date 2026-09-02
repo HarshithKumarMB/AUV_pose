@@ -117,10 +117,23 @@ COLUMNS = (
   "dvl_vx",
   "dvl_vy",
   "dvl_vz",
+  # Gyro as read, alongside the truth orientation it is meant to propagate.
+  # Together they recover the truth body rate as 2 vec(q_k* (x) q_k+1) / dt,
+  # which is what identifies a frame error in the gyro -- the DVL's axes
+  # turned out to be flipped, and nothing rules the gyro's out.
+  "wx",
+  "wy",
+  "wz",
+  "true_qw",
+  "true_qx",
+  "true_qy",
+  "true_qz",
 )
 
 
-def build_scenario(octree_min: float) -> dict:
+def build_scenario(
+  octree_min: float, accel_bias_sigma: float, ang_vel_bias_sigma: float
+) -> dict:
   return ocean_scenario(
     "terrain_aided_navigation",
     start=START,
@@ -129,7 +142,12 @@ def build_scenario(octree_min: float) -> dict:
       pose_sensor(),
       orientation_sensor(),
       depth_sensor(hz=TICK_RATE_HZ),
-      imu_sensor("imu_1", hz=TICK_RATE_HZ),
+      imu_sensor(
+        "imu_1",
+        hz=TICK_RATE_HZ,
+        accel_bias_sigma=accel_bias_sigma,
+        ang_vel_bias_sigma=ang_vel_bias_sigma,
+      ),
       dvl_sensor("dvl", hz=TICK_RATE_HZ),
       singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ, **SONAR),
     ],
@@ -170,6 +188,26 @@ def parse_args() -> argparse.Namespace:
       "finest octree voxel in metres. holoocean's default of 0.02 is 19x "
       "finer than the singlebeam's 0.39 m range bins and generates octrees "
       "at several GB per minute; 0.1 is still 4x finer than a bin"
+    ),
+  )
+  parser.add_argument(
+    "--accel-bias-sigma",
+    type=float,
+    default=6e-5,
+    help=(
+      "per-sample random-walk increment for the accelerometer bias. Grows as "
+      "sigma*sqrt(n), so this is 0.001 m/s^2 after 300 samples. Pass 0.01 to "
+      "reproduce the runs before the sensor was measured"
+    ),
+  )
+  parser.add_argument(
+    "--gyro-bias-sigma",
+    type=float,
+    default=5e-5,
+    help=(
+      "per-sample random-walk increment for the gyro bias, reaching "
+      "0.05 deg/s after 300 samples. At 0.01 it reaches 14 deg/s, which is "
+      "what drove heading through 70 degrees in 10 s"
     ),
   )
   parser.add_argument(
@@ -297,7 +335,9 @@ def main() -> None:
   dt = 1.0 / TICK_RATE_HZ
 
   env = holoocean.make(
-    scenario_cfg=build_scenario(args.octree_min),
+    scenario_cfg=build_scenario(
+      args.octree_min, args.accel_bias_sigma, args.gyro_bias_sigma
+    ),
     show_viewport=not args.headless,
   )
   state = env.tick()
@@ -435,6 +475,13 @@ def main() -> None:
         dvl_vx=dvl_world[0],
         dvl_vy=dvl_world[1],
         dvl_vz=dvl_world[2],
+        wx=gyro_body[0],
+        wy=gyro_body[1],
+        wz=gyro_body[2],
+        true_qw=truth_attitude[0],
+        true_qx=truth_attitude[1],
+        true_qy=truth_attitude[2],
+        true_qz=truth_attitude[3],
       )
     else:
       # Distinguish "too slow" from "diverged": a crawling but healthy run is

@@ -35,10 +35,26 @@ def imu_sensor(
   hz: int = 30,
   accel_sigma: float = 0.05,
   ang_vel_sigma: float = 0.01,
-  accel_bias_sigma: float = 0.01,
-  ang_vel_bias_sigma: float = 0.01,
+  accel_bias_sigma: float = 6e-5,
+  ang_vel_bias_sigma: float = 5e-5,
 ) -> dict[str, Any]:
-  """An IMU with noise that actually takes effect. Returns ``[accel; ang_vel]``."""
+  """An IMU with noise that actually takes effect. Returns ``[accel; ang_vel]``.
+
+  .. warning::
+
+     The two ``*_bias_sigma`` values are **per-sample random-walk increments**,
+     not standard deviations of a fixed bias. The bias grows as
+     ``sigma * sqrt(n)``, so a value that reads like a plausible IMU spec is
+     off by the square root of the run length. Measured with ``ReturnBias``
+     against a motionless vehicle, ``0.01`` reaches 14 deg/s of gyro bias and
+     0.35 m/s^2 of accelerometer bias after 300 samples at 30 Hz -- roughly
+     200x a real MEMS unit, and enough on its own to swing heading through 70
+     degrees in ten seconds.
+
+     Size them backwards from the bias you want at the end of a run:
+     ``sigma = bias_at_n / sqrt(n)``. The defaults here target about 0.05 deg/s
+     of gyro bias and 0.001 m/s^2 of accelerometer bias over a 300-sample run.
+  """
   return {
     "sensor_name": name,
     "sensor_type": "IMUSensor",

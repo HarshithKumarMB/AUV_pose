@@ -22,6 +22,16 @@ are inverted relative to the frame the `OrientationSensor` reports, so the
 filter was handed a systematically wrong velocity and told to trust it at
 0.1 m/s. In panel (a) that run sits directly on top of the one without a DVL.
 
+**Superseded in part.** Every run above used `ang_vel_bias_sigma=0.01`, which
+`imu_sensor` documented as a bias standard deviation but which HoloOcean applies
+as a *per-sample random-walk increment*. Measured with `ReturnBias` against a
+motionless vehicle, it reaches 14 deg/s of gyro bias and 0.35 m/s^2 of
+accelerometer bias after 300 samples -- around 200x a real MEMS unit. The 70 deg
+of residual heading error, and the ~29 m the truth-attitude bound drifted, were
+both that. With the sigmas sized backwards from a target bias, the same code
+scores 1.1 deg of attitude error and 0.68 m of position error. The attitude and
+DVL fixes below are still real and still necessary; their residuals were not.
+
 Panels: **(a)** position error against ground truth, log scale; **(b)** attitude
 error, the cause; **(c)** acceleration fed to the filter minus the truth, the
 mechanism — gravity failing to cancel as tilt error grows; **(d)** the resulting
