@@ -100,10 +100,11 @@ COLUMNS = (
 )
 
 
-def build_scenario() -> dict:
+def build_scenario(octree_min: float) -> dict:
   return ocean_scenario(
     "terrain_aided_navigation",
     start=START,
+    octree_min=octree_min,
     sensors=[
       pose_sensor(),
       orientation_sensor(),
@@ -139,6 +140,16 @@ def parse_args() -> argparse.Namespace:
     type=float,
     default=0.5,
     help="std of the depth sensor observation, m",
+  )
+  parser.add_argument(
+    "--octree-min",
+    type=float,
+    default=0.02,
+    help=(
+      "finest octree voxel in metres. holoocean's default of 0.02 is 19x "
+      "finer than the singlebeam's 0.39 m range bins and generates octrees "
+      "at several GB per minute; 0.1 is still 4x finer than a bin"
+    ),
   )
   parser.add_argument(
     "--headless",
@@ -208,7 +219,8 @@ def main() -> None:
   dt = 1.0 / TICK_RATE_HZ
 
   env = holoocean.make(
-    scenario_cfg=build_scenario(), show_viewport=not args.headless
+    scenario_cfg=build_scenario(args.octree_min),
+    show_viewport=not args.headless,
   )
   state = env.tick()
 

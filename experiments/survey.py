@@ -48,10 +48,11 @@ def lawnmower(
   return waypoints
 
 
-def build_scenario(start: list[float]) -> dict:
+def build_scenario(start: list[float], octree_min: float) -> dict:
   return ocean_scenario(
     "bathymetry_survey",
     start=start,
+    octree_min=octree_min,
     sensors=[
       pose_sensor(),
       singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ, **SONAR),
@@ -67,6 +68,16 @@ def parse_args() -> argparse.Namespace:
   )
   parser.add_argument("--max-steps", type=int, default=100_000)
   parser.add_argument("--arrival-radius", type=float, default=0.5)
+  parser.add_argument(
+    "--octree-min",
+    type=float,
+    default=0.02,
+    help=(
+      "finest octree voxel in metres. holoocean's default of 0.02 is 19x "
+      "finer than the singlebeam's 0.39 m range bins and generates octrees "
+      "at several GB per minute; 0.1 is still 4x finer than a bin"
+    ),
+  )
   parser.add_argument(
     "--headless",
     action="store_true",
@@ -85,7 +96,7 @@ def main() -> None:
   print(f"{len(waypoints)} waypoints")
 
   env = holoocean.make(
-    scenario_cfg=build_scenario(waypoints[0]),
+    scenario_cfg=build_scenario(waypoints[0], args.octree_min),
     show_viewport=not args.headless,
   )
   ranges = range_bins(
