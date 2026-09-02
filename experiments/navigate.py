@@ -123,6 +123,12 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--max-steps", type=int, default=20_000)
   parser.add_argument("--arrival-radius", type=float, default=0.5)
   parser.add_argument(
+    "--report-every",
+    type=int,
+    default=30,
+    help="print a diagnostic line every N steps; 0 to silence",
+  )
+  parser.add_argument(
     "--sigma-map",
     type=float,
     default=1.0,
@@ -140,6 +146,54 @@ def parse_args() -> argparse.Namespace:
     help="run with -RenderOffScreen, for machines without a usable display",
   )
   return parser.parse_args()
+
+
+def innovation(step_record, observations) -> np.ndarray:
+  """Measurement minus prediction, before conditioning.
+
+  The sharpest early signal that something is wrong. A frame convention error,
+  a sign slip in the strapdown, or a bad map lookup shows up here as a large
+  innovation on the very first ticks, where the position error would take
+  thousands of steps to become obviously wrong.
+
+  :param step_record: The :class:`Step` the filter just recorded.
+  :param observations: Measurements conditioned on this step.
+  :return: Concatenated residuals, empty if there were no observations.
+  """
+  residuals = [
+    np.asarray(obs.z, dtype=float)
+    - np.atleast_2d(obs.H) @ step_record.prior.mean
+    for obs in observations
+  ]
+  return np.concatenate(residuals) if residuals else np.empty(0)
+
+
+def report(
+  step,
+  step_record,
+  observations,
+  truth,
+  estimate,
+  dead_reckoned,
+  sonar_range,
+  map_depth,
+  waypoint,
+) -> None:
+  """One diagnostic line.
+
+  Ground truth appears here and in the log only. It never enters the filter or
+  the controller.
+  """
+  ekf_error = np.linalg.norm(truth - position(estimate))
+  dr_error = np.linalg.norm(truth - dead_reckoned)
+  resid = innovation(step_record, observations)
+  resid_text = np.array2string(resid, precision=2, suppress_small=True)
+
+  print(
+    f"step {step:6d} | wp {waypoint} | ekf {ekf_error:7.2f} m | "
+    f"dr {dr_error:8.2f} m | sonar {sonar_range:6.2f} | "
+    f"map {map_depth:8.2f} | innov {resid_text}"
+  )
 
 
 def main() -> None:
@@ -202,6 +256,19 @@ def main() -> None:
       estimated_position = position(estimate)
       estimated_velocity = velocity(estimate)
 
+      if args.report_every and step % args.report_every == 0:
+        report(
+          step,
+          ekf.history[-1],
+          observations,
+          truth,
+          estimate,
+          dead_reckoning.position,
+          sonar_range,
+          map_depth,
+          follower.index,
+        )
+
       command_or_none = follower.command(estimated_position)
       if command_or_none is None:
         if follower.finished:
@@ -235,8 +302,15 @@ def main() -> None:
         dr_vz=dead_reckoning.velocity[2],
       )
     else:
+      # Distinguish "too slow" from "diverged": a crawling but healthy run is
+      # making progress toward its waypoint, a broken one is not.
+      remaining = np.linalg.norm(follower.target - position(estimate))
       print(
-        f"stopped after {args.max_steps} steps without finishing the course"
+        f"stopped after {args.max_steps} steps "
+        f"({args.max_steps / TICK_RATE_HZ:.0f} s simulated) "
+        f"having reached {follower.index} of {len(WAYPOINTS)} waypoints; "
+        f"{remaining:.1f} m from the next. Raise --max-steps if it was still "
+        f"closing, otherwise the estimate has diverged."
       )
 
   print(f"Wrote {args.out}")

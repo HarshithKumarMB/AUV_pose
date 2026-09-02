@@ -135,14 +135,18 @@
         sim = simFhs;
       };
 
-      # experiments/ is copied for tests/test_guidance.py; neither guidance.py nor
-      # experiments/__init__.py imports holoocean, so collection stays
-      # simulator-free. map*.csv are copied because tests/test_soundings.py asserts
-      # against the committed survey data, guarding it from schema drift.
+      # Mirrors the dev shell so the two cannot disagree: experiments/ for the
+      # tests that import it, vendor/ on PYTHONPATH because navigate.py imports
+      # holoocean at module scope, and map*.csv because tests/test_soundings.py
+      # asserts against the committed survey data.
+      #
+      # Importing holoocean does not start the simulator -- only holoocean.make
+      # does -- and testpaths keeps collection to tests/, so nothing here can
+      # launch a world.
       checks.${system}.pytest = pkgs.runCommand "auv-pose-pytest" { } ''
-        cp -r ${./.}/{auv_pose,experiments,tests,pyproject.toml,map.csv,map1.csv} .
+        cp -r ${./.}/{auv_pose,experiments,tests,vendor,pyproject.toml,map.csv,map1.csv} .
         chmod -R +w .
-        export PYTHONPATH=$PWD
+        export PYTHONPATH="$PWD:$PWD/${holooceanDir}/src"
         export HOME=$TMPDIR
         export MPLBACKEND=Agg
         ${pyEnv}/bin/pytest
