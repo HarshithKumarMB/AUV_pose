@@ -135,8 +135,11 @@ def score(bathymetry, X, y, train, test, neighbours: int = 4) -> None:
   )
   if gp_rmse > knn_rmse:
     print(
-      "  *** the GP is worse than averaging its neighbours; it is underfit or "
-      "mis-specified, not merely imprecise ***"
+      "  *** worse than averaging its neighbours. Either the fit has not "
+      "converged -- check the ELBO trace above -- or the soundings carry "
+      "structure finer than the survey resolves, which no model recovers. "
+      "Fitting a known analytic surface at the same sounding positions tells "
+      "the two apart ***"
     )
 
 
