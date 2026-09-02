@@ -130,3 +130,69 @@ def test_waypoints_are_copied_from_a_list():
   follower = WaypointFollower([[1.0, 2.0, 3.0]])
   assert follower.waypoints.shape == (1, 3)
   assert follower.waypoints.dtype == float
+
+
+# Documented BlueROV2 geometry from holoocean.agents.HoveringAUV: unit thrust
+# directions and their positions in the body frame.
+_S = 1.0 / np.sqrt(2.0)
+THRUSTER_DIR = np.array(
+  [
+    [0, 0, 1],
+    [0, 0, 1],
+    [0, 0, 1],
+    [0, 0, 1],
+    [_S, _S, 0],
+    [_S, -_S, 0],
+    [_S, _S, 0],
+    [_S, -_S, 0],
+  ],
+  dtype=float,
+)
+THRUSTER_POS = np.array(
+  [
+    [0.25, -0.22, -0.04],
+    [0.25, 0.22, -0.04],
+    [-0.25, 0.22, -0.04],
+    [-0.25, -0.22, -0.04],
+    [0.14, -0.18, 0.0],
+    [0.14, 0.18, 0.0],
+    [-0.14, 0.18, 0.0],
+    [-0.14, -0.18, 0.0],
+  ],
+  dtype=float,
+)
+
+
+def _moment(command):
+  return np.cross(THRUSTER_POS, THRUSTER_DIR * command[:, None]).sum(axis=0)
+
+
+@pytest.mark.parametrize(
+  "error",
+  [
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [3.0, -2.0, 1.5],
+    # Saturating, and asymmetric in y so that e_x + e_y and e_x - e_y clip by
+    # different amounts -- the case that used to leave a yaw moment behind.
+    [40.0, -15.0, -5.0],
+    [1e4, -1e4, 1e3],
+  ],
+)
+def test_command_is_torque_free_even_when_saturated(error):
+  """Thrust may be capped, but never at the cost of spinning the vehicle."""
+  command = thruster_command(error)
+  assert np.all(np.abs(command) <= THRUST_LIMIT + 1e-9)
+  np.testing.assert_allclose(_moment(command), np.zeros(3), atol=1e-9)
+
+
+def test_saturation_preserves_the_commanded_direction():
+  """Scaling, not clipping: a capped command still points where it should."""
+  error = [40.0, -15.0, -5.0]
+  capped = thruster_command(error)
+  unlimited = thruster_command(np.asarray(error) / 1000.0)
+  cos = (
+    capped @ unlimited / (np.linalg.norm(capped) * np.linalg.norm(unlimited))
+  )
+  np.testing.assert_allclose(cos, 1.0, atol=1e-12)

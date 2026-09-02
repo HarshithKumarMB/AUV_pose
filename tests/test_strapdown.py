@@ -121,3 +121,39 @@ def test_rotation_matches_the_attitude_quaternion():
   np.testing.assert_allclose(
     rotmat_to_quat(dr.rotation), dr.attitude, atol=1e-12
   )
+
+
+def test_set_attitude_overrides_an_attached_filter():
+  """A bare assignment is discarded; ``set_attitude`` must survive a step.
+
+  ``step`` takes its next attitude from the filter's own state, so injecting a
+  known attitude by assigning to :attr:`attitude` silently does nothing as soon
+  as a filter is attached -- which is exactly how a ground-truth diagnostic
+  quietly turns into a second copy of the run it was meant to bound.
+  """
+  from auv_pose.estimation.filters import AttitudeFilter
+
+  turned = quat_from_gyro([0.0, 0.0, 1.0], np.pi / 2)
+
+  drifted = StrapdownIntegrator(
+    np.zeros(3), LEVEL, attitude_filter=AttitudeFilter(q0=LEVEL)
+  )
+  drifted.attitude = turned
+  drifted.step(np.zeros(3), AT_REST, 0.01)
+  assert not np.allclose(drifted.attitude, turned, atol=1e-3)
+
+  injected = StrapdownIntegrator(
+    np.zeros(3), LEVEL, attitude_filter=AttitudeFilter(q0=LEVEL)
+  )
+  injected.set_attitude(turned)
+  injected.step(np.zeros(3), AT_REST, 0.01)
+  assert np.allclose(injected.attitude, turned, atol=1e-3)
+
+
+def test_set_attitude_without_a_filter():
+  """Same contract when attitude comes from the gyro alone."""
+  integrator = StrapdownIntegrator(np.zeros(3), LEVEL)
+  turned = quat_from_gyro([0.0, 0.0, 1.0], np.pi / 2)
+  integrator.set_attitude(turned)
+  integrator.step(np.zeros(3), AT_REST, 0.01)
+  assert np.allclose(integrator.attitude, turned, atol=1e-3)

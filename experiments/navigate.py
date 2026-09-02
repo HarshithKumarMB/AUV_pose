@@ -382,7 +382,7 @@ def main() -> None:
         # Diagnostic bisection only -- see --truth-attitude. step() still
         # propagates one dt of gyro from here, so the rotation it uses carries
         # a single sample of error rather than none.
-        dead_reckoning.attitude = truth_attitude
+        dead_reckoning.set_attitude(truth_attitude)
 
       # Strapdown gives both the honest dead-reckoning baseline and the
       # world-frame acceleration the filter needs as its control input.

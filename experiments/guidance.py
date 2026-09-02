@@ -20,14 +20,28 @@ def thruster_command(error: ArrayLike) -> NDArray[np.float64]:
 
   Control scheme 0 takes eight thruster values: four vertical, then four in the
   horizontal plane mixed for the BlueROV2's 45-degree vectored layout.
+
+  The mix is torque-free: against the documented thruster geometry, pure surge,
+  sway and heave each produce zero net moment. **Saturating it element-wise is
+  not.** Clipping ``e_x + e_y`` and ``e_x - e_y`` by different amounts leaves
+  the two angled front thrusters unbalanced, and the residual is a yaw moment
+  that appears exactly when the position error is largest. Nothing in the loop
+  observes yaw, so it integrates freely -- measured against the simulator, the
+  vehicle began rotating within sixteen samples of the first horizontal clip and
+  went on to tumble through 135 degrees.
+
+  So scale rather than clip: divide the whole vector down by a single factor
+  when it exceeds the limit, which caps the thrust while preserving both the
+  commanded direction and the torque balance.
   """
   error = np.asarray(error, dtype=float)
   e_x, e_y, e_z = error
-  return np.clip(
-    np.array([e_z, e_z, e_z, e_z, e_x + e_y, e_x - e_y, e_y, -e_y]),
-    -THRUST_LIMIT,
-    THRUST_LIMIT,
-  )
+  command = np.array([e_z, e_z, e_z, e_z, e_x + e_y, e_x - e_y, e_y, -e_y])
+
+  peak = float(np.abs(command).max())
+  if peak > THRUST_LIMIT:
+    command = command * (THRUST_LIMIT / peak)
+  return command
 
 
 class WaypointFollower:

@@ -91,6 +91,18 @@ class StrapdownIntegrator:
 
     return accel_world
 
+  def set_attitude(self, attitude: ArrayLike) -> None:
+    """Override the current orientation, filter included.
+
+    Assigning :attr:`attitude` directly is not enough when an attitude filter
+    is attached: :meth:`step` takes its next attitude from the filter's own
+    state, so a bare assignment is discarded on the following sample. Use this
+    for diagnostics that inject a known attitude.
+    """
+    self.attitude = quat_normalize(attitude)
+    if self.attitude_filter is not None:
+      self.attitude_filter.q = self.attitude
+
   @property
   def rotation(self) -> NDArray[np.float64]:
     """Current orientation as a rotation matrix, body to world."""
