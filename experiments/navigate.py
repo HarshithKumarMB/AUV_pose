@@ -28,6 +28,7 @@ import holoocean
 import numpy as np
 
 from auv_pose.estimation.filters import (
+  AttitudeFilter,
   ConstantVelocityEKF,
   position,
   velocity,
@@ -155,6 +156,21 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--gyro-only",
+    action="store_true",
+    help=(
+      "propagate attitude from the gyro with no accelerometer correction. "
+      "The uncorrected baseline: attitude then drifts without bound and "
+      "gravity leaks into the acceleration as g*sin(theta)"
+    ),
+  )
+  parser.add_argument(
+    "--attitude-kp",
+    type=float,
+    default=1.0,
+    help="proportional gain on the tilt correction, 1/s",
+  )
+  parser.add_argument(
     "--truth-attitude",
     action="store_true",
     help=(
@@ -249,7 +265,12 @@ def main() -> None:
 
   ekf = ConstantVelocityEKF(accel_process_sigma=0.5)
   estimate = ekf.initial(start_position)
-  dead_reckoning = StrapdownIntegrator(start_position, attitude)
+  attitude_filter = (
+    None if args.gyro_only else AttitudeFilter(kp=args.attitude_kp, q0=attitude)
+  )
+  dead_reckoning = StrapdownIntegrator(
+    start_position, attitude, attitude_filter=attitude_filter
+  )
 
   measurement_noise = np.diag([args.sigma_map**2, args.sigma_depth**2])
   depth_only_noise = measurement_noise[1:, 1:]

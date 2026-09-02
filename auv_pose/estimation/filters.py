@@ -13,6 +13,13 @@ from collections.abc import Iterable
 import numpy as np
 from numpy.typing import ArrayLike
 
+from auv_pose.estimation.quaternion import (
+  G_NED,
+  quat_from_gyro,
+  quat_multiply,
+  quat_normalize,
+  quat_to_rotmat,
+)
 from auv_pose.estimation.typing import (
   GaussianState,
   Measurement,
@@ -21,8 +28,10 @@ from auv_pose.estimation.typing import (
 )
 
 __all__ = [
+  "AttitudeFilter",
   "ConstantVelocityEKF",
   "Filter",
+  "gravity_trust",
   "position",
   "velocity",
 ]
@@ -237,3 +246,96 @@ class ConstantVelocityEKF(Filter):
       mean=state.mean + K @ innovation,
       cov=I_KH @ state.cov @ I_KH.T + K @ R @ K.T,
     )
+
+
+def gravity_trust(accel_body: ArrayLike, sharpness: float = 5.0) -> float:
+  """How far to trust an accelerometer as a gravity reference.
+
+  An accelerometer measures specific force, so it points along gravity only
+  while the vehicle is unaccelerated. The further its magnitude departs from
+  ``g``, the more of what it reads is manoeuvre rather than gravity.
+
+  :param accel_body: Body-frame specific force in m/s^2.
+  :param sharpness: How quickly trust falls away from 1 g.
+  :return: Weight in ``(0, 1]``, exactly 1 at ``|a| = g``.
+  """
+  magnitude = float(np.linalg.norm(accel_body))
+  gravity = float(np.linalg.norm(G_NED))
+  return float(np.exp(-sharpness * abs(magnitude / gravity - 1.0)))
+
+
+class AttitudeFilter:
+  """Complementary filter correcting gyro drift against gravity.
+
+  Propagates orientation from the gyro and nudges it so that the accelerometer
+  agrees with where the filter thinks "down" is, accumulating the residual into
+  a gyro bias estimate.
+
+  **Tilt only, by construction.** The correction is the cross product of the
+  measured and predicted gravity directions in the body frame, which is
+  orthogonal to gravity and so has no component about the vertical. Gravity
+  carries no heading information, and a correction that pretended otherwise
+  would corrupt yaw: solving Wahba's problem with a single gravity observation
+  returns an attitude whose yaw error equals the true yaw exactly, because it
+  always answers "zero heading". Roll and pitch are bounded here; heading still
+  drifts with the gyro and needs a magnetometer, a DVL, or terrain to bound it.
+
+  :param kp: Proportional gain on the tilt error, 1/s.
+  :param ki: Integral gain feeding the gyro bias estimate, 1/s^2.
+  :param q0: Initial orientation; identity if omitted.
+  """
+
+  def __init__(
+    self,
+    kp: float = 1.0,
+    ki: float = 0.05,
+    q0: ArrayLike | None = None,
+  ) -> None:
+    self.q = (
+      np.array([1.0, 0.0, 0.0, 0.0]) if q0 is None else quat_normalize(q0)
+    )
+    self.bias = np.zeros(3)
+    self.kp = kp
+    self.ki = ki
+    # Trust placed in the accelerometer on the most recent update, for
+    # diagnostics: near 0 means the vehicle was manoeuvring and the correction
+    # was effectively switched off.
+    self.trust = 0.0
+
+  def update(
+    self, gyro: ArrayLike, accel_body: ArrayLike, dt: float
+  ) -> NumpyArray:
+    """Advance the estimate by one IMU sample.
+
+    :param gyro: Body angular rate in rad/s.
+    :param accel_body: Body-frame specific force in m/s^2.
+    :param dt: Interval in seconds.
+    :return: Updated orientation quaternion.
+    """
+    accel_body = np.asarray(accel_body, dtype=float)
+    omega = np.asarray(gyro, dtype=float) - self.bias
+
+    magnitude = np.linalg.norm(accel_body)
+    if magnitude > 1e-6:
+      # At rest the accelerometer reads -g, so measured "down" is -a.
+      measured_down = -accel_body / magnitude
+      # Where the current estimate says "down" is, in the body frame.
+      predicted_down = quat_to_rotmat(self.q).T @ (
+        G_NED / np.linalg.norm(G_NED)
+      )
+
+      self.trust = gravity_trust(accel_body)
+      error = self.trust * np.cross(measured_down, predicted_down)
+
+      self.bias = self.bias - self.ki * error * dt
+      omega = omega + self.kp * error
+    else:
+      self.trust = 0.0
+
+    self.q = quat_normalize(quat_multiply(self.q, quat_from_gyro(omega, dt)))
+    return self.q
+
+  @property
+  def rotation(self) -> NumpyArray:
+    """Current orientation as a rotation matrix, body to world."""
+    return quat_to_rotmat(self.q)

@@ -27,10 +27,17 @@ __all__ = ["StrapdownIntegrator"]
 class StrapdownIntegrator:
   """Attitude, velocity and position integrated from IMU readings.
 
-  Args:
-      position: Initial world position.
-      attitude: Initial orientation as a scalar-first quaternion, body to world.
-      velocity: Initial world velocity; at rest if omitted.
+  :param position: Initial world position.
+  :param attitude: Initial orientation as a scalar-first quaternion, body to
+      world.
+  :param velocity: Initial world velocity; at rest if omitted.
+  :param attitude_filter: Optional correction for the attitude channel. Without
+      one, attitude comes from integrating the gyro alone and drifts without
+      bound -- and because gravity is removed using that attitude, the error
+      leaks straight into acceleration as ``g sin(theta)``. Pass an
+      :class:`auv_pose.estimation.filters.AttitudeFilter` to bound roll and
+      pitch against the accelerometer. Leaving it ``None`` is the uncorrected
+      baseline, useful for measuring what the correction buys.
   """
 
   def __init__(
@@ -38,6 +45,7 @@ class StrapdownIntegrator:
     position: ArrayLike,
     attitude: ArrayLike,
     velocity: ArrayLike | None = None,
+    attitude_filter=None,
   ) -> None:
     self.position = np.asarray(position, dtype=float).copy()
     self.attitude = quat_normalize(attitude)
@@ -46,6 +54,9 @@ class StrapdownIntegrator:
       if velocity is None
       else np.asarray(velocity, dtype=float).copy()
     )
+    self.attitude_filter = attitude_filter
+    if attitude_filter is not None:
+      attitude_filter.q = self.attitude
 
   def step(
     self, gyro: ArrayLike, accel_body: ArrayLike, dt: float
@@ -63,9 +74,12 @@ class StrapdownIntegrator:
     :return: World-frame linear acceleration with gravity removed -- the
         quantity a position filter wants as its control input.
     """
-    self.attitude = quat_normalize(
-      quat_multiply(self.attitude, quat_from_gyro(gyro, dt))
-    )
+    if self.attitude_filter is not None:
+      self.attitude = self.attitude_filter.update(gyro, accel_body, dt)
+    else:
+      self.attitude = quat_normalize(
+        quat_multiply(self.attitude, quat_from_gyro(gyro, dt))
+      )
 
     accel_world = quat_to_rotmat(self.attitude) @ np.asarray(
       accel_body, dtype=float

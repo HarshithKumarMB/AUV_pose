@@ -4,14 +4,23 @@ import numpy as np
 import pytest
 
 from auv_pose.estimation.filters import (
+  AttitudeFilter,
   ConstantVelocityEKF,
+  gravity_trust,
   position,
   velocity,
+)
+from auv_pose.estimation.quaternion import (
+  G_NED,
+  quat_angle,
+  quat_from_gyro,
+  quat_to_rotmat,
 )
 from auv_pose.estimation.typing import GaussianState, Measurement
 
 POSITION_H = np.hstack([np.eye(3), np.zeros((3, 3))])
 DEPTH_H = np.array([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]])
+IDENTITY_Q = np.array([1.0, 0.0, 0.0, 0.0])
 
 
 def position_of(mean, cov=None):
@@ -177,3 +186,86 @@ def test_step_with_no_observations_is_prediction_only():
 
 def test_history_starts_empty():
   assert ConstantVelocityEKF().history == []
+
+
+LEVEL_ACCEL = -G_NED  # what an accelerometer reads at rest, level
+
+
+def test_gravity_trust_peaks_at_one_g():
+  assert gravity_trust(-G_NED) == pytest.approx(1.0)
+  assert gravity_trust([0.0, 0.0, -19.62]) < gravity_trust([0.0, 0.0, -11.0])
+  assert 0.0 < gravity_trust([0.0, 0.0, -30.0]) < 1.0
+
+
+def test_attitude_filter_holds_level_at_rest():
+  filt = AttitudeFilter()
+  for _ in range(200):
+    filt.update(np.zeros(3), LEVEL_ACCEL, dt=0.01)
+  np.testing.assert_allclose(filt.rotation, np.eye(3), atol=1e-6)
+
+
+def test_attitude_filter_corrects_a_tilt_error():
+  """Started wrong in roll, the accelerometer should pull it level."""
+  tilted = quat_from_gyro([1.0, 0.0, 0.0], 0.3)  # 17 degrees of roll error
+  filt = AttitudeFilter(kp=2.0, q0=tilted)
+
+  before = quat_angle(filt.q, IDENTITY_Q)
+  for _ in range(2000):
+    filt.update(np.zeros(3), LEVEL_ACCEL, dt=0.005)
+  after = quat_angle(filt.q, IDENTITY_Q)
+
+  assert after < before / 10
+
+
+def test_attitude_filter_does_not_touch_heading():
+  """The whole reason this is a cross product and not a Wahba solve.
+
+  Gravity carries no heading information. A yaw error must survive untouched --
+  solving Wahba's problem with a single gravity vector would instead drag the
+  estimate to zero yaw.
+  """
+  yawed = quat_from_gyro([0.0, 0.0, 1.0], np.pi / 3)  # 60 degrees of yaw
+  filt = AttitudeFilter(kp=2.0, q0=yawed)
+
+  # Level and at rest, so the accelerometer reads pure gravity: nothing about
+  # this observation says anything about heading.
+  body_accel = quat_to_rotmat(yawed).T @ LEVEL_ACCEL
+  for _ in range(2000):
+    filt.update(np.zeros(3), body_accel, dt=0.005)
+
+  assert quat_angle(filt.q, yawed) == pytest.approx(0.0, abs=1e-3)
+
+
+def test_attitude_filter_estimates_gyro_bias():
+  """A constant gyro bias about a horizontal axis must be learned out."""
+  bias = np.array([0.02, -0.01, 0.0])
+  filt = AttitudeFilter(kp=1.0, ki=0.3)
+
+  for _ in range(20000):
+    filt.update(bias, LEVEL_ACCEL, dt=0.005)
+
+  np.testing.assert_allclose(filt.bias[:2], bias[:2], atol=5e-3)
+  np.testing.assert_allclose(filt.rotation, np.eye(3), atol=1e-3)
+
+
+def test_attitude_filter_distrusts_a_manoeuvring_accelerometer():
+  """Under heavy acceleration the reading is not a gravity reference."""
+  filt = AttitudeFilter()
+  filt.update(np.zeros(3), LEVEL_ACCEL, dt=0.01)
+  resting = filt.trust
+
+  filt.update(np.zeros(3), LEVEL_ACCEL + np.array([20.0, 0.0, 0.0]), dt=0.01)
+  assert filt.trust < resting / 10
+
+
+def test_attitude_filter_ignores_a_dead_accelerometer():
+  """Zero reading carries no information; fall back to the gyro."""
+  filt = AttitudeFilter()
+  omega = np.array([0.0, 0.0, np.pi / 2])
+  for _ in range(100):
+    filt.update(omega, np.zeros(3), dt=0.01)
+
+  assert filt.trust == 0.0
+  np.testing.assert_allclose(
+    filt.rotation @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0], atol=1e-6
+  )

@@ -59,6 +59,7 @@ __all__ = [
   "Measurement",
   "Step",
   "StrapdownIntegrator",
+  "gravity_trust",
   "position",
   "quat_angle",
   "quat_conjugate",
