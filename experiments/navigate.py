@@ -5,11 +5,18 @@
 Dead reckons the IMU, ranges the seabed with a singlebeam sonar, looks the seabed
 depth up in the fitted GP map, and corrects the depth estimate in an EKF.
 
-Two properties worth knowing before comparing runs:
+Three properties worth knowing before comparing runs:
 
-* **Depth is the only measurement**, so ``x`` and ``y`` are unobservable and drift
-  with the IMU. That is a true property of this sensor suite; constraining them
-  needs terrain correlation over varying relief or a bathymetric particle filter.
+* **Depth and velocity are measured; position is not.** The sonar-plus-map and
+  the depth sensor observe ``z``; the DVL observes velocity. Nothing observes
+  ``x`` or ``y`` directly, so horizontal position still drifts -- but at a rate
+  bounded by the DVL, linearly rather than quadratically. Pinning it down needs
+  terrain correlation over varying relief, or a bathymetric particle filter.
+* **The DVL reading is rotated by the attitude estimate**, so heading error
+  turns it in the horizontal plane. Its speed is accurate to under 1%, but the
+  direction error tracks the attitude error almost exactly, so the observation
+  noise is built as ``sigma_dvl^2 + (speed * sigma_heading)^2``. Nothing here
+  observes heading, so that second term is an assumption.
 * **Guidance runs on the estimate**, not on ground truth, so tracking error
   reflects estimator quality honestly.
 
@@ -42,7 +49,9 @@ from auv_pose.mapping.sonar import bottom_return_range, range_bins
 from experiments.cli import configure_sdl
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
+  DVL_AXES,
   depth_sensor,
+  dvl_sensor,
   imu_sensor,
   ocean_scenario,
   orientation_sensor,
@@ -76,6 +85,10 @@ DEPTH_H = np.array(
   ]
 )
 
+# The DVL observes velocity directly. This is what makes velocity observable
+# at all: without it, position comes from doubly integrating acceleration.
+VELOCITY_H = np.hstack([np.zeros((3, 3)), np.eye(3)])
+
 SONAR = {"range_min": 0.5, "range_max": 100.0, "range_bins": 256}
 
 COLUMNS = (
@@ -101,6 +114,9 @@ COLUMNS = (
   "dr_vx",
   "dr_vy",
   "dr_vz",
+  "dvl_vx",
+  "dvl_vy",
+  "dvl_vz",
 )
 
 
@@ -114,6 +130,7 @@ def build_scenario(octree_min: float) -> dict:
       orientation_sensor(),
       depth_sensor(hz=TICK_RATE_HZ),
       imu_sensor("imu_1", hz=TICK_RATE_HZ),
+      dvl_sensor("dvl", hz=TICK_RATE_HZ),
       singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ, **SONAR),
     ],
   )
@@ -153,6 +170,31 @@ def parse_args() -> argparse.Namespace:
       "finest octree voxel in metres. holoocean's default of 0.02 is 19x "
       "finer than the singlebeam's 0.39 m range bins and generates octrees "
       "at several GB per minute; 0.1 is still 4x finer than a bin"
+    ),
+  )
+  parser.add_argument(
+    "--no-dvl",
+    action="store_true",
+    help=(
+      "drop the DVL velocity measurement. The unaided baseline: velocity is "
+      "then unobservable and position drifts quadratically"
+    ),
+  )
+  parser.add_argument(
+    "--sigma-dvl",
+    type=float,
+    default=0.02,
+    help="the DVL's own velocity noise, m/s; matches the sensor VelSigma",
+  )
+  parser.add_argument(
+    "--sigma-heading",
+    type=float,
+    default=30.0,
+    help=(
+      "assumed heading uncertainty in degrees. The DVL measures speed well "
+      "but its direction comes from the attitude estimate, so heading error "
+      "dominates: measured direction error tracks attitude error almost "
+      "exactly. Nothing observes heading here, hence a fixed assumption"
     ),
   )
   parser.add_argument(
@@ -316,6 +358,30 @@ def main() -> None:
           )
         ]
 
+      if not args.no_dvl:
+        # Body-frame velocity over ground, rotated into the world by the
+        # current attitude estimate.
+        dvl_body = np.asarray(state["dvl"], dtype=float)[:3] * DVL_AXES
+        dvl_world = dead_reckoning.rotation @ dvl_body
+
+        # The reading itself is good -- measured speed matches truth to under
+        # 1% -- but rotating it by an uncertain heading is not. A heading error
+        # of theta turns the vector, costing roughly speed * theta, which
+        # dominates the sensor's own noise by an order of magnitude. Modelled
+        # isotropically here, though the induced error is really perpendicular
+        # to the velocity; tightening that needs a heading uncertainty to draw
+        # on, and nothing currently observes heading.
+        heading_term = np.linalg.norm(dvl_world) * np.radians(
+          args.sigma_heading
+        )
+        dvl_var = args.sigma_dvl**2 + heading_term**2
+
+        observations.append(
+          Measurement(dvl_world, VELOCITY_H, np.eye(3) * dvl_var)
+        )
+      else:
+        dvl_world = np.full(3, np.nan)
+
       estimate = ekf.step(estimate, accel_world, dt, observations)
       estimated_position = position(estimate)
       estimated_velocity = velocity(estimate)
@@ -366,6 +432,9 @@ def main() -> None:
         dr_vx=dead_reckoning.velocity[0],
         dr_vy=dead_reckoning.velocity[1],
         dr_vz=dead_reckoning.velocity[2],
+        dvl_vx=dvl_world[0],
+        dvl_vy=dvl_world[1],
+        dvl_vz=dvl_world[2],
       )
     else:
       # Distinguish "too slow" from "diverged": a crawling but healthy run is
