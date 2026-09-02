@@ -10,9 +10,9 @@ from auv_pose.mapping.sonar import bottom_return_range, range_bins
 from auv_pose.mapping.svgp import BathymetryMap, SVGPModel, fit_svgp
 
 __all__ = [
-    "BathymetryMap",
-    "SVGPModel",
-    "bottom_return_range",
-    "fit_svgp",
-    "range_bins",
+  "BathymetryMap",
+  "SVGPModel",
+  "bottom_return_range",
+  "fit_svgp",
+  "range_bins",
 ]

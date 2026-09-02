@@ -18,37 +18,37 @@ Quaternions
 """
 
 from auv_pose.smoothing.attitude import (
-    AttitudeFilter,
-    accel_weight,
-    wahba_davenport,
-    wahba_svd,
+  AttitudeFilter,
+  accel_weight,
+  wahba_davenport,
+  wahba_svd,
 )
 from auv_pose.smoothing.ekf import ConstantVelocityEKF
 from auv_pose.smoothing.quaternion import (
-    G_NED,
-    quat_conjugate,
-    quat_from_gyro,
-    quat_multiply,
-    quat_normalize,
-    quat_to_rotmat,
-    rotmat_to_quat,
-    skew,
+  G_NED,
+  quat_conjugate,
+  quat_from_gyro,
+  quat_multiply,
+  quat_normalize,
+  quat_to_rotmat,
+  rotmat_to_quat,
+  skew,
 )
 from auv_pose.smoothing.strapdown import StrapdownIntegrator
 
 __all__ = [
-    "G_NED",
-    "AttitudeFilter",
-    "ConstantVelocityEKF",
-    "StrapdownIntegrator",
-    "accel_weight",
-    "quat_conjugate",
-    "quat_from_gyro",
-    "quat_multiply",
-    "quat_normalize",
-    "quat_to_rotmat",
-    "rotmat_to_quat",
-    "skew",
-    "wahba_davenport",
-    "wahba_svd",
+  "G_NED",
+  "AttitudeFilter",
+  "ConstantVelocityEKF",
+  "StrapdownIntegrator",
+  "accel_weight",
+  "quat_conjugate",
+  "quat_from_gyro",
+  "quat_multiply",
+  "quat_normalize",
+  "quat_to_rotmat",
+  "rotmat_to_quat",
+  "skew",
+  "wahba_davenport",
+  "wahba_svd",
 ]

@@ -13,130 +13,130 @@ from numpy.typing import ArrayLike, NDArray
 G_NED: NDArray[np.float64] = np.array([0.0, 0.0, 9.81])
 
 __all__ = [
-    "G_NED",
-    "quat_conjugate",
-    "quat_from_gyro",
-    "quat_multiply",
-    "quat_normalize",
-    "quat_to_rotmat",
-    "rotmat_to_quat",
-    "skew",
+  "G_NED",
+  "quat_conjugate",
+  "quat_from_gyro",
+  "quat_multiply",
+  "quat_normalize",
+  "quat_to_rotmat",
+  "rotmat_to_quat",
+  "skew",
 ]
 
 
 def quat_normalize(q: ArrayLike) -> NDArray[np.float64]:
-    """Scale ``q`` to unit norm."""
-    q = np.asarray(q, dtype=float)
-    norm = np.linalg.norm(q)
-    if norm == 0.0:
-        raise ValueError("cannot normalize a zero quaternion")
-    return q / norm
+  """Scale ``q`` to unit norm."""
+  q = np.asarray(q, dtype=float)
+  norm = np.linalg.norm(q)
+  if norm == 0.0:
+    raise ValueError("cannot normalize a zero quaternion")
+  return q / norm
 
 
 def quat_multiply(q: ArrayLike, r: ArrayLike) -> NDArray[np.float64]:
-    """Hamilton product ``q * r``.
+  """Hamilton product ``q * r``.
 
-    Composition is left-to-right in the body frame: ``quat_multiply(q, dq)``
-    applies ``dq`` in the frame that ``q`` already describes.
-    """
-    w0, x0, y0, z0 = np.asarray(q, dtype=float)
-    w1, x1, y1, z1 = np.asarray(r, dtype=float)
-    return np.array(
-        [
-            w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
-            w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1,
-            w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1,
-            w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1,
-        ]
-    )
+  Composition is left-to-right in the body frame: ``quat_multiply(q, dq)``
+  applies ``dq`` in the frame that ``q`` already describes.
+  """
+  w0, x0, y0, z0 = np.asarray(q, dtype=float)
+  w1, x1, y1, z1 = np.asarray(r, dtype=float)
+  return np.array(
+    [
+      w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
+      w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1,
+      w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1,
+      w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1,
+    ]
+  )
 
 
 def quat_conjugate(q: ArrayLike) -> NDArray[np.float64]:
-    """Conjugate of ``q``; the inverse for unit quaternions."""
-    q = np.asarray(q, dtype=float)
-    return np.array([q[0], -q[1], -q[2], -q[3]])
+  """Conjugate of ``q``; the inverse for unit quaternions."""
+  q = np.asarray(q, dtype=float)
+  return np.array([q[0], -q[1], -q[2], -q[3]])
 
 
 def quat_from_gyro(omega: ArrayLike, dt: float) -> NDArray[np.float64]:
-    """Rotation increment from an angular rate held over ``dt``.
+  """Rotation increment from an angular rate held over ``dt``.
 
-    Args:
-        omega: Body angular rate, rad/s.
-        dt: Interval, seconds.
+  Args:
+      omega: Body angular rate, rad/s.
+      dt: Interval, seconds.
 
-    Returns:
-        Unit quaternion for the rotation through ``|omega| * dt`` about
-        ``omega / |omega|``. Identity when the rotation is negligible.
-    """
-    omega = np.asarray(omega, dtype=float)
-    rate = np.linalg.norm(omega)
-    theta = rate * dt
-    if abs(theta) < 1e-8:
-        return np.array([1.0, 0.0, 0.0, 0.0])
+  Returns:
+      Unit quaternion for the rotation through ``|omega| * dt`` about
+      ``omega / |omega|``. Identity when the rotation is negligible.
+  """
+  omega = np.asarray(omega, dtype=float)
+  rate = np.linalg.norm(omega)
+  theta = rate * dt
+  if abs(theta) < 1e-8:
+    return np.array([1.0, 0.0, 0.0, 0.0])
 
-    axis = omega / rate
-    return np.concatenate(([np.cos(theta / 2.0)], axis * np.sin(theta / 2.0)))
+  axis = omega / rate
+  return np.concatenate(([np.cos(theta / 2.0)], axis * np.sin(theta / 2.0)))
 
 
 def quat_to_rotmat(q: ArrayLike) -> NDArray[np.float64]:
-    """Rotation matrix ``R`` such that ``v_world = R @ v_body``."""
-    w, x, y, z = quat_normalize(q)
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        ]
-    )
+  """Rotation matrix ``R`` such that ``v_world = R @ v_body``."""
+  w, x, y, z = quat_normalize(q)
+  return np.array(
+    [
+      [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+      [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ]
+  )
 
 
 def rotmat_to_quat(R: ArrayLike) -> NDArray[np.float64]:
-    """Inverse of :func:`quat_to_rotmat`.
+  """Inverse of :func:`quat_to_rotmat`.
 
-    Uses Shepperd's method: pick the branch with the largest divisor so the square
-    root never loses precision near a 180-degree rotation.
-    """
-    R = np.asarray(R, dtype=float)
-    q = np.zeros(4)
-    trace = np.trace(R)
+  Uses Shepperd's method: pick the branch with the largest divisor so the square
+  root never loses precision near a 180-degree rotation.
+  """
+  R = np.asarray(R, dtype=float)
+  q = np.zeros(4)
+  trace = np.trace(R)
 
-    if trace > 0:
-        s = np.sqrt(trace + 1.0) * 2
-        q[0] = 0.25 * s
-        q[1] = (R[2, 1] - R[1, 2]) / s
-        q[2] = (R[0, 2] - R[2, 0]) / s
-        q[3] = (R[1, 0] - R[0, 1]) / s
+  if trace > 0:
+    s = np.sqrt(trace + 1.0) * 2
+    q[0] = 0.25 * s
+    q[1] = (R[2, 1] - R[1, 2]) / s
+    q[2] = (R[0, 2] - R[2, 0]) / s
+    q[3] = (R[1, 0] - R[0, 1]) / s
+  else:
+    i = int(np.argmax(np.diag(R)))
+    if i == 0:
+      s = np.sqrt(1 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+      q[0] = (R[2, 1] - R[1, 2]) / s
+      q[1] = 0.25 * s
+      q[2] = (R[0, 1] + R[1, 0]) / s
+      q[3] = (R[0, 2] + R[2, 0]) / s
+    elif i == 1:
+      s = np.sqrt(1 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+      q[0] = (R[0, 2] - R[2, 0]) / s
+      q[1] = (R[0, 1] + R[1, 0]) / s
+      q[2] = 0.25 * s
+      q[3] = (R[1, 2] + R[2, 1]) / s
     else:
-        i = int(np.argmax(np.diag(R)))
-        if i == 0:
-            s = np.sqrt(1 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
-            q[0] = (R[2, 1] - R[1, 2]) / s
-            q[1] = 0.25 * s
-            q[2] = (R[0, 1] + R[1, 0]) / s
-            q[3] = (R[0, 2] + R[2, 0]) / s
-        elif i == 1:
-            s = np.sqrt(1 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
-            q[0] = (R[0, 2] - R[2, 0]) / s
-            q[1] = (R[0, 1] + R[1, 0]) / s
-            q[2] = 0.25 * s
-            q[3] = (R[1, 2] + R[2, 1]) / s
-        else:
-            s = np.sqrt(1 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
-            q[0] = (R[1, 0] - R[0, 1]) / s
-            q[1] = (R[0, 2] + R[2, 0]) / s
-            q[2] = (R[1, 2] + R[2, 1]) / s
-            q[3] = 0.25 * s
+      s = np.sqrt(1 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+      q[0] = (R[1, 0] - R[0, 1]) / s
+      q[1] = (R[0, 2] + R[2, 0]) / s
+      q[2] = (R[1, 2] + R[2, 1]) / s
+      q[3] = 0.25 * s
 
-    return quat_normalize(q)
+  return quat_normalize(q)
 
 
 def skew(w: ArrayLike) -> NDArray[np.float64]:
-    """Skew-symmetric matrix with ``skew(w) @ v == np.cross(w, v)``."""
-    wx, wy, wz = np.asarray(w, dtype=float)
-    return np.array(
-        [
-            [0.0, -wz, wy],
-            [wz, 0.0, -wx],
-            [-wy, wx, 0.0],
-        ]
-    )
+  """Skew-symmetric matrix with ``skew(w) @ v == np.cross(w, v)``."""
+  wx, wy, wz = np.asarray(w, dtype=float)
+  return np.array(
+    [
+      [0.0, -wz, wy],
+      [wz, 0.0, -wx],
+      [-wy, wx, 0.0],
+    ]
+  )

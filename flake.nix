@@ -77,6 +77,7 @@
         posix-ipc
         tkinter # plt.show() needs a backend
         pytest
+        ruff
       ]);
 
       # From HoloOcean-release/docker/runtime/Dockerfile -- upstream's own

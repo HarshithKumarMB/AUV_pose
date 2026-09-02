@@ -24,91 +24,91 @@ from experiments.guidance import WaypointFollower
 from experiments.scenarios import ocean_scenario, pose_sensor, singlebeam_sonar
 
 TICK_RATE_HZ = 30
-SONAR = dict(range_min=0.5, range_max=100.0, range_bins=256)
+SONAR = {"range_min": 0.5, "range_max": 100.0, "range_bins": 256}
 
 
 def lawnmower(
-    x_start: float = 0.0,
-    x_end: float = -40.0,
-    x_step: float = -2.0,
-    y_near: float = 0.0,
-    y_far: float = -20.0,
-    y_step: float = -5.0,
+  x_start: float = 0.0,
+  x_end: float = -40.0,
+  x_step: float = -2.0,
+  y_near: float = 0.0,
+  y_far: float = -20.0,
+  y_step: float = -5.0,
 ) -> list[list[float]]:
-    """Boustrophedon track: sweep in y, step across in x, reverse each pass."""
-    waypoints: list[list[float]] = []
-    columns = np.arange(x_start, x_end + x_step / 2, x_step)
-    sweep = list(np.arange(y_near, y_far + y_step / 2, y_step))
+  """Boustrophedon track: sweep in y, step across in x, reverse each pass."""
+  waypoints: list[list[float]] = []
+  columns = np.arange(x_start, x_end + x_step / 2, x_step)
+  sweep = list(np.arange(y_near, y_far + y_step / 2, y_step))
 
-    for index, x in enumerate(columns):
-        legs = sweep if index % 2 == 0 else sweep[::-1]
-        waypoints.extend([float(x), float(y), 0.0] for y in legs)
+  for index, x in enumerate(columns):
+    legs = sweep if index % 2 == 0 else sweep[::-1]
+    waypoints.extend([float(x), float(y), 0.0] for y in legs)
 
-    return waypoints
+  return waypoints
 
 
 def build_scenario(start: list[float]) -> dict:
-    return ocean_scenario(
-        "bathymetry_survey",
-        start=start,
-        sensors=[
-            pose_sensor(),
-            singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ, **SONAR),
-        ],
-    )
+  return ocean_scenario(
+    "bathymetry_survey",
+    start=start,
+    sensors=[
+      pose_sensor(),
+      singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ, **SONAR),
+    ],
+  )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Bathymetry survey")
-    parser.add_argument("--out", type=Path, default=Path("map1.csv"))
-    parser.add_argument("--max-steps", type=int, default=100_000)
-    parser.add_argument("--arrival-radius", type=float, default=0.5)
-    return parser.parse_args()
+  parser = argparse.ArgumentParser(description="Bathymetry survey")
+  parser.add_argument("--out", type=Path, default=Path("map1.csv"))
+  parser.add_argument("--max-steps", type=int, default=100_000)
+  parser.add_argument("--arrival-radius", type=float, default=0.5)
+  return parser.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
+  args = parse_args()
 
-    waypoints = lawnmower()
-    print(f"{len(waypoints)} waypoints")
+  waypoints = lawnmower()
+  print(f"{len(waypoints)} waypoints")
 
-    env = holoocean.make(scenario_cfg=build_scenario(waypoints[0]))
-    ranges = range_bins(SONAR["range_min"], SONAR["range_max"], SONAR["range_bins"])
+  env = holoocean.make(scenario_cfg=build_scenario(waypoints[0]))
+  ranges = range_bins(
+    SONAR["range_min"], SONAR["range_max"], SONAR["range_bins"]
+  )
 
-    follower = WaypointFollower(waypoints, args.arrival_radius)
-    command = np.zeros(8)
-    soundings = 0
+  follower = WaypointFollower(waypoints, args.arrival_radius)
+  command = np.zeros(8)
+  soundings = 0
 
-    with CsvLogger(args.out, SOUNDING_COLUMNS) as log:
-        for step in range(args.max_steps):
-            state = env.step(command)
-            position = np.array(state["pose"])[:3, 3]
+  with CsvLogger(args.out, SOUNDING_COLUMNS) as log:
+    for step in range(args.max_steps):
+      state = env.step(command)
+      position = np.array(state["pose"])[:3, 3]
 
-            next_command = follower.command(position)
-            if next_command is None:
-                if follower.finished:
-                    print("survey complete")
-                    break
-                continue
-            command = next_command
+      next_command = follower.command(position)
+      if next_command is None:
+        if follower.finished:
+          print("survey complete")
+          break
+        continue
+      command = next_command
 
-            sonar_depth = bottom_return_range(
-                np.asarray(state["singlebeam"]), ranges
-            )
-            if not np.isnan(sonar_depth):
-                log.write(x=position[0], y=position[1], sonar_depth=sonar_depth)
-                soundings += 1
+      sonar_depth = bottom_return_range(np.asarray(state["singlebeam"]), ranges)
+      if not np.isnan(sonar_depth):
+        log.write(x=position[0], y=position[1], sonar_depth=sonar_depth)
+        soundings += 1
 
-            if step % 1000 == 0:
-                print(
-                    f"step {step} | waypoint {follower.index}/{len(waypoints)} "
-                    f"| {soundings} soundings"
-                )
-        else:
-            print(f"stopped after {args.max_steps} steps without finishing")
+      if step % 1000 == 0:
+        print(
+          f"step {step} | waypoint {follower.index}/{len(waypoints)} "
+          f"| {soundings} soundings"
+        )
+    else:
+      print(f"stopped after {args.max_steps} steps without finishing")
 
-    print(f"Wrote {soundings} soundings to {args.out}")
+  print(f"Wrote {soundings} soundings to {args.out}")
 
 
 if __name__ == "__main__":
-    main()
+  main()
