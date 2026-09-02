@@ -138,9 +138,22 @@ quaternion for all 1498 samples of a 50 s run -- `diag(1, -1, -1)`, the
 `IMUSocket` rest orientation. It is not stale: rotating the accelerometer by
 that constant reproduces the differentiated truth acceleration at slope 0.97 to
 1.01 in every third of the run, which a wrong or frozen orientation could not
-do. The vehicle is a `HoveringAUV` with vectored thrusters and `WaypointFollower`
-commands pure translation, so it strafes -- its world-frame velocity heading
-swings from 39° to 178° while its body attitude never changes.
+do. Its world-frame velocity heading swings from 39° to 178° while its body
+attitude never changes.
+
+**It does not rotate by design.** The vehicle is a BlueROV2 Heavy, whose four
+angled thrusters make it holonomic in the horizontal plane, and
+`guidance.py:thruster_command` mixes them torque-free on purpose -- surge, sway
+and heave each produce zero net moment. `WaypointFollower` drives position error
+alone and never commands a heading, so there is no yaw input anywhere in the
+loop. The vehicle strafes to every waypoint.
+
+There is an irony worth recording. The only rotation this system ever produced
+was a bug: clipping the thruster vector element-wise unbalanced the angled pair
+and leaked a yaw moment, and by that docstring's own account "the vehicle began
+rotating within sixteen samples of the first horizontal clip and went on to
+tumble through 135 degrees". Scaling instead of clipping (`d350dae`) fixed it --
+and removed the last source of rotation in the whole system.
 
 Consequences worth keeping in mind before trusting any attitude result here:
 
@@ -158,8 +171,11 @@ Consequences worth keeping in mind before trusting any attitude result here:
   That is what makes the gate above untrustworthy rather than merely imperfect:
   its failure mode is specific to rotation, so no run here could have caught it.
 
-Making the course turn the vehicle -- yawing to face each waypoint rather than
-strafing to it -- is the prerequisite for any further attitude work.
+Making the course turn the vehicle is the prerequisite for any further attitude
+work, and it is a guidance change rather than a vehicle one: the four angled
+thrusters can produce yaw, so `thruster_command` needs a yaw term and
+`WaypointFollower` a heading reference to point the vehicle along its track
+instead of strafing to it.
 
 **The `mirrored frames` row gets worse in attitude, 1.03 → 1.50°, and that is
 consistent.** Under `--legacy-frames` the DVL is sign-flipped along with
