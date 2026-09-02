@@ -237,4 +237,3 @@ class ConstantVelocityEKF(Filter):
       mean=state.mean + K @ innovation,
       cov=I_KH @ state.cov @ I_KH.T + K @ R @ K.T,
     )
-

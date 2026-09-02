@@ -73,7 +73,7 @@ HoloOcean lives in `experiments/`.
 ## Tests
 
 ```
-nix develop --command pytest      # 109 tests, none need the simulator
+nix develop --command pytest      # 135 tests, none need the simulator
 nix flake check                   # the same suite, in a sandbox
 ```
 

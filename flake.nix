@@ -127,10 +127,12 @@
         sim = simFhs;
       };
 
-      # map*.csv are copied in because tests/test_soundings.py asserts against the
-      # committed survey data, guarding it from silent schema drift.
+      # experiments/ is copied for tests/test_guidance.py; neither guidance.py nor
+      # experiments/__init__.py imports holoocean, so collection stays
+      # simulator-free. map*.csv are copied because tests/test_soundings.py asserts
+      # against the committed survey data, guarding it from schema drift.
       checks.${system}.pytest = pkgs.runCommand "auv-pose-pytest" { } ''
-        cp -r ${./.}/{auv_pose,tests,pyproject.toml,map.csv,map1.csv} .
+        cp -r ${./.}/{auv_pose,experiments,tests,pyproject.toml,map.csv,map1.csv} .
         chmod -R +w .
         export PYTHONPATH=$PWD
         export HOME=$TMPDIR

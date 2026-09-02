@@ -177,4 +177,3 @@ def test_step_with_no_observations_is_prediction_only():
 
 def test_history_starts_empty():
   assert ConstantVelocityEKF().history == []
-
