@@ -1,7 +1,7 @@
 """Causal recursive estimators.
 
 A filter is causal: it consumes observations in order and never looks ahead.
-The non-causal counterpart lives in :mod:`auv_pose.smoothing.smoothers`, which
+The non-causal counterpart lives in :mod:`auv_pose.estimation.smoothers`, which
 consumes the history a filter records here.
 """
 
@@ -13,20 +13,20 @@ from collections.abc import Iterable, Sequence
 import numpy as np
 from numpy.typing import ArrayLike
 
-from auv_pose.smoothing.quaternion import (
+from auv_pose.estimation.quaternion import (
   quat_conjugate,
   quat_from_gyro,
   quat_multiply,
   quat_normalize,
   quat_to_rotmat,
 )
-from auv_pose.smoothing.typing import (
+from auv_pose.estimation.typing import (
   GaussianState,
   Measurement,
   NumpyArray,
   Step,
 )
-from auv_pose.smoothing.wahba import accel_weight, wahba_davenport, wahba_svd
+from auv_pose.estimation.wahba import accel_weight, wahba_davenport, wahba_svd
 
 __all__ = [
   "AttitudeFilter",
@@ -43,7 +43,7 @@ class Filter(ABC):
   """Abstract base class for causal recursive estimators.
 
   Defines the predict/condition interface and records each completed cycle in
-  :attr:`history`, which is what :func:`auv_pose.smoothing.smoothers.rts_smooth`
+  :attr:`history`, which is what :func:`auv_pose.estimation.smoothers.rts_smooth`
   consumes.
   """
 
@@ -205,7 +205,7 @@ class ConstantVelocityEKF(Filter):
 
     :param state: Current belief.
     :param control: Linear acceleration in the world frame in m/s^2, with
-        gravity already removed. See :mod:`auv_pose.smoothing` for the
+        gravity already removed. See :mod:`auv_pose.estimation` for the
         convention.
     :param dt: Interval in seconds.
     :return: Predicted belief.

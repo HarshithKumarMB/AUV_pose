@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from auv_pose.smoothing.quaternion import (
+from auv_pose.estimation.quaternion import (
   quat_conjugate,
   quat_from_gyro,
   quat_multiply,

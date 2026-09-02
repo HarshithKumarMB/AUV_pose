@@ -3,14 +3,14 @@
 import numpy as np
 import pytest
 
-from auv_pose.smoothing.filters import (
+from auv_pose.estimation.filters import (
   AttitudeFilter,
   ConstantVelocityEKF,
   position,
   velocity,
 )
-from auv_pose.smoothing.quaternion import quat_to_rotmat, rotmat_to_quat
-from auv_pose.smoothing.typing import GaussianState, Measurement
+from auv_pose.estimation.quaternion import quat_to_rotmat, rotmat_to_quat
+from auv_pose.estimation.typing import GaussianState, Measurement
 
 POSITION_H = np.hstack([np.eye(3), np.zeros((3, 3))])
 DEPTH_H = np.array([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]])

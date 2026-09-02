@@ -7,9 +7,9 @@ Several of these pin that.
 
 import numpy as np
 
-from auv_pose.smoothing.filters import ConstantVelocityEKF
-from auv_pose.smoothing.smoothers import rts_smooth
-from auv_pose.smoothing.typing import GaussianState, Measurement, Step
+from auv_pose.estimation.filters import ConstantVelocityEKF
+from auv_pose.estimation.smoothers import rts_smooth
+from auv_pose.estimation.typing import GaussianState, Measurement, Step
 
 POSITION_H = np.hstack([np.eye(3), np.zeros((3, 3))])
 

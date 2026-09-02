@@ -25,17 +25,17 @@ from pathlib import Path
 import holoocean
 import numpy as np
 
-from auv_pose.io.checkpoints import load_map
-from auv_pose.io.logs import CsvLogger
-from auv_pose.mapping.sonar import bottom_return_range, range_bins
-from auv_pose.smoothing.filters import (
+from auv_pose.estimation.filters import (
   ConstantVelocityEKF,
   position,
   velocity,
 )
-from auv_pose.smoothing.quaternion import rotmat_to_quat
-from auv_pose.smoothing.strapdown import StrapdownIntegrator
-from auv_pose.smoothing.typing import Measurement
+from auv_pose.estimation.quaternion import rotmat_to_quat
+from auv_pose.estimation.strapdown import StrapdownIntegrator
+from auv_pose.estimation.typing import Measurement
+from auv_pose.io.checkpoints import load_map
+from auv_pose.io.logs import CsvLogger
+from auv_pose.mapping.sonar import bottom_return_range, range_bins
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
   depth_sensor,

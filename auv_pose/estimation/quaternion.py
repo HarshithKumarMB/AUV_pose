@@ -1,7 +1,7 @@
 """Quaternion algebra and small rotation helpers.
 
 Quaternions are scalar-first ``[w, x, y, z]``, unit norm, and rotate body vectors
-into the world frame. See :mod:`auv_pose.smoothing` for the frame conventions.
+into the world frame. See :mod:`auv_pose.estimation` for the frame conventions.
 """
 
 from __future__ import annotations

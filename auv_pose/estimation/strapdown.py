@@ -1,7 +1,7 @@
 """Strapdown inertial dead reckoning.
 
 Propagate attitude from the gyro, rotate the accelerometer's specific force into
-the world frame, remove gravity, and integrate twice. See :mod:`auv_pose.smoothing`
+the world frame, remove gravity, and integrate twice. See :mod:`auv_pose.estimation`
 for the frame conventions.
 
 This is the open-loop baseline that terrain-aided navigation corrects: it drifts,
@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from auv_pose.smoothing.quaternion import (
+from auv_pose.estimation.quaternion import (
   G_NED,
   quat_from_gyro,
   quat_multiply,

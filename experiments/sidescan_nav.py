@@ -17,11 +17,11 @@ from pathlib import Path
 import holoocean
 import numpy as np
 
+from auv_pose.estimation.filters import ConstantVelocityEKF, position
+from auv_pose.estimation.quaternion import rotmat_to_quat
+from auv_pose.estimation.strapdown import StrapdownIntegrator
+from auv_pose.estimation.typing import Measurement
 from auv_pose.mapping.sonar import range_bins
-from auv_pose.smoothing.filters import ConstantVelocityEKF, position
-from auv_pose.smoothing.quaternion import rotmat_to_quat
-from auv_pose.smoothing.strapdown import StrapdownIntegrator
-from auv_pose.smoothing.typing import Measurement
 from experiments.guidance import WaypointFollower
 from experiments.obstacle_map import ObstacleMap
 from experiments.scenarios import (

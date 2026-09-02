@@ -32,14 +32,14 @@ Quaternions
     world: ``v_world = R(q) @ v_body``.
 """
 
-from auv_pose.smoothing.filters import (
+from auv_pose.estimation.filters import (
   AttitudeFilter,
   ConstantVelocityEKF,
   Filter,
   position,
   velocity,
 )
-from auv_pose.smoothing.quaternion import (
+from auv_pose.estimation.quaternion import (
   G_NED,
   quat_conjugate,
   quat_from_gyro,
@@ -49,10 +49,10 @@ from auv_pose.smoothing.quaternion import (
   rotmat_to_quat,
   skew,
 )
-from auv_pose.smoothing.smoothers import rts_smooth
-from auv_pose.smoothing.strapdown import StrapdownIntegrator
-from auv_pose.smoothing.typing import GaussianState, Measurement, Step
-from auv_pose.smoothing.wahba import (
+from auv_pose.estimation.smoothers import rts_smooth
+from auv_pose.estimation.strapdown import StrapdownIntegrator
+from auv_pose.estimation.typing import GaussianState, Measurement, Step
+from auv_pose.estimation.wahba import (
   accel_weight,
   wahba_davenport,
   wahba_svd,

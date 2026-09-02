@@ -2,7 +2,7 @@
 
 A smoother uses the whole record, including observations from after the step it
 is estimating, so it can only run once a trajectory is complete. That is the
-opposite of the filters in :mod:`auv_pose.smoothing.filters`, and why the two
+opposite of the filters in :mod:`auv_pose.estimation.filters`, and why the two
 live apart: this module imports no filter, only the shared types, so it will
 smooth a run recorded by any of them -- or steps built by hand from a log.
 """
@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from auv_pose.smoothing.typing import GaussianState, Step
+from auv_pose.estimation.typing import GaussianState, Step
 
 __all__ = ["rts_smooth"]
 
@@ -41,7 +41,7 @@ def rts_smooth(
 
   :param initial: Belief before the first step.
   :param history: Recorded steps, oldest first, as produced by
-      :meth:`auv_pose.smoothing.filters.Filter.step`.
+      :meth:`auv_pose.estimation.filters.Filter.step`.
   :return: Smoothed beliefs, oldest first, one longer than ``history``
       because the initial belief is included.
   """

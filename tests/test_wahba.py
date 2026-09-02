@@ -8,8 +8,8 @@ printed diagnostic the original code carried.
 import numpy as np
 import pytest
 
-from auv_pose.smoothing.quaternion import quat_to_rotmat, rotmat_to_quat
-from auv_pose.smoothing.wahba import (
+from auv_pose.estimation.quaternion import quat_to_rotmat, rotmat_to_quat
+from auv_pose.estimation.wahba import (
   accel_weight,
   wahba_davenport,
   wahba_svd,

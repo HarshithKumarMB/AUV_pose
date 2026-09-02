@@ -87,7 +87,7 @@ world at import time, so collecting them would launch the simulator.
 
 ## Conventions
 
-`auv_pose/smoothing/` is organised by causality: `filters.py` holds causal
+`auv_pose/estimation/` is organised by causality: `filters.py` holds causal
 recursive estimators, `smoothers.py` the non-causal backward pass, and `wahba.py`
 the memoryless attitude solvers. State is a value passed through
 `predict(state, ...)` and `condition(state, obs)`, so a run's history is a list of
@@ -95,7 +95,7 @@ values and smoothing is a pure function over it.
 
 World frame is **NED** — x north, y east, **z down** — matching HoloOcean's sensors
 in the `IMUSocket`, with gravity `[0, 0, +9.81]`. Quaternions are scalar-first
-`[w, x, y, z]` and rotate body vectors into the world. See `auv_pose/smoothing/`.
+`[w, x, y, z]` and rotate body vectors into the world. See `auv_pose/estimation/`.
 
 Survey CSVs store `sonar_depth` as a positive range to the seabed; the GP is fitted
 on negated depth so the modelled surface increases upward. `auv_pose.io.soundings`

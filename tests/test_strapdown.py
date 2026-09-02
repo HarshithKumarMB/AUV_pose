@@ -9,13 +9,13 @@ that sign wrong is the classic way to make dead reckoning fall out of the sky.
 import numpy as np
 import pytest
 
-from auv_pose.smoothing.quaternion import (
+from auv_pose.estimation.quaternion import (
   G_NED,
   quat_from_gyro,
   quat_to_rotmat,
   rotmat_to_quat,
 )
-from auv_pose.smoothing.strapdown import StrapdownIntegrator
+from auv_pose.estimation.strapdown import StrapdownIntegrator
 
 LEVEL = np.array([1.0, 0.0, 0.0, 0.0])
 AT_REST = -G_NED  # what an accelerometer reads when stationary and level

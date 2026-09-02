@@ -17,8 +17,8 @@ import holoocean
 import matplotlib.pyplot as plt
 import numpy as np
 
-from auv_pose.smoothing.quaternion import rotmat_to_quat
-from auv_pose.smoothing.strapdown import StrapdownIntegrator
+from auv_pose.estimation.quaternion import rotmat_to_quat
+from auv_pose.estimation.strapdown import StrapdownIntegrator
 from experiments.scenarios import (
   imaging_sonar,
   imu_sensor,

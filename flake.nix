@@ -61,7 +61,7 @@
           scikit-learn
         ];
         nativeCheckInputs = with python.pkgs; [ pytestCheckHook ];
-        pythonImportsCheck = [ "auv_pose.smoothing" ];
+        pythonImportsCheck = [ "auv_pose.estimation" ];
       };
 
       pyEnv = python.withPackages (ps: with ps; [

@@ -6,7 +6,7 @@ observation set, such as all reference vectors being parallel.
 
 Memoryless: these take observations and return an attitude, with no state
 carried between calls. The recursive estimator that uses them is
-:class:`auv_pose.smoothing.filters.AttitudeFilter`.
+:class:`auv_pose.estimation.filters.AttitudeFilter`.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections.abc import Sequence
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from auv_pose.smoothing.quaternion import quat_normalize, rotmat_to_quat
+from auv_pose.estimation.quaternion import quat_normalize, rotmat_to_quat
 
 __all__ = [
   "accel_weight",
