@@ -71,14 +71,29 @@ def parse_args() -> argparse.Namespace:
     default=None,
     help="directory to write the waterfall image into",
   )
+  parser.add_argument(
+    "--headless",
+    action="store_true",
+    help="run with -RenderOffScreen, for machines without a usable display",
+  )
   return parser.parse_args()
+
+
+def draw(axes, waterfall, sonar: str, step: int) -> None:
+  """Render the accumulated pings as a waterfall."""
+  axes.clear()
+  axes.imshow(np.array(waterfall), aspect="auto", cmap="viridis")
+  axes.set_xlabel("Range bin")
+  axes.set_ylabel("Ping")
+  axes.set_title(f"{sonar} waterfall, step {step}")
 
 
 def main() -> None:
   args = parse_args()
 
   env = holoocean.make(
-    scenario_cfg=build_scenario(args.sonar, args.world, args.start)
+    scenario_cfg=build_scenario(args.sonar, args.world, args.start),
+    show_viewport=not args.headless,
   )
   state = env.tick()
 
@@ -92,7 +107,11 @@ def main() -> None:
   sensor_name = "sonar" if args.sonar == "imaging" else "sidescan"
   waterfall: list[np.ndarray] = []
 
-  plt.ion()
+  # Headless means no display at all, so skip the live view and only render at
+  # the end for --save.
+  live = not args.headless
+  if live:
+    plt.ion()
   figure, axes = plt.subplots(figsize=(10, 6))
 
   for step in range(args.steps):
@@ -114,15 +133,14 @@ def main() -> None:
     waterfall.append(scan.ravel() if scan.ndim == 1 else scan.max(axis=0))
     del waterfall[:-500]
 
-    if step % 10 == 0:
-      axes.clear()
-      axes.imshow(np.array(waterfall), aspect="auto", cmap="viridis")
-      axes.set_xlabel("Range bin")
-      axes.set_ylabel("Ping")
-      axes.set_title(f"{args.sonar} waterfall, step {step}")
+    if live and step % 10 == 0:
+      draw(axes, waterfall, args.sonar, step)
       plt.pause(0.001)
 
-  plt.ioff()
+  if live:
+    plt.ioff()
+  elif waterfall:
+    draw(axes, waterfall, args.sonar, args.steps)
 
   if args.save and waterfall:
     args.save.mkdir(parents=True, exist_ok=True)

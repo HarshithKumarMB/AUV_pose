@@ -22,6 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from auv_pose.io.checkpoints import save_map
 from auv_pose.io.soundings import load_soundings, soundings_to_arrays
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
+from experiments.cli import refuse_overwrite
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,11 +46,20 @@ def parse_args() -> argparse.Namespace:
   )
   parser.add_argument("--seed", type=int, default=0)
   parser.add_argument("--no-plot", action="store_true")
+  parser.add_argument(
+    "--force",
+    action="store_true",
+    help="overwrite --out / --plot if they exist",
+  )
   return parser.parse_args()
 
 
 def main() -> None:
   args = parse_args()
+
+  refuse_overwrite(args.out, args.force)
+  if not args.no_plot:
+    refuse_overwrite(args.plot, args.force)
 
   frame = load_soundings(args.surveys)
   X, y = soundings_to_arrays(frame)

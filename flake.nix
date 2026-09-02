@@ -107,8 +107,11 @@
       # want the built, immutable version.
       # $PWD first so auv_pose resolves to the working tree -- the equivalent of an
       # editable install, without needing one.
+      # The world binaries are 5.2 GB, so they live with the other datasets
+      # rather than in the working tree. Set HOLODECKPATH before entering the
+      # shell to override.
       shellEnv = ''
-        export HOLODECKPATH="$PWD/.holoocean"
+        export HOLODECKPATH="''${HOLODECKPATH:-$HOME/data/holoocean}"
         export PYTHONPATH="$PWD:$PWD/${holooceanDir}/src:$PYTHONPATH"
       '';
       # The packaged Unreal binary is a foreign ELF that expects an FHS layout, so it

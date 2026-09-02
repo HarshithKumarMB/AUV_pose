@@ -133,6 +133,11 @@ def parse_args() -> argparse.Namespace:
     default=0.5,
     help="std of the depth sensor observation, m",
   )
+  parser.add_argument(
+    "--headless",
+    action="store_true",
+    help="run with -RenderOffScreen, for machines without a usable display",
+  )
   return parser.parse_args()
 
 
@@ -145,7 +150,9 @@ def main() -> None:
   )
   dt = 1.0 / TICK_RATE_HZ
 
-  env = holoocean.make(scenario_cfg=build_scenario())
+  env = holoocean.make(
+    scenario_cfg=build_scenario(), show_viewport=not args.headless
+  )
   state = env.tick()
 
   start_position = np.array(state["pose"])[:3, 3]

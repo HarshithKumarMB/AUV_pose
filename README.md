@@ -16,8 +16,9 @@ nix develop           # Python env for the offline scripts
 nix develop .#sim     # adds the OpenGL/Vulkan/X11 stack the Unreal binary needs
 ```
 
-Both set `HOLODECKPATH` to `./.holoocean` (gitignored) and put the vendored HoloOcean
-client on `PYTHONPATH`.
+Both put the vendored HoloOcean client on `PYTHONPATH` and set `HOLODECKPATH` to
+`~/data/holoocean`, since the world binaries are 5.2 GB. Export `HOLODECKPATH`
+before entering the shell to put them elsewhere.
 
 `nix develop .#sim` is interactive only — it drops you into an FHS environment, and a
 `--command` passed to it is silently discarded. To run something non-interactively under
@@ -33,6 +34,18 @@ The simulator worlds are a **5.2 GB** download, not included. Once:
 nix run .#sim -- -c "python -c \"import holoocean; holoocean.install('Ocean')\""
 ```
 
+Then check the simulator actually launches, before running anything else:
+
+```
+nix run .#sim -- -c "python experiments/smoke.py"
+nix run .#sim -- -c "python experiments/smoke.py --headless"   # no display
+```
+
+`smoke.py` builds a scenario, starts the binary, ticks it and reports every
+sensor with its shape. It separates "the binary will not start" from "the
+estimator is wrong", which are otherwise easy to confuse. All the simulator
+scripts take `--headless`, which passes `-RenderOffScreen`.
+
 ## Pipeline
 
 Run from the repository root.
@@ -47,6 +60,11 @@ Run from the repository root.
 
 Steps 2, 3 and 5 need no simulator: `map.csv` and `map1.csv` are committed (~82 k
 soundings). Every script takes `--help`.
+
+`survey.py` and `train_map.py` refuse to overwrite an existing output. The
+committed `map*.csv` and `svgp_bathymetry.pkl` are the only record of a survey
+that costs a simulator run to reproduce, so pass `--out` to write elsewhere, or
+`--force` once you are sure.
 
 ### Other experiments
 

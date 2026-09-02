@@ -20,6 +20,7 @@ import numpy as np
 from auv_pose.io.logs import CsvLogger
 from auv_pose.io.soundings import SOUNDING_COLUMNS
 from auv_pose.mapping.sonar import bottom_return_range, range_bins
+from experiments.cli import refuse_overwrite
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import ocean_scenario, pose_sensor, singlebeam_sonar
 
@@ -61,18 +62,31 @@ def build_scenario(start: list[float]) -> dict:
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="Bathymetry survey")
   parser.add_argument("--out", type=Path, default=Path("map1.csv"))
+  parser.add_argument(
+    "--force", action="store_true", help="overwrite --out if it exists"
+  )
   parser.add_argument("--max-steps", type=int, default=100_000)
   parser.add_argument("--arrival-radius", type=float, default=0.5)
+  parser.add_argument(
+    "--headless",
+    action="store_true",
+    help="run with -RenderOffScreen, for machines without a usable display",
+  )
   return parser.parse_args()
 
 
 def main() -> None:
   args = parse_args()
 
+  refuse_overwrite(args.out, args.force)
+
   waypoints = lawnmower()
   print(f"{len(waypoints)} waypoints")
 
-  env = holoocean.make(scenario_cfg=build_scenario(waypoints[0]))
+  env = holoocean.make(
+    scenario_cfg=build_scenario(waypoints[0]),
+    show_viewport=not args.headless,
+  )
   ranges = range_bins(
     SONAR["range_min"], SONAR["range_max"], SONAR["range_bins"]
   )
