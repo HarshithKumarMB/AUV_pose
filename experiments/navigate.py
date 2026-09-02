@@ -121,6 +121,12 @@ COLUMNS = (
   "ekf_vx",
   "ekf_vy",
   "ekf_vz",
+  # Position standard deviations, sqrt(diag(cov)). The filter's own account of
+  # how wrong it thinks it is, which is the only thing that says whether an
+  # error is consistent with the model or evidence the model is wrong.
+  "ekf_sx",
+  "ekf_sy",
+  "ekf_sz",
   "dr_x",
   "dr_y",
   "dr_z",
@@ -141,6 +147,14 @@ COLUMNS = (
   "true_qx",
   "true_qy",
   "true_qz",
+  # The accelerometer as read, before any rotation. With the gyro and the truth
+  # quaternion above, this is everything an attitude filter consumes, so any
+  # variant of one can be replayed from a log against identical input instead
+  # of being compared across separately flown runs. ax/ay/az cannot substitute:
+  # they are already rotated by the attitude under test.
+  "abx",
+  "aby",
+  "abz",
 )
 
 
@@ -302,7 +316,13 @@ def parse_args() -> argparse.Namespace:
     "--attitude-kp",
     type=float,
     default=1.0,
-    help="proportional gain on the tilt correction, 1/s",
+    help=(
+      "proportional gain on the tilt correction, 1/s. Not a lever on the "
+      "manoeuvre chasing that costs --no-dvl its accuracy: dead-reckoning rms "
+      "is flat at 8.1-9.1 m for every value from 0.5 to 16, because the "
+      "steady-state tilt is set by what the accelerometer reads and not by how "
+      "fast the loop gets there. Below 0.5 the gyro drifts instead"
+    ),
   )
   parser.add_argument(
     "--truth-attitude",
@@ -524,6 +544,7 @@ def main() -> None:
       estimate = ekf.step(estimate, accel_world, dt, observations)
       estimated_position = position(estimate)
       estimated_velocity = velocity(estimate)
+      position_sigma = np.sqrt(np.diag(estimate.cov)[:3])
 
       if args.report_every and step % args.report_every == 0:
         report(
@@ -565,6 +586,9 @@ def main() -> None:
         ekf_vx=estimated_velocity[0],
         ekf_vy=estimated_velocity[1],
         ekf_vz=estimated_velocity[2],
+        ekf_sx=position_sigma[0],
+        ekf_sy=position_sigma[1],
+        ekf_sz=position_sigma[2],
         dr_x=dead_reckoning.position[0],
         dr_y=dead_reckoning.position[1],
         dr_z=dead_reckoning.position[2],
@@ -581,6 +605,9 @@ def main() -> None:
         true_qx=truth_attitude[1],
         true_qy=truth_attitude[2],
         true_qz=truth_attitude[3],
+        abx=accel_body[0],
+        aby=accel_body[1],
+        abz=accel_body[2],
       )
     else:
       # Distinguish "too slow" from "diverged": a crawling but healthy run is
