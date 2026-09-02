@@ -1,1 +1,10 @@
-HoloOcean-release.zip
+# HoloOcean world binaries (~5.2 GB), downloaded by holoocean.install("Ocean")
+.holoocean/
+
+# Nix
+result
+result-*
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auv_pose"
+version = "0.1.0"
+description = "Terrain-aided pose estimation for an underwater vehicle"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "torch",
+    "gpytorch",
+    # BathymetryMap holds a StandardScaler, so loading a map needs sklearn.
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+# Used by experiments/, not by the auv_pose package itself.
+experiments = ["matplotlib", "lightgbm", "joblib"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["auv_pose*"]
+
+[tool.pytest.ini_options]
+# Only tests/. experiments/ contains scripts that call holoocean.make() at import
+# time -- collecting them would try to launch the Unreal simulator.
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "error::RuntimeWarning",
+]
