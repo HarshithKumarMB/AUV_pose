@@ -36,6 +36,7 @@ from auv_pose.estimation.typing import Measurement
 from auv_pose.io.checkpoints import load_map
 from auv_pose.io.logs import CsvLogger
 from auv_pose.mapping.sonar import bottom_return_range, range_bins
+from experiments.cli import configure_sdl
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
   depth_sensor,
@@ -143,6 +144,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
   args = parse_args()
+
+  configure_sdl(args.headless)
 
   bathymetry = load_map(args.map)
   ranges = range_bins(

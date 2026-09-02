@@ -95,6 +95,11 @@
         libxkbcommon
         alsa-lib
         openal
+        # SDL dlopens libudev.so.1 for joystick hotplug. Absent, SDL_UDEV_Init
+        # fails and SDL's own teardown segfaults in SDL_UDEV_DelCallback before
+        # the window is ever created. Not in upstream's Dockerfile because
+        # Ubuntu ships it by default.
+        systemd
         fontconfig
         freetype
         zlib

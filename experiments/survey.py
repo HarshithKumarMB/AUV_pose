@@ -20,7 +20,7 @@ import numpy as np
 from auv_pose.io.logs import CsvLogger
 from auv_pose.io.soundings import SOUNDING_COLUMNS
 from auv_pose.mapping.sonar import bottom_return_range, range_bins
-from experiments.cli import refuse_overwrite
+from experiments.cli import configure_sdl, refuse_overwrite
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import ocean_scenario, pose_sensor, singlebeam_sonar
 
@@ -79,6 +79,7 @@ def main() -> None:
   args = parse_args()
 
   refuse_overwrite(args.out, args.force)
+  configure_sdl(args.headless)
 
   waypoints = lawnmower()
   print(f"{len(waypoints)} waypoints")

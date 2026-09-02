@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from experiments.cli import configure_sdl
 from experiments.scenarios import (
   depth_sensor,
   imu_sensor,
@@ -37,22 +38,29 @@ EXPECTED_SHAPES = {
   "orient": (3, 3),
   "depthsensor": None,  # scalar-ish; length varies by build
   "imu_1": (2, 3),
-  "singlebeam": (256,),
 }
 
+SONAR_SHAPE = {"singlebeam": (256,)}
 
-def build_scenario(world: str, start: list[float]) -> dict:
+
+def build_scenario(
+  world: str, start: list[float], sonar: bool, octree_min: float
+) -> dict:
+  sensors = [
+    pose_sensor(),
+    orientation_sensor(),
+    depth_sensor(hz=TICK_RATE_HZ),
+    imu_sensor("imu_1", hz=TICK_RATE_HZ),
+  ]
+  if sonar:
+    sensors.append(singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ))
+
   return ocean_scenario(
     "smoke",
     start=start,
     world=world,
-    sensors=[
-      pose_sensor(),
-      orientation_sensor(),
-      depth_sensor(hz=TICK_RATE_HZ),
-      imu_sensor("imu_1", hz=TICK_RATE_HZ),
-      singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ),
-    ],
+    sensors=sensors,
+    octree_min=octree_min,
   )
 
 
@@ -67,6 +75,20 @@ def parse_args() -> argparse.Namespace:
     "--headless",
     action="store_true",
     help="run with -RenderOffScreen, for machines without a usable display",
+  )
+  parser.add_argument(
+    "--sonar",
+    action="store_true",
+    help=(
+      "also check the singlebeam. Off by default: sonar needs an octree, "
+      "which the simulator builds on first use at several GB per minute"
+    ),
+  )
+  parser.add_argument(
+    "--octree-min",
+    type=float,
+    default=0.02,
+    help="finest octree voxel in metres; only matters with --sonar",
   )
   return parser.parse_args()
 
@@ -93,10 +115,13 @@ def check_worlds_installed() -> None:
 def main() -> int:
   args = parse_args()
   check_worlds_installed()
+  configure_sdl(args.headless)
 
   print(f"HOLODECKPATH  {os.environ.get('HOLODECKPATH', '<unset>')}")
   print(f"world         {args.world}")
   print(f"viewport      {'off' if args.headless else 'on'}")
+  print(f"SDL driver    {os.environ['SDL_VIDEODRIVER']}")
+  print(f"sonar         {'on (builds octree)' if args.sonar else 'off'}")
 
   import holoocean
 
@@ -104,7 +129,9 @@ def main() -> int:
   print("\nlaunching...")
 
   env = holoocean.make(
-    scenario_cfg=build_scenario(args.world, args.start),
+    scenario_cfg=build_scenario(
+      args.world, args.start, args.sonar, args.octree_min
+    ),
     show_viewport=not args.headless,
   )
   print("binary started")
@@ -112,8 +139,12 @@ def main() -> int:
   state = env.tick()
   print(f"\nsensors after one tick ({len(state)} reported):")
 
+  expected_shapes = dict(EXPECTED_SHAPES)
+  if args.sonar:
+    expected_shapes.update(SONAR_SHAPE)
+
   failures = []
-  for name, expected in EXPECTED_SHAPES.items():
+  for name, expected in expected_shapes.items():
     if name not in state:
       print(f"  {name:14s} MISSING")
       failures.append(name)
@@ -137,9 +168,9 @@ def main() -> int:
   position = np.array(state["pose"])[:3, 3]
   print(f"\nafter {args.steps} steps at zero thrust:")
   print(f"  position      {np.array2string(position, precision=3)}")
-  print(
-    f"  sonar range   {np.argmax(np.asarray(state['singlebeam']))} (peak bin)"
-  )
+  if args.sonar:
+    peak = int(np.argmax(np.asarray(state["singlebeam"])))
+    print(f"  sonar peak    bin {peak}")
 
   if failures:
     print(f"\nFAILED: {', '.join(failures)}")

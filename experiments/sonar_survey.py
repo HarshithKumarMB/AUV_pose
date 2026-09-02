@@ -19,6 +19,7 @@ import numpy as np
 
 from auv_pose.estimation.quaternion import rotmat_to_quat
 from auv_pose.estimation.strapdown import StrapdownIntegrator
+from experiments.cli import configure_sdl
 from experiments.scenarios import (
   imaging_sonar,
   imu_sensor,
@@ -90,6 +91,7 @@ def draw(axes, waterfall, sonar: str, step: int) -> None:
 
 def main() -> None:
   args = parse_args()
+  configure_sdl(args.headless)
 
   env = holoocean.make(
     scenario_cfg=build_scenario(args.sonar, args.world, args.start),

@@ -168,11 +168,31 @@ def ocean_scenario(
   start: list[float],
   sensors: list[dict[str, Any]],
   world: str = "Dam",
+  octree_min: float = 0.02,
+  octree_max: float = 5.0,
 ) -> dict[str, Any]:
-  """A single-BlueROV2 scenario in a world from the Ocean package."""
+  """A single-BlueROV2 scenario in a world from the Ocean package.
+
+  :param name: Scenario name.
+  :param start: Initial world position.
+  :param sensors: Sensor configuration blocks.
+  :param world: World from the Ocean package.
+  :param octree_min: Finest octree voxel, metres. Sonar raycasting needs an
+      octree, which the simulator builds on first use and caches. The default
+      matches holoocean's own (``environments.py:150``) and is **expensive** --
+      the Dam world spans 664 x 664 x 400 m, and at 0.02 m this generates tens
+      of gigabytes at several GB per minute. Raise it to make runs practical,
+      but note that sonar ``AzimuthBins`` and ``ShadowEpsilon`` are derived from
+      it, so changing it changes sonar returns and makes new surveys
+      inconsistent with maps built at a different value.
+  :param octree_max: Coarsest octree voxel, metres.
+  :return: A scenario dict for :func:`holoocean.make`.
+  """
   return {
     "name": name,
     "world": world,
     "package_name": "Ocean",
+    "octree_min": octree_min,
+    "octree_max": octree_max,
     "agents": [blue_rov_agent(location=start, sensors=sensors)],
   }
