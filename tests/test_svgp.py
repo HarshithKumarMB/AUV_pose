@@ -164,3 +164,104 @@ def test_load_rejects_a_foreign_pickle(tmp_path):
 
   with pytest.raises(ValueError, match="not a bathymetry checkpoint"):
     load_map(path)
+
+
+def _fit_surface(surface, n=1500, epochs=300, n_inducing=120, seed=0):
+  """Fit a known analytic surface and return the map, its inputs and truth."""
+  rng = np.random.default_rng(seed)
+  X = rng.uniform(-20, 20, size=(n, 2)).astype(np.float32)
+  y = surface(X).astype(np.float32)
+
+  x_scaler = StandardScaler().fit(X)
+  y_mean, y_std = float(y.mean()), float(y.std())
+  model, likelihood, _ = fit_svgp(
+    torch.tensor(x_scaler.transform(X), dtype=torch.float32),
+    torch.tensor((y - y_mean) / y_std, dtype=torch.float32),
+    n_inducing=n_inducing,
+    epochs=epochs,
+    batch_size=512,
+    seed=seed,
+  )
+  return BathymetryMap(model, likelihood, x_scaler, y_mean, y_std), X, y, model
+
+
+def test_recovers_a_known_curved_surface():
+  """The check that a plane cannot make: does it fit *structure*?
+
+  ``test_predict_recovers_the_synthetic_slope`` fits a plane, which a constant
+  mean plus almost any kernel gets right, so it passes whatever the covariance
+  is doing. Curvature is what actually exercises the kernel -- and a map that
+  cannot beat the mean of a few nearby soundings is not earning its complexity,
+  which is the failure this exists to catch.
+  """
+
+  def surface(X):
+    return -60.0 + 2.0 * np.sin(X[:, 0] / 6.0) + 1.5 * np.cos(X[:, 1] / 5.0)
+
+  bathymetry, _, y, _ = _fit_surface(surface)
+
+  probe = np.random.default_rng(1).uniform(-18, 18, size=(300, 2))
+  error = bathymetry.predict(probe) - surface(probe)
+  rmse = float(np.sqrt((error**2).mean()))
+
+  assert rmse < 0.4 * y.std(), f"rmse {rmse:.3f} against relief {y.std():.3f}"
+
+
+def test_lengthscales_are_learned_per_axis():
+  """ARD: structure that varies fast in x and slowly in y must be seen as such.
+
+  Without ``ard_num_dims`` there is a single lengthscale shared by both axes,
+  and the only anisotropy the model can express is whatever ratio the input
+  scaler happens to impose -- a fact about the survey's bounding box rather
+  than about the seabed.
+  """
+
+  def ridges(X):
+    return -60.0 + 2.0 * np.sin(X[:, 0] / 2.0)  # varies in x, flat in y
+
+  _, _, _, model = _fit_surface(ridges, epochs=300)
+  lengthscale = model.covar_module.base_kernel.lengthscale.detach().numpy()
+
+  assert lengthscale.size == 2, "kernel is not ARD"
+  x_scale, y_scale = lengthscale.ravel()
+  assert y_scale > 2.0 * x_scale, (
+    f"expected a longer lengthscale along the flat axis, got {lengthscale}"
+  )
+
+
+def test_with_std_is_the_map_not_the_sounding(synthetic):
+  """Uncertainty about the seabed, not about a future sonar return.
+
+  Adding the likelihood's noise is right when predicting a *sounding* and wrong
+  when asking how well the seabed is known. It matters because a poorly fitted
+  GP parks its misfit in that noise term, so the noisy figure comes back large
+  and almost flat across the map -- which is worse than useless to a filter
+  trying to decide how far to trust the map here rather than there.
+  """
+  bathymetry = _fitted_map(synthetic, epochs=5)
+  points = np.array([[0.0, 0.0], [5.0, -5.0]])
+
+  _, latent = bathymetry.predict(points, with_std=True)
+  _, noisy = bathymetry.predict(points, with_std=True, observation_noise=True)
+
+  assert np.all(latent < noisy)
+  assert np.all(latent > 0)
+
+
+def test_uncertainty_grows_away_from_the_data(synthetic):
+  """The property that makes the std usable as a measurement variance."""
+  bathymetry = _fitted_map(synthetic, epochs=30)
+
+  _, near = bathymetry.predict(np.array([[0.0, 0.0]]), with_std=True)
+  _, far = bathymetry.predict(np.array([[400.0, 400.0]]), with_std=True)
+
+  assert far[0] > near[0]
+
+
+def test_fit_records_its_elbo_trace(synthetic):
+  """Convergence should be observable rather than assumed."""
+  model, _, _ = fit_svgp(
+    synthetic["train_x"], synthetic["train_y"], n_inducing=20, epochs=8, seed=0
+  )
+  assert len(model.elbo_trace) == 8
+  assert model.elbo_trace[-1] < model.elbo_trace[0]

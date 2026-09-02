@@ -74,7 +74,14 @@ def load_map(path: str | Path) -> BathymetryMap:
   likelihood = gpytorch.likelihoods.GaussianLikelihood()
 
   # gpytorch migrates pre-rename ConstantMean checkpoints itself, and warns.
-  model.load_state_dict(checkpoint["model_state_dict"])
+  try:
+    model.load_state_dict(checkpoint["model_state_dict"])
+  except RuntimeError as error:
+    raise ValueError(
+      f"{path} does not match the current model. Checkpoints written before "
+      "the kernel gained per-axis lengthscales (ARD) store one lengthscale "
+      "where two are now expected. Refit with experiments/train_map.py."
+    ) from error
   likelihood.load_state_dict(checkpoint["likelihood_state_dict"])
 
   return BathymetryMap(
