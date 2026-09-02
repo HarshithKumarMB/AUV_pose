@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from auv_pose.estimation.quaternion import (
+  quat_angle,
   quat_conjugate,
   quat_from_gyro,
   quat_multiply,
@@ -124,3 +125,53 @@ def test_skew_is_antisymmetric():
 def test_normalize_rejects_zero():
   with pytest.raises(ValueError):
     quat_normalize(np.zeros(4))
+
+
+def test_angle_to_itself_is_zero():
+  for q in random_quats(5, seed=11):
+    assert quat_angle(q, q) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_angle_of_a_quarter_turn():
+  q = quat_from_gyro([0.0, 0.0, 1.0], np.pi / 2)
+  assert quat_angle(IDENTITY, q) == pytest.approx(np.pi / 2)
+
+
+def test_angle_of_a_half_turn():
+  q = quat_from_gyro([0.0, 1.0, 0.0], np.pi)
+  assert quat_angle(IDENTITY, q) == pytest.approx(np.pi)
+
+
+def test_negated_quaternion_is_the_same_orientation():
+  """The double cover: a naive arccos(dot) would report a half turn here."""
+  for q in random_quats(5, seed=12):
+    assert quat_angle(q, -q) == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_angle_is_symmetric(seed):
+  a, b = random_quats(2, seed=seed + 20)
+  assert quat_angle(a, b) == pytest.approx(quat_angle(b, a))
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_angle_matches_the_matrix_route(seed):
+  """Cross-check against the angle recovered from the relative rotation."""
+  a, b = random_quats(2, seed=seed + 30)
+  relative = rotmat_to_quat(quat_to_rotmat(a).T @ quat_to_rotmat(b))
+  assert quat_angle(a, b) == pytest.approx(quat_angle(IDENTITY, relative))
+
+
+def test_angle_survives_rounding_past_one():
+  """Nearly identical quaternions can dot to slightly above 1."""
+  q = random_quats(1, seed=40)[0]
+  nudged = quat_normalize(q + 1e-12 * np.array([1.0, 0.0, 0.0, 0.0]))
+  assert 0.0 <= quat_angle(q, nudged) < 1e-5
+
+
+def test_angle_grows_with_the_rotation():
+  angles = [
+    quat_angle(IDENTITY, quat_from_gyro([0.0, 0.0, 1.0], t))
+    for t in (0.1, 0.5, 1.0, 2.0)
+  ]
+  assert angles == sorted(angles)

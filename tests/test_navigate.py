@@ -48,12 +48,14 @@ def test_report_prints_one_line(capsys):
     sonar_range=68.2,
     map_depth=-64.9,
     waypoint=3,
+    attitude_error=14.3,
   )
   out = capsys.readouterr().out.strip()
 
   assert out.count("\n") == 0
   assert "step    120" in out
   assert "wp 3" in out
+  assert "att  14.30 deg" in out
   assert "0.50 m" in out  # ekf error: truth z 5.5 against estimate 5.0
   assert "2.00 m" in out  # dead-reckoning error: 2 m out in x, matching in z
 
@@ -70,5 +72,6 @@ def test_report_survives_a_no_echo_tick(capsys):
     sonar_range=float("nan"),
     map_depth=float("nan"),
     waypoint=0,
+    attitude_error=0.0,
   )
   assert "nan" in capsys.readouterr().out

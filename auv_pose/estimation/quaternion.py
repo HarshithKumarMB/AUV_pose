@@ -14,6 +14,7 @@ G_NED: NDArray[np.float64] = np.array([0.0, 0.0, 9.81])
 
 __all__ = [
   "G_NED",
+  "quat_angle",
   "quat_conjugate",
   "quat_from_gyro",
   "quat_multiply",
@@ -128,6 +129,21 @@ def rotmat_to_quat(R: ArrayLike) -> NDArray[np.float64]:
       q[3] = 0.25 * s
 
   return quat_normalize(q)
+
+
+def quat_angle(q: ArrayLike, r: ArrayLike) -> float:
+  """Smallest rotation angle between two orientations, in radians.
+
+  ``q`` and ``-q`` denote the same rotation, so the dot product is taken in
+  absolute value -- without that, identical orientations of opposite sign would
+  read as a half turn.
+
+  :param q: First orientation.
+  :param r: Second orientation.
+  :return: Angle in ``[0, pi]``.
+  """
+  dot = abs(float(np.dot(quat_normalize(q), quat_normalize(r))))
+  return 2.0 * float(np.arccos(np.clip(dot, -1.0, 1.0)))
 
 
 def skew(w: ArrayLike) -> NDArray[np.float64]:

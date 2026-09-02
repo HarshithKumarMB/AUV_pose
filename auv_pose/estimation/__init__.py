@@ -38,6 +38,7 @@ from auv_pose.estimation.filters import (
 )
 from auv_pose.estimation.quaternion import (
   G_NED,
+  quat_angle,
   quat_conjugate,
   quat_from_gyro,
   quat_multiply,
@@ -59,6 +60,7 @@ __all__ = [
   "Step",
   "StrapdownIntegrator",
   "position",
+  "quat_angle",
   "quat_conjugate",
   "quat_from_gyro",
   "quat_multiply",

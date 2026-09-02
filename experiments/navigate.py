@@ -14,7 +14,9 @@ Two properties worth knowing before comparing runs:
   reflects estimator quality honestly.
 
 Ground truth is read only to initialise attitude and to log error. It never enters
-the filter or the controller.
+the filter or the controller -- except under ``--truth-attitude``, a diagnostic
+flag that deliberately breaks that rule to isolate attitude error, and which
+announces itself loudly when used.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from auv_pose.estimation.filters import (
   position,
   velocity,
 )
-from auv_pose.estimation.quaternion import rotmat_to_quat
+from auv_pose.estimation.quaternion import quat_angle, rotmat_to_quat
 from auv_pose.estimation.strapdown import StrapdownIntegrator
 from auv_pose.estimation.typing import Measurement
 from auv_pose.io.checkpoints import load_map
@@ -77,6 +79,7 @@ SONAR = {"range_min": 0.5, "range_max": 100.0, "range_bins": 256}
 
 COLUMNS = (
   "step",
+  "att_err_deg",
   "ax",
   "ay",
   "az",
@@ -152,6 +155,16 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--truth-attitude",
+    action="store_true",
+    help=(
+      "DIAGNOSTIC ONLY: take attitude from the OrientationSensor each tick "
+      "instead of propagating the gyro. This is ground truth inside the "
+      "estimator, so results are not valid -- it exists to bisect attitude "
+      "divergence from position integration"
+    ),
+  )
+  parser.add_argument(
     "--headless",
     action="store_true",
     help="run with -RenderOffScreen, for machines without a usable display",
@@ -189,6 +202,7 @@ def report(
   sonar_range,
   map_depth,
   waypoint,
+  attitude_error,
 ) -> None:
   """One diagnostic line.
 
@@ -201,9 +215,9 @@ def report(
   resid_text = np.array2string(resid, precision=2, suppress_small=True)
 
   print(
-    f"step {step:6d} | wp {waypoint} | ekf {ekf_error:7.2f} m | "
-    f"dr {dr_error:8.2f} m | sonar {sonar_range:6.2f} | "
-    f"map {map_depth:8.2f} | innov {resid_text}"
+    f"step {step:6d} | wp {waypoint} | att {attitude_error:6.2f} deg | "
+    f"ekf {ekf_error:7.2f} m | dr {dr_error:8.2f} m | "
+    f"sonar {sonar_range:6.2f} | map {map_depth:8.2f} | innov {resid_text}"
   )
 
 
@@ -211,6 +225,12 @@ def main() -> None:
   args = parse_args()
 
   configure_sdl(args.headless)
+
+  if args.truth_attitude:
+    print(
+      "*** --truth-attitude: attitude comes from ground truth. This run is a "
+      "diagnostic bisection, not a valid result. ***"
+    )
 
   bathymetry = load_map(args.map)
   ranges = range_bins(
@@ -244,9 +264,20 @@ def main() -> None:
       truth = np.array(state["pose"])[:3, 3]
       accel_body, gyro_body = np.array(state["imu_1"], dtype=float)[:2]
 
+      truth_attitude = rotmat_to_quat(np.array(state["orient"], dtype=float))
+
+      if args.truth_attitude:
+        # Diagnostic bisection only -- see --truth-attitude. step() still
+        # propagates one dt of gyro from here, so the rotation it uses carries
+        # a single sample of error rather than none.
+        dead_reckoning.attitude = truth_attitude
+
       # Strapdown gives both the honest dead-reckoning baseline and the
       # world-frame acceleration the filter needs as its control input.
       accel_world = dead_reckoning.step(gyro_body, accel_body, dt)
+      attitude_error = np.degrees(
+        quat_angle(dead_reckoning.attitude, truth_attitude)
+      )
 
       sonar_range = bottom_return_range(np.asarray(state["singlebeam"]), ranges)
       depth = float(np.asarray(state["depthsensor"]).ravel()[0])
@@ -279,6 +310,7 @@ def main() -> None:
           sonar_range,
           map_depth,
           follower.index,
+          attitude_error,
         )
 
       command_or_none = follower.command(estimated_position)
@@ -292,6 +324,7 @@ def main() -> None:
 
       log.write(
         step=step,
+        att_err_deg=attitude_error,
         ax=accel_world[0],
         ay=accel_world[1],
         az=accel_world[2],
