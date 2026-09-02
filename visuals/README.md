@@ -30,85 +30,113 @@ a controlled comparison. Regenerate with the probe script noted in the commit
 that added this file; `experiments/navigate.py --legacy-frames` reproduces the
 old configuration end to end.
 
-**Why this is not shown as a position-error comparison.** After the fix the
-remaining errors are small enough that run-to-run variation swamps the
-difference between configurations -- guidance closes on the estimate, so each
-run flies a different trajectory, and dead reckoning alone spans 3.7-9.7 m
-across runs with identical sensors. A single before/after pair of `navigate.py`
-runs cannot support a claim about position error, so none is made here.
+**Why this is not shown as a position-error comparison.** Guidance closes on the
+estimate, so each configuration flies a genuinely different trajectory, and a
+single before/after pair of `navigate.py` runs cannot support a claim about
+position error. None is made here. (When this was written dead reckoning alone
+spanned 3.7-9.7 m across runs with identical sensors, which made the point
+loudly; it is 0.54-0.75 m over three runs now, so the point is quieter but the
+logic is unchanged.)
 
 ## `navigate_runs.png`
 
-**Superseded, kept as a record of how the defects were found.** Every run in it
-predates the frame fix above and the thruster-saturation fix, so all of them
-were flown with mirrored acceleration, and the `+ DVL, wrong axes` series has no
-counterpart in the code any more -- `DVL_AXES` is gone. Its three findings still
-hold; its numbers do not.
+Where `navigate.py` stands on the current code. One 300-step (10 s) run per
+configuration, with the previous version of this figure alongside -- the
+dead-reckoning column is what changed and why.
 
-Five `navigate.py` runs over the same 300-step (10 s) course, tracing the three
-defects found in the simulator runs and the effect of fixing each.
+| run | EKF | dead reckoning | velocity error | mean attitude error |
+|---|---|---|---|---|
+| all fixed | 0.51 → **0.24 m** | 7.49 → **0.62 m** | 0.05 → 0.03 m/s | 0.94 → 0.23° |
+| mirrored frames (before) | 0.68 → 0.65 m | 9.01 → 1.47 m | 0.03 → 0.03 m/s | 1.03 → 1.50° |
+| no DVL | 8.88 → 8.83 m | 9.68 → 8.83 m | 0.95 → 1.41 m/s | 0.75 → 0.92° |
+| truth attitude (bound) | 0.27 → 0.25 m | 3.68 → **0.48 m** | 0.01 → 0.03 m/s | 0.05 → 0.08° |
 
-| run | configuration | final EKF error | velocity error |
-|---|---|---|---|
-| gyro only | no attitude correction, no DVL | 27.6 m | 3.86 m/s |
-| + attitude correction | `AttitudeFilter` bounding tilt | 14.6 m | 1.69 m/s |
-| + DVL, wrong axes | velocity aiding, DVL frame uncorrected | 31.5 m | 4.37 m/s |
-| + DVL, axes corrected | `DVL_AXES` applied | **0.68 m** | 0.07 m/s |
-| truth attitude (bound) | `--truth-attitude`, a diagnostic bound | 13.8 m | 1.47 m/s |
+**Dead reckoning was 7.5 m because of two defects, neither of them accelerometer
+noise.** The figure it replaces said the drift was residual tilt plus doubly
+integrated noise. It was not. Splitting the error by axis separates two causes
+that had nothing to do with each other:
 
-The three defects, in the order they were found:
+*Vertical, 3.9 m: the run started from an assumed rest.* The vehicle is dropped
+in negatively buoyant and is still sinking at 0.39 m/s when the first tick
+returns, while the strapdown and the EKF both initialised at zero velocity.
+Nothing observes velocity in the open loop, so that 0.39 m/s never washed out:
+0.39 × 10 s = 3.9 m, and the measured vertical error was +3.93, +3.90 and +3.64 m
+in the three runs with correct frames (−4.04 m under `--legacy-frames`, mirrored
+like everything else there). It was identical under `--truth-attitude`, which is
+why the 3.68 m "bound" in the old table was not a bound on anything -- it was
+this, and attitude accounted for 0.58 m of it. Fixed by ticking 60 steps under no
+thrust to let the transient decay, then initialising both estimators from the
+DVL.
 
-1. **Attitude was propagated from the gyro alone.** Bounding tilt against the
-   accelerometer takes the run to 14.6 m — which is the truth-attitude bound of
-   13.8 m, so attitude is no longer what limits it.
-2. **The DVL's axes are not the `OrientationSensor`'s.** Its y and z are
-   inverted, so before `DVL_AXES` the DVL was *worse than not having one*:
-   31.5 m against 14.6 m. The filter was handed a systematically wrong velocity
-   and told to trust it at 0.1 m/s.
-3. **The IMU bias sigmas were misread as bias standard deviations.** HoloOcean
-   applies `AccelBiasSigma`/`AngVelBiasSigma` as **per-sample random-walk
-   increments**, so bias grows as `sigma·sqrt(n)`. At the previous value of
-   0.01 — measured with `ReturnBias` against a motionless vehicle — the gyro
-   bias reached 14 °/s and the accelerometer bias 0.35 m/s² after 300 samples,
-   around 200× a real MEMS unit. Size them backwards from a target bias:
-   `sigma = bias_at_n / sqrt(n)`.
+*Horizontal, 6.4 m: the attitude filter was cancelling the acceleration the
+strapdown was integrating.* An accelerometer measures specific force, so under
+horizontal acceleration `a_h` the reading tilts off `−g` by `atan(a_h / g)`.
+Averaged over the run that tilt is 0.95°, and the logged mean attitude error was
+0.94° -- the complementary filter was tracking the manoeuvre almost exactly. The
+strapdown then rotated the same reading by that tilted attitude and added `g`
+back, which cancels most of the acceleration out again. Regressing the recovered
+horizontal acceleration on the twice-differentiated truth gives the size of it:
 
-That third defect dominated the other two, and its discovery changed what the
-first two mean. In the previous version of this figure the story was gravity
-leaking into acceleration through a diverging attitude; with a correctly
-specified gyro, the spurious-acceleration panel is flat at zero for every run
-and that mechanism is gone. Panel **(b)** now carries the mechanism instead:
-without a DVL, velocity is unobservable and plateaus near 1.5 m/s regardless of
-how good attitude is; with a mis-framed DVL it grows without bound; with a
-correct one it converges to 0.07 m/s.
+| | slope, before | after |
+|---|---|---|
+| all fixed | 0.66, 0.64 | 0.94, 0.93 |
+| truth attitude (bound) | 1.02, 0.99 | 0.96, 0.98 |
+| no DVL | 0.66, 0.68 | 0.59, 0.53 |
 
-Panels: **(a)** position error against ground truth, log scale; **(b)** velocity
-error, the mechanism; **(c)** attitude error over the vehicle's own rotation;
-**(d)** the resulting track with all three fixed.
+A third of the acceleration was being rotated away, and the error was
+antiparallel to the true acceleration (median projection −0.86). **That is why
+the dead-reckoned track came out short rather than randomly displaced** -- it is
+negative feedback between two components, not noise. Fixed by differentiating the
+DVL for the vehicle's own acceleration and subtracting it before the reading is
+used as a gravity reference.
 
-**Read panel (c) carefully.** Attitude error and the vehicle's physical rotation
-are plotted together because otherwise the panel reads as if the attitude filter
-failed. It did not: attitude holds to 0.5° in every run until the vehicle itself
-starts rotating, at around t = 7 s in the two runs whose position estimate
-diverged first. The controller chased a bad estimate until it tumbled the
-vehicle. The attitude error there is a *consequence* of divergence, not its
-cause — the reverse of what the earlier version of this figure showed.
+**`gravity_trust` was supposed to prevent exactly this and structurally cannot.**
+A horizontal component adds to `g` in quadrature, so at `a_h = 0.5 m/s²` the
+magnitude moves 0.13% and the trust stays at 0.99 -- over the run it averaged
+0.95, with 85% of samples above 0.9. A magnitude test detects acceleration
+*along* gravity, the one direction that induces no tilt at all. The existing test
+for it used 20 m/s², which is the case it can see.
 
-**These are not a controlled comparison.** Guidance is closed on the estimate,
-so each configuration flies a genuinely different trajectory and experiences
-different manoeuvres. Differences between runs indicate estimator quality; they
-are not like-for-like.
+**The `--no-dvl` row is unfixed in the horizontal and that is not an oversight.**
+There is nothing else on this vehicle that measures its own acceleration, so the
+compensation has no input. Its slope is still 0.59 and its 8.8 m is what the
+figure now shows as the weak point. Worth knowing: with the correctly specified
+gyro, `--gyro-only` -- no accelerometer correction at all -- held 0.27° over 10 s
+against the filter's 0.94°, so on this timescale the uncompensated correction was
+a net harm.
 
-Regenerating means re-running the configurations below on a checkout from
-before the frame fix -- `--raw-dvl-axes`, which the third series needed, no
-longer exists. The logs are not in the repository:
+**The `mirrored frames` row gets worse in attitude, 1.03 → 1.50°, and that is
+consistent.** Under `--legacy-frames` the DVL is sign-flipped along with
+everything else, so the compensation is computed from a mirrored velocity and
+partly fights the filter instead of helping it. Its horizontal slope shows the
+same thing: 0.94 in x but −0.26 in y, where a correctly framed run gets 0.94 in
+both. That is the frame mismatch, not a regression in the fix.
+
+**Read the small differences as noise.** Three runs at identical settings gave
+0.54, 0.75 and 0.62 m of dead-reckoning error, so the gap between "all fixed" and
+"mirrored frames" is not by itself evidence that the frame fix improved position
+error -- the controlled evidence for that is `frame_mismatch.png`, where both
+configurations fly the same open-loop commands. The `no DVL` velocity error moved
+from 0.95 to 1.41 m/s between figures, which is a different trajectory's value
+for an unobservable quantity and means nothing.
+
+Panels: **(a)** EKF position error, log scale; **(b)** dead reckoning, log scale,
+now within a factor of 1.3 of the truth-attitude bound; **(c)** velocity error,
+which is what the DVL observes directly; **(d)** the fully-fixed track, where
+dead reckoning now follows the truth instead of stopping 2 m along a 7 m course.
+
+Regenerate with:
 
 ```
-nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --gyro-only --no-dvl      --out gyro.csv"
-nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --no-dvl                  --out att.csv"
-nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300                           --out dvl.csv"
-nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --truth-attitude --no-dvl --out truth.csv"
+nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300                     --out runs/dvl.csv"
+nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --legacy-frames     --out runs/legacy.csv"
+nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --no-dvl            --out runs/att.csv"
+nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --truth-attitude    --out runs/truthatt.csv"
+python scripts/plot_runs.py --logs runs/
 ```
 
-`--accel-bias-sigma 0.01 --gyro-bias-sigma 0.01` reproduces the runs from before
-the IMU was measured.
+`--accel-bias-sigma 0.01 --gyro-bias-sigma 0.01` reproduces the IMU as it was
+configured before it was measured, and `--gyro-only` drops the attitude
+correction. Neither defect above has a flag that restores it -- both fixes are
+terms in the estimator rather than switches -- so the "before" column comes from
+the commit that this figure replaced.
