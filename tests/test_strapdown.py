@@ -2,7 +2,7 @@
 
 These pin the body-to-world conversion, which is otherwise only exercised
 against the simulator. An accelerometer reports specific force, so at rest it
-reads ``-G_NED`` and the recovered linear acceleration must be zero -- getting
+reads ``-GRAVITY_NWU`` and the recovered linear acceleration must be zero -- getting
 that sign wrong is the classic way to make dead reckoning fall out of the sky.
 """
 
@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from auv_pose.estimation.quaternion import (
-  G_NED,
+  GRAVITY_NWU,
   quat_from_gyro,
   quat_to_rotmat,
   rotmat_to_quat,
@@ -18,7 +18,7 @@ from auv_pose.estimation.quaternion import (
 from auv_pose.estimation.strapdown import StrapdownIntegrator
 
 LEVEL = np.array([1.0, 0.0, 0.0, 0.0])
-AT_REST = -G_NED  # what an accelerometer reads when stationary and level
+AT_REST = -GRAVITY_NWU  # what an accelerometer reads when stationary and level
 
 
 def test_at_rest_does_not_move():
@@ -157,3 +157,55 @@ def test_set_attitude_without_a_filter():
   integrator.set_attitude(turned)
   integrator.step(np.zeros(3), AT_REST, 0.01)
   assert np.allclose(integrator.attitude, turned, atol=1e-3)
+
+
+# The simulator's world is z-up while a sensor in the IMU socket reports in a
+# z-down body frame, so a level vehicle's body-to-world rotation is a half turn
+# about x, not identity. This is the geometry the frame constants exist for.
+Z_DOWN_BODY = rotmat_to_quat(np.diag([1.0, -1.0, -1.0]))
+TRUE_ACCEL = np.array([1.0, 2.0, 0.5])
+
+
+def _specific_force(accel_world, attitude, gravity):
+  """What an accelerometer in that body frame would read."""
+  R = quat_to_rotmat(attitude)
+  return R.T @ (np.asarray(accel_world) - np.asarray(gravity))
+
+
+def test_z_down_body_in_a_z_up_world_recovers_the_acceleration():
+  integrator = StrapdownIntegrator(
+    np.zeros(3), Z_DOWN_BODY, gravity=GRAVITY_NWU
+  )
+  reading = _specific_force(TRUE_ACCEL, Z_DOWN_BODY, GRAVITY_NWU)
+  recovered = integrator.step(np.zeros(3), reading, 0.01)
+  np.testing.assert_allclose(recovered, TRUE_ACCEL, atol=1e-9)
+
+
+def test_mismatched_frame_and_gravity_mirror_each_other_at_rest():
+  """Why this was invisible for so long.
+
+  Taking orientation from the wrong socket (identity instead of a half turn)
+  and gravity from the wrong convention are two errors that cancel exactly when
+  the vehicle is at rest. Nothing falls out of the sky, no test of the resting
+  case fails, and the pair survives.
+  """
+  from auv_pose.estimation.quaternion import GRAVITY_NED
+
+  at_rest = _specific_force(np.zeros(3), Z_DOWN_BODY, GRAVITY_NWU)
+  wrong = StrapdownIntegrator(np.zeros(3), LEVEL, gravity=GRAVITY_NED)
+  np.testing.assert_allclose(
+    wrong.step(np.zeros(3), at_rest, 0.01), np.zeros(3), atol=1e-9
+  )
+
+
+def test_mismatched_frame_and_gravity_mirror_y_and_z_once_moving():
+  """And what it costs: every recovered acceleration is mirrored in y and z."""
+  from auv_pose.estimation.quaternion import GRAVITY_NED
+
+  reading = _specific_force(TRUE_ACCEL, Z_DOWN_BODY, GRAVITY_NWU)
+  wrong = StrapdownIntegrator(np.zeros(3), LEVEL, gravity=GRAVITY_NED)
+  np.testing.assert_allclose(
+    wrong.step(np.zeros(3), reading, 0.01),
+    TRUE_ACCEL * np.array([1.0, -1.0, -1.0]),
+    atol=1e-9,
+  )

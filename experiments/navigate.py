@@ -40,7 +40,12 @@ from auv_pose.estimation.filters import (
   position,
   velocity,
 )
-from auv_pose.estimation.quaternion import quat_angle, rotmat_to_quat
+from auv_pose.estimation.quaternion import (
+  GRAVITY_NED,
+  GRAVITY_NWU,
+  quat_angle,
+  rotmat_to_quat,
+)
 from auv_pose.estimation.strapdown import StrapdownIntegrator
 from auv_pose.estimation.typing import Measurement
 from auv_pose.io.checkpoints import load_map
@@ -49,7 +54,6 @@ from auv_pose.mapping.sonar import bottom_return_range, range_bins
 from experiments.cli import configure_sdl
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
-  DVL_AXES,
   depth_sensor,
   dvl_sensor,
   imu_sensor,
@@ -132,15 +136,20 @@ COLUMNS = (
 
 
 def build_scenario(
-  octree_min: float, accel_bias_sigma: float, ang_vel_bias_sigma: float
+  octree_min: float,
+  accel_bias_sigma: float,
+  ang_vel_bias_sigma: float,
+  legacy_frames: bool = False,
 ) -> dict:
+  # See --legacy-frames: the COM socket is the misconfiguration, not a choice.
+  socket = None if legacy_frames else "IMUSocket"
   return ocean_scenario(
     "terrain_aided_navigation",
     start=START,
     octree_min=octree_min,
     sensors=[
-      pose_sensor(),
-      orientation_sensor(),
+      pose_sensor(socket=socket),
+      orientation_sensor(socket=socket),
       depth_sensor(hz=TICK_RATE_HZ),
       imu_sensor(
         "imu_1",
@@ -219,12 +228,14 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
-    "--raw-dvl-axes",
+    "--legacy-frames",
     action="store_true",
     help=(
-      "read the DVL without applying DVL_AXES. Its y and z are inverted "
-      "relative to the OrientationSensor frame, so this reproduces the runs "
-      "where adding a DVL bought nothing"
+      "reproduce the frame mismatch fixed in this branch: orientation read "
+      "from the default COM socket while the IMU and DVL report in the IMU "
+      "socket, gravity taken as z-down in a z-up world, and the DVL patched "
+      "with a sign flip. Cancels exactly at rest and mirrors every recovered "
+      "acceleration in y and z once moving"
     ),
   )
   parser.add_argument(
@@ -345,7 +356,10 @@ def main() -> None:
 
   env = holoocean.make(
     scenario_cfg=build_scenario(
-      args.octree_min, args.accel_bias_sigma, args.gyro_bias_sigma
+      args.octree_min,
+      args.accel_bias_sigma,
+      args.gyro_bias_sigma,
+      legacy_frames=args.legacy_frames,
     ),
     show_viewport=not args.headless,
   )
@@ -354,13 +368,17 @@ def main() -> None:
   start_position = np.array(state["pose"])[:3, 3]
   attitude = rotmat_to_quat(np.array(state["orient"], dtype=float))
 
+  gravity = GRAVITY_NED if args.legacy_frames else GRAVITY_NWU
+
   ekf = ConstantVelocityEKF(accel_process_sigma=0.5)
   estimate = ekf.initial(start_position)
   attitude_filter = (
-    None if args.gyro_only else AttitudeFilter(kp=args.attitude_kp, q0=attitude)
+    None
+    if args.gyro_only
+    else AttitudeFilter(kp=args.attitude_kp, q0=attitude, gravity=gravity)
   )
   dead_reckoning = StrapdownIntegrator(
-    start_position, attitude, attitude_filter=attitude_filter
+    start_position, attitude, attitude_filter=attitude_filter, gravity=gravity
   )
 
   measurement_noise = np.diag([args.sigma_map**2, args.sigma_depth**2])
@@ -410,8 +428,9 @@ def main() -> None:
       if not args.no_dvl:
         # Body-frame velocity over ground, rotated into the world by the
         # current attitude estimate.
-        axes = 1.0 if args.raw_dvl_axes else DVL_AXES
-        dvl_body = np.asarray(state["dvl"], dtype=float)[:3] * axes
+        dvl_body = np.asarray(state["dvl"], dtype=float)[:3]
+        if args.legacy_frames:
+          dvl_body = dvl_body * np.array([1.0, -1.0, -1.0])
         dvl_world = dead_reckoning.rotation @ dvl_body
 
         # The reading itself is good -- measured speed matches truth to under

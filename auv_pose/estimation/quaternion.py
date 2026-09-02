@@ -9,11 +9,23 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-# World-frame gravity in NED. Positive because z points down.
-G_NED: NDArray[np.float64] = np.array([0.0, 0.0, 9.81])
+GRAVITY = 9.81
+
+#: Gravity in a **z-down** world frame such as NED. Positive third component.
+GRAVITY_NED: NDArray[np.float64] = np.array([0.0, 0.0, GRAVITY])
+
+#: Gravity in a **z-up** world frame such as NWU or ENU. This is the one
+#: HoloOcean's world uses -- its PoseSensor reports z increasing upward, so a
+#: vehicle 65 m under the surface sits at ``z = -65``. Getting this backwards
+#: does not blow up at rest, because an accelerometer read in a z-down *body*
+#: frame cancels a z-down gravity vector exactly; it silently mirrors the
+#: recovered acceleration in y and z instead.
+GRAVITY_NWU: NDArray[np.float64] = np.array([0.0, 0.0, -GRAVITY])
 
 __all__ = [
-  "G_NED",
+  "GRAVITY",
+  "GRAVITY_NED",
+  "GRAVITY_NWU",
   "quat_angle",
   "quat_conjugate",
   "quat_from_gyro",

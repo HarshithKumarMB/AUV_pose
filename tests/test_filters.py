@@ -11,7 +11,7 @@ from auv_pose.estimation.filters import (
   velocity,
 )
 from auv_pose.estimation.quaternion import (
-  G_NED,
+  GRAVITY_NWU,
   quat_angle,
   quat_from_gyro,
   quat_to_rotmat,
@@ -188,11 +188,11 @@ def test_history_starts_empty():
   assert ConstantVelocityEKF().history == []
 
 
-LEVEL_ACCEL = -G_NED  # what an accelerometer reads at rest, level
+LEVEL_ACCEL = -GRAVITY_NWU  # what an accelerometer reads at rest, level
 
 
 def test_gravity_trust_peaks_at_one_g():
-  assert gravity_trust(-G_NED) == pytest.approx(1.0)
+  assert gravity_trust(-GRAVITY_NWU) == pytest.approx(1.0)
   assert gravity_trust([0.0, 0.0, -19.62]) < gravity_trust([0.0, 0.0, -11.0])
   assert 0.0 < gravity_trust([0.0, 0.0, -30.0]) < 1.0
 

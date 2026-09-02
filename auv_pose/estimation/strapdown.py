@@ -14,7 +14,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from auv_pose.estimation.quaternion import (
-  G_NED,
+  GRAVITY_NWU,
   quat_from_gyro,
   quat_multiply,
   quat_normalize,
@@ -38,6 +38,12 @@ class StrapdownIntegrator:
       :class:`auv_pose.estimation.filters.AttitudeFilter` to bound roll and
       pitch against the accelerometer. Leaving it ``None`` is the uncorrected
       baseline, useful for measuring what the correction buys.
+  :param gravity: World-frame gravity vector. Must match the frame the attitude
+      quaternion rotates into: ``GRAVITY_NWU`` for HoloOcean's z-up world,
+      ``GRAVITY_NED`` for a z-down one. The wrong choice does not announce
+      itself -- gravity still cancels exactly at rest, because an accelerometer
+      read in a z-down body frame cancels a z-down gravity vector. What it does
+      instead is mirror the recovered acceleration in y and z.
   """
 
   def __init__(
@@ -46,9 +52,11 @@ class StrapdownIntegrator:
     attitude: ArrayLike,
     velocity: ArrayLike | None = None,
     attitude_filter=None,
+    gravity: ArrayLike = GRAVITY_NWU,
   ) -> None:
     self.position = np.asarray(position, dtype=float).copy()
     self.attitude = quat_normalize(attitude)
+    self.gravity = np.asarray(gravity, dtype=float).copy()
     self.velocity = (
       np.zeros(3)
       if velocity is None
@@ -64,8 +72,9 @@ class StrapdownIntegrator:
     """Advance by one IMU sample.
 
     An accelerometer measures specific force ``f = a - g``, so at rest it reads
-    ``-G_NED`` and the kinematic acceleration is recovered by **adding** gravity
-    back: ``a = R f + G_NED``.
+    ``-g`` and the kinematic acceleration is recovered by adding gravity back:
+    ``a = R f + g``. In a z-up world ``g`` is negative in its third component,
+    so this subtracts 9.81 where an NED convention would add it.
 
     :param gyro: Body angular rate in rad/s.
     :param accel_body: Body specific force in m/s^2, as an accelerometer
@@ -84,7 +93,7 @@ class StrapdownIntegrator:
     accel_world = quat_to_rotmat(self.attitude) @ np.asarray(
       accel_body, dtype=float
     )
-    accel_world = accel_world + G_NED
+    accel_world = accel_world + self.gravity
 
     self.velocity = self.velocity + accel_world * dt
     self.position = self.position + self.velocity * dt

@@ -14,7 +14,8 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from auv_pose.estimation.quaternion import (
-  G_NED,
+  GRAVITY,
+  GRAVITY_NWU,
   quat_from_gyro,
   quat_multiply,
   quat_normalize,
@@ -260,7 +261,7 @@ def gravity_trust(accel_body: ArrayLike, sharpness: float = 5.0) -> float:
   :return: Weight in ``(0, 1]``, exactly 1 at ``|a| = g``.
   """
   magnitude = float(np.linalg.norm(accel_body))
-  gravity = float(np.linalg.norm(G_NED))
+  gravity = GRAVITY
   return float(np.exp(-sharpness * abs(magnitude / gravity - 1.0)))
 
 
@@ -283,6 +284,8 @@ class AttitudeFilter:
   :param kp: Proportional gain on the tilt error, 1/s.
   :param ki: Integral gain feeding the gyro bias estimate, 1/s^2.
   :param q0: Initial orientation; identity if omitted.
+  :param gravity: World-frame gravity vector, used only for its direction.
+      Must match the frame the attitude quaternion rotates into.
   """
 
   def __init__(
@@ -290,11 +293,14 @@ class AttitudeFilter:
     kp: float = 1.0,
     ki: float = 0.05,
     q0: ArrayLike | None = None,
+    gravity: ArrayLike = GRAVITY_NWU,
   ) -> None:
     self.q = (
       np.array([1.0, 0.0, 0.0, 0.0]) if q0 is None else quat_normalize(q0)
     )
     self.bias = np.zeros(3)
+    gravity = np.asarray(gravity, dtype=float)
+    self.down = gravity / np.linalg.norm(gravity)
     self.kp = kp
     self.ki = ki
     # Trust placed in the accelerometer on the most recent update, for
@@ -320,9 +326,7 @@ class AttitudeFilter:
       # At rest the accelerometer reads -g, so measured "down" is -a.
       measured_down = -accel_body / magnitude
       # Where the current estimate says "down" is, in the body frame.
-      predicted_down = quat_to_rotmat(self.q).T @ (
-        G_NED / np.linalg.norm(G_NED)
-      )
+      predicted_down = quat_to_rotmat(self.q).T @ self.down
 
       self.trust = gravity_trust(accel_body)
       error = self.trust * np.cross(measured_down, predicted_down)

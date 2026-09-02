@@ -3,7 +3,47 @@
 Kept deliberately, unlike the regenerable plots the scripts drop at the repo
 root — `.gitignore` excludes `*.png` everywhere except here.
 
+## `frame_mismatch.png`
+
+**The defect the rest of this branch was chasing.** holoocean reports the
+PoseSensor and OrientationSensor in the frame of the socket they sit in -- NED
+in `IMUSocket`, NWU in the default COM socket (`sensors.py:166`). Our config
+omitted the socket for both, so ground truth came back in a z-up frame while the
+IMU, DVL and depth sensor reported in a z-down one. Gravity was then taken as
+z-down (`[0, 0, +9.81]`) in a z-up world.
+
+Those two errors cancel exactly at rest, which is why nothing caught them: an
+accelerometer read in a z-down body frame cancels a z-down gravity vector, so
+the vehicle does not fall out of the sky and no resting test fails. What happens
+instead is that every recovered acceleration comes out mirrored in y and z.
+
+| | before | after |
+|---|---|---|
+| recovered acceleration vs truth | rms 1.385 m/s², y and z **anticorrelated** | rms **0.098** m/s², all axes +0.99 |
+| DVL vs true body velocity | rms 1.298 m/s, needed a `DVL_AXES` sign flip | rms **0.058** m/s, no flip at all |
+
+`DVL_AXES` was never a DVL quirk -- it was a local patch for one symptom of this
+mismatch, and it is deleted now that the frames agree.
+
+Both configurations here fly the **same open-loop command sequence**, so this is
+a controlled comparison. Regenerate with the probe script noted in the commit
+that added this file; `experiments/navigate.py --legacy-frames` reproduces the
+old configuration end to end.
+
+**Why this is not shown as a position-error comparison.** After the fix the
+remaining errors are small enough that run-to-run variation swamps the
+difference between configurations -- guidance closes on the estimate, so each
+run flies a different trajectory, and dead reckoning alone spans 3.7-9.7 m
+across runs with identical sensors. A single before/after pair of `navigate.py`
+runs cannot support a claim about position error, so none is made here.
+
 ## `navigate_runs.png`
+
+**Superseded, kept as a record of how the defects were found.** Every run in it
+predates the frame fix above and the thruster-saturation fix, so all of them
+were flown with mirrored acceleration, and the `+ DVL, wrong axes` series has no
+counterpart in the code any more -- `DVL_AXES` is gone. Its three findings still
+hold; its numbers do not.
 
 Five `navigate.py` runs over the same 300-step (10 s) course, tracing the three
 defects found in the simulator runs and the effect of fixing each.
@@ -59,13 +99,13 @@ so each configuration flies a genuinely different trajectory and experiences
 different manoeuvres. Differences between runs indicate estimator quality; they
 are not like-for-like.
 
-Regenerating the figure means re-running the five configurations. The logs are
-not in the repository:
+Regenerating means re-running the configurations below on a checkout from
+before the frame fix -- `--raw-dvl-axes`, which the third series needed, no
+longer exists. The logs are not in the repository:
 
 ```
 nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --gyro-only --no-dvl      --out gyro.csv"
 nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --no-dvl                  --out att.csv"
-nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --raw-dvl-axes            --out dvlraw.csv"
 nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300                           --out dvl.csv"
 nix run .#sim -- -c "python -u experiments/navigate.py --headless --max-steps 300 --truth-attitude --no-dvl --out truth.csv"
 ```

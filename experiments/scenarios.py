@@ -16,7 +16,6 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-  "DVL_AXES",
   "blue_rov_agent",
   "depth_sensor",
   "dvl_sensor",
@@ -134,14 +133,39 @@ def blue_rov_agent(
   }
 
 
-def pose_sensor(name: str = "pose") -> dict[str, Any]:
-  """Ground-truth pose as ``[[R, p], [0, 1]]``. For initialisation and error only."""
-  return {"sensor_name": name, "sensor_type": "PoseSensor"}
+def pose_sensor(
+  name: str = "pose", socket: str | None = "IMUSocket"
+) -> dict[str, Any]:
+  """Ground-truth pose as ``[[R, p], [0, 1]]``. For initialisation and error only.
+
+  In the IMU socket so its rotation block shares a frame with the inertial
+  sensors, and so its translation is taken at the same point on the hull.
+  """
+  block: dict[str, Any] = {"sensor_name": name, "sensor_type": "PoseSensor"}
+  if socket:
+    block["socket"] = socket
+  return block
 
 
-def orientation_sensor(name: str = "orient") -> dict[str, Any]:
-  """Ground-truth orientation as a 3x3 matrix, NED in the IMU socket."""
-  return {"sensor_name": name, "sensor_type": "OrientationSensor"}
+def orientation_sensor(
+  name: str = "orient", socket: str | None = "IMUSocket"
+) -> dict[str, Any]:
+  """Ground-truth orientation, body to world, as a 3x3 matrix.
+
+  **The socket is load-bearing.** holoocean reports this sensor in the frame of
+  the socket it sits in -- NED in ``IMUSocket``, NWU in the default COM socket
+  (``sensors.py:166``). The IMU, DVL and depth sensor all sit in ``IMUSocket``,
+  so the orientation used to rotate their readings into the world must come
+  from there too. Omitting the socket returns identity at rest instead of
+  ``diag(1, -1, -1)``, which silently mirrors every rotated reading in y and z.
+  """
+  block: dict[str, Any] = {
+    "sensor_name": name,
+    "sensor_type": "OrientationSensor",
+  }
+  if socket:
+    block["socket"] = socket
+  return block
 
 
 def depth_sensor(name: str = "depthsensor", hz: int = 30) -> dict[str, Any]:
@@ -214,14 +238,6 @@ def ocean_scenario(
     "octree_max": octree_max,
     "agents": [blue_rov_agent(location=start, sensors=sensors)],
   }
-
-
-# The DVL reports velocity with y and z inverted relative to the NED body frame
-# that the OrientationSensor uses in the IMU socket. Measured against ground
-# truth over 199 samples spanning all three body axes: per-axis correlation is
-# x +1.0000, y -1.0000, z -1.0000, and applying this gives exact agreement
-# (rms error 0.0000 m/s). Multiply a raw reading by this to get NED body.
-DVL_AXES = (1.0, -1.0, -1.0)
 
 
 def dvl_sensor(
