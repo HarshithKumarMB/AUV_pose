@@ -24,7 +24,9 @@ Note:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -34,8 +36,12 @@ from numpy.typing import ArrayLike, NDArray
 
 __all__ = [
   "TILE_NAME",
+  "cached_surface",
+  "default_cache_dir",
   "leaves",
   "load_surface",
+  "robust_spread",
+  "surface_residual",
   "tile_paths",
   "top_surface",
 ]
@@ -245,3 +251,140 @@ def load_surface(
     surface = surface[inside]
 
   return top_surface(surface, cell=cell)
+
+
+def surface_residual(
+  points: ArrayLike, surface: ArrayLike
+) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+  """How far each sounding sits above the surface, vertically.
+
+  The one place the "nearest horizontal cell, then subtract" comparison lives.
+  It is the measurement every claim in this project rests on -- whether a sonar
+  is working, whether a beam geometry is right, whether a map is any good -- so
+  it should not be reimplemented per caller.
+
+  Args:
+      points: Soundings, ``(n, 3)``. Non-finite rows are dropped rather than
+          poisoning the result; a beam with no echo is normal, not an error.
+      surface: Reference surface, ``(m, 3)``, from :func:`load_surface`.
+
+  Returns:
+      ``(residual, kept)`` where ``residual`` is the signed vertical offset of
+      each *finite* sounding from the surface beneath it, and ``kept`` is the
+      boolean mask selecting those soundings from ``points``. The mask is
+      returned because callers routinely need to line residuals back up with
+      per-beam or per-ping metadata.
+
+  Raises:
+      ValueError: If either array is not ``(n, 3)``.
+  """
+  points = np.asarray(points, dtype=float)
+  surface = np.asarray(surface, dtype=float)
+  for name, array in (("points", points), ("surface", surface)):
+    if array.ndim != 2 or array.shape[1] != 3:
+      raise ValueError(f"expected (n, 3) {name}, got {array.shape}")
+
+  kept = np.isfinite(points).all(axis=1)
+  if not kept.any() or len(surface) == 0:
+    return np.empty(0), kept
+
+  # Imported here: scipy is a heavy dependency and the parsing half of this
+  # module is useful without it.
+  from scipy.spatial import KDTree
+
+  _, nearest = KDTree(surface[:, :2]).query(points[kept, :2])
+  return points[kept, 2] - surface[nearest, 2], kept
+
+
+def robust_spread(residual: ArrayLike) -> tuple[float, float]:
+  """Median and MAD-derived std of a residual.
+
+  **Always report these rather than mean and standard deviation.** The errors
+  here are routinely bimodal -- the singlebeam's soundings split 53/47 between
+  the true seabed echo and one 4.5 m short -- and the mean of that mixture
+  describes neither population. Reporting a mean is how the defect stayed
+  hidden through several rounds of analysis.
+
+  Returns:
+      ``(median, mad_std)``, the latter scaled by 1.4826 so it matches a
+      standard deviation for normally distributed residuals.
+  """
+  residual = np.asarray(residual, dtype=float)
+  if residual.size == 0:
+    return float("nan"), float("nan")
+  median = float(np.median(residual))
+  return median, float(np.median(np.abs(residual - median)) * 1.4826)
+
+
+def default_cache_dir() -> Path:
+  """Where :func:`cached_surface` keeps reductions, honouring ``XDG_CACHE_HOME``.
+
+  Deliberately not inside the repository or the simulator's install: the
+  reduction is a derived artefact of a 45 GB cache that is itself derived.
+  """
+  root = os.environ.get("XDG_CACHE_HOME")
+  base = Path(root) if root else Path.home() / ".cache"
+  return base / "auv_pose" / "octree"
+
+
+def cached_surface(
+  directory: str | Path,
+  bounds: tuple[float, float, float, float],
+  cell: float = 0.10,
+  min_normal_z: float = 0.0,
+  cache_dir: str | Path | None = None,
+  refresh: bool = False,
+) -> NDArray[np.float64]:
+  """:func:`load_surface`, memoised to a ``.npy`` beside a key of its arguments.
+
+  Reducing a survey-sized box takes tens of seconds and a wide one takes
+  minutes, which is too slow for anything you have to run more than once --
+  fitting beam geometry means evaluating against the same surface repeatedly.
+
+  The key covers the resolved directory, the bounds, the cell and the normal
+  filter. It does **not** cover the contents of the tiles: the octree cache is
+  written once by the simulator and thereafter only appended to, so a stale
+  entry means the box was extended, not that its geometry changed. Pass
+  ``refresh`` if that assumption ever breaks.
+
+  Args:
+      directory: A ``min<a>_max<b>`` directory of tile JSON files.
+      bounds: ``(x_min, x_max, y_min, y_max)`` in metres.
+      cell: Horizontal cell side in metres.
+      min_normal_z: See :func:`top_surface`.
+      cache_dir: Where to keep reductions; defaults to
+          :func:`default_cache_dir`.
+      refresh: Recompute and overwrite an existing entry.
+
+  Returns:
+      ``(m, 3)`` surface points, as :func:`load_surface` would.
+  """
+  directory = Path(directory)
+  cache = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+
+  key = hashlib.sha256(
+    repr(
+      (
+        str(directory.resolve()),
+        tuple(round(float(b), 4) for b in bounds),
+        round(float(cell), 6),
+        round(float(min_normal_z), 6),
+      )
+    ).encode()
+  ).hexdigest()[:16]
+  path = cache / f"surface-{key}.npy"
+
+  if path.exists() and not refresh:
+    return np.load(path)
+
+  surface = load_surface(directory, bounds, cell, min_normal_z)
+  cache.mkdir(parents=True, exist_ok=True)
+  # Write via a temporary file so an interrupted run cannot leave a truncated
+  # .npy that later loads as a silently short surface.
+  temporary = path.with_name(path.name + ".partial")
+  # Write through an open handle: np.save appends ".npy" to a path that does
+  # not already end in it, which would silently put the data somewhere else.
+  with open(temporary, "wb") as handle:
+    np.save(handle, surface)
+  temporary.replace(path)
+  return surface

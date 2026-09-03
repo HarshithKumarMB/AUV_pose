@@ -1,9 +1,12 @@
 """Bathymetric mapping.
 
-Depths follow the survey convention: ``sonar_depth`` in the CSVs is a positive
-range from the vehicle to the seabed, while the GP is fitted on **negated** depth
-so that the surface it models increases upward. :mod:`auv_pose.io.soundings`
-applies that sign flip in one place.
+Survey CSVs record ``x, y, z``: where a beam struck the seabed, in the world
+frame, with ``z`` increasing upward. The GP models that elevation directly.
+:mod:`auv_pose.io.soundings` owns the schema.
+
+:mod:`~auv_pose.mapping.octree` reads the same seabed out of the simulator's own
+cached octree, which makes it ground truth rather than a second estimate -- a
+sounding that disagrees with it is a sensor defect, not terrain.
 """
 
 from auv_pose.mapping.octree import load_surface, top_surface

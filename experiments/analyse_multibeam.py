@@ -23,9 +23,12 @@ import os
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial import KDTree
 
-from auv_pose.mapping.octree import load_surface
+from auv_pose.mapping.octree import (
+  cached_surface,
+  robust_spread,
+  surface_residual,
+)
 from auv_pose.mapping.sonar import (
   azimuth_angles,
   bottom_return_ranges,
@@ -87,17 +90,11 @@ def report_beam_width(images: np.ndarray, ranges: np.ndarray) -> None:
     )
 
 
-def score(points: np.ndarray, tree: KDTree, surface: np.ndarray) -> tuple:
+def score(points: np.ndarray, surface: np.ndarray) -> tuple:
   """Median and MAD-std of reconstructed soundings against the octree."""
-  finite = np.isfinite(points).all(axis=1)
-  if not finite.any():
-    return float("nan"), float("nan"), 0
-  good = points[finite]
-  _, nearest = tree.query(good[:, :2])
-  residual = good[:, 2] - surface[nearest, 2]
-  median = float(np.median(residual))
-  spread = float(np.median(np.abs(residual - median)) * 1.4826)
-  return median, spread, int(finite.sum())
+  residual, kept = surface_residual(points, surface)
+  median, spread = robust_spread(residual)
+  return median, spread, int(kept.sum())
 
 
 def main() -> None:
@@ -134,16 +131,15 @@ def main() -> None:
     / args.cache
   )
   pad = 60.0
-  surface = load_surface(
+  surface = cached_surface(
     directory,
-    bounds=(
+    (
       positions[:, 0].min() - pad,
       positions[:, 0].max() + pad,
       positions[:, 1].min() - pad,
       positions[:, 1].max() + pad,
     ),
   )
-  tree = KDTree(surface[:, :2])
   print(f"octree surface: {len(surface)} cells")
   print()
 
@@ -159,7 +155,7 @@ def main() -> None:
         for p, r, br in zip(positions, rotations, beam_ranges)
       ]
     )
-    median, spread, n = score(points, tree, surface)
+    median, spread, n = score(points, surface)
 
     # A mirrored swath still puts the nadir beams in the right place; it is the
     # outermost beams that land on the wrong side. Score them separately.
@@ -174,7 +170,7 @@ def main() -> None:
         for p, r, br in zip(positions, rotations, beam_ranges)
       ]
     )
-    edge_median, _, _ = score(edge_points, tree, surface)
+    edge_median, _, _ = score(edge_points, surface)
 
     print(
       f"  {label:22s} {median:+9.3f} {spread:9.3f} "

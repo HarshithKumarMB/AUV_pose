@@ -23,11 +23,14 @@ import os
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial import KDTree
 
 from auv_pose.io.logs import CsvLogger
 from auv_pose.io.soundings import load_soundings
-from auv_pose.mapping.octree import load_surface
+from auv_pose.mapping.octree import (
+  load_surface,
+  robust_spread,
+  surface_residual,
+)
 from experiments.cli import refuse_overwrite
 
 #: Where the packaged worlds unpack to. ``flake.nix`` exports HOLODECKPATH.
@@ -103,21 +106,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def check(surface: np.ndarray, paths: list[Path]) -> None:
-  """Score survey soundings against the extracted surface.
-
-  Reported with a median and a MAD-derived std rather than a mean and std: the
-  singlebeam's error is bimodal, and the mean of a 53/47 mixture describes
-  neither population. That is precisely how the defect stayed hidden.
-  """
+  """Score survey soundings against the extracted surface."""
   frame = load_soundings(paths)
-  tree = KDTree(surface[:, :2])
-  _, nearest = tree.query(frame[["x", "y"]].to_numpy())
 
   # The survey never recorded its own z, so this is the seabed it implies if the
   # vehicle was at z = 0. A constant offset here is the survey's true depth.
-  residual = surface[nearest, 2] + frame["sonar_depth"].to_numpy()
-  median = float(np.median(residual))
-  spread = float(np.median(np.abs(residual - median)) * 1.4826)
+  soundings = np.column_stack(
+    [
+      frame["x"].to_numpy(),
+      frame["y"].to_numpy(),
+      -frame["sonar_depth"].to_numpy(),
+    ]
+  )
+  residual, _ = surface_residual(soundings, surface)
+  median, spread = robust_spread(residual)
 
   print(f"  {len(frame)} soundings scored against the octree")
   print(f"  median offset  {median:+7.3f} m")

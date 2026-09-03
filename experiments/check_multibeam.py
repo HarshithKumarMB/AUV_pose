@@ -27,6 +27,7 @@ import holoocean
 import numpy as np
 
 from experiments.cli import configure_sdl, refuse_overwrite
+from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
   ocean_scenario,
   orientation_sensor,
@@ -44,6 +45,22 @@ SONAR = {
   "azimuth_bins": 240,
   "elevation": 1.0,
 }
+
+
+def track(start: list[float], sweep: float) -> list[list[float]]:
+  """A short track that moves across the swath, not just along it.
+
+  Two legs offset in y, joined by a leg along x. Flying only along x cannot
+  decorrelate beam index from terrain however long it runs, because the
+  across-track offset a beam sees never changes.
+  """
+  x, y, z = start
+  return [
+    [x, y, z],
+    [x, y + sweep, z],
+    [x + 8.0, y + sweep, z],
+    [x + 8.0, y, z],
+  ]
 
 
 def build_scenario(start: list[float], octree_min: float) -> dict:
@@ -68,15 +85,19 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--pings", type=int, default=40, help="images to capture before stopping"
   )
-  parser.add_argument("--max-steps", type=int, default=3000)
+  parser.add_argument("--max-steps", type=int, default=20_000)
+  parser.add_argument("--arrival-radius", type=float, default=1.0)
   parser.add_argument(
-    "--command",
+    "--sweep",
     type=float,
-    nargs=8,
-    default=[0, 0, 0, 0, 8, 8, 0, 0],
+    default=18.0,
     help=(
-      "constant thruster command. Some translation is wanted: a stationary "
-      "check cannot tell a mirrored swath axis from a correct one"
+      "how far the track moves ACROSS the swath, metres. This is the whole "
+      "point of the flight: the fan opens along body y, so flying along x "
+      "leaves every beam staring at the same strip of seabed and beam index "
+      "cannot be told apart from terrain. Moving in y makes a given patch be "
+      "seen by different beams, which is what separates a misaimed beam from "
+      "a feature on the ground"
     ),
   )
   parser.add_argument("--octree-min", type=float, default=0.02)
@@ -99,18 +120,34 @@ def main() -> None:
   positions: list[np.ndarray] = []
   rotations: list[np.ndarray] = []
 
-  command = np.array(args.command, dtype=float)
+  follower = WaypointFollower(
+    track(args.start, args.sweep), args.arrival_radius
+  )
+  command = np.zeros(8)
   for step in range(args.max_steps):
     state = env.step(command)
+    position = np.array(state["pose"])[:3, 3]
+
+    next_command = follower.command(position)
+    if next_command is None:
+      if follower.finished:
+        print("track complete")
+        break
+      continue
+    command = next_command
+
     if "multibeam" not in state:
       continue
 
     images.append(np.asarray(state["multibeam"], dtype=float).copy())
-    positions.append(np.array(state["pose"])[:3, 3].copy())
+    positions.append(position.copy())
     rotations.append(np.array(state["orient"], dtype=float).copy())
 
-    if len(images) % 10 == 0:
-      print(f"step {step} | {len(images)}/{args.pings} pings")
+    if len(images) % 20 == 0:
+      print(
+        f"step {step} | waypoint {follower.index}/4 | "
+        f"{len(images)}/{args.pings} pings"
+      )
     if len(images) >= args.pings:
       break
 

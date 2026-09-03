@@ -1,11 +1,19 @@
 """Loading sonar survey data.
 
-Survey CSVs have columns ``x, y, sonar_depth``, where ``sonar_depth`` is a positive
-range from the vehicle down to the seabed.
+Survey CSVs have columns ``x, y, z``: the **world-frame position of the seabed**
+where a beam struck it. ``z`` increases upward, so the seabed is negative and the
+GP models it directly with no sign flip.
 
-The GP is fitted on **negated** depth, so the modelled surface increases upward and
-a constant mean is sensible. That sign flip lives here alone, so the convention
-cannot drift between the writer and the readers.
+.. note::
+
+   This replaced an older ``x, y, sonar_depth`` schema in which ``sonar_depth``
+   was a positive *range* from the vehicle, recorded at the vehicle's own
+   ``(x, y)`` and with the vehicle's ``z`` never written down at all. That works
+   only for a single downward beam over a survey that happens to fly at
+   ``z = 0``, and it cannot express a multibeam at all: every beam but nadir
+   lands ``range * sin(bearing)`` away from the vehicle. Surveys written under
+   the old schema cannot be converted, because the depth they were taken from
+   was not recorded.
 """
 
 from __future__ import annotations
@@ -19,7 +27,7 @@ from numpy.typing import NDArray
 
 __all__ = ["SOUNDING_COLUMNS", "load_soundings", "soundings_to_arrays"]
 
-SOUNDING_COLUMNS = ("x", "y", "sonar_depth")
+SOUNDING_COLUMNS = ("x", "y", "z")
 
 
 def load_soundings(
@@ -34,7 +42,7 @@ def load_soundings(
           usable echo, and those rows must not reach the GP.
 
   Returns:
-      A frame with columns ``x, y, sonar_depth``.
+      A frame with columns ``x, y, z``.
 
   Raises:
       ValueError: If no paths are given, or a file lacks the expected columns.
@@ -70,8 +78,10 @@ def soundings_to_arrays(
 
   Returns:
       ``(X, y)`` where ``X`` is ``(n, 2)`` of horizontal position and ``y`` is
-      ``(n,)`` of **negated** depth -- see the module docstring.
+      ``(n,)`` of seabed elevation, taken as recorded. The old schema needed a
+      sign flip here because it stored a downward range; an elevation already
+      points the way the GP models it.
   """
   X = frame[["x", "y"]].to_numpy(dtype=np.float32)
-  y = -frame["sonar_depth"].to_numpy(dtype=np.float32)
+  y = frame["z"].to_numpy(dtype=np.float32)
   return X, y

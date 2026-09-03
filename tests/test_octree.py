@@ -9,8 +9,11 @@ import pandas as pd
 import pytest
 
 from auv_pose.mapping.octree import (
+  cached_surface,
   leaves,
   load_surface,
+  robust_spread,
+  surface_residual,
   tile_paths,
   top_surface,
 )
@@ -170,6 +173,141 @@ def test_load_surface_of_an_empty_box_is_empty(tmp_path):
   )
 
 
+def test_surface_residual_measures_height_above_the_surface():
+  surface = np.array([[0.0, 0.0, -70.0], [1.0, 0.0, -68.0]])
+  points = np.array([[0.01, 0.0, -69.5], [1.02, 0.0, -68.5]])
+
+  residual, kept = surface_residual(points, surface)
+  assert kept.all()
+  assert residual == pytest.approx([0.5, -0.5])
+
+
+def test_surface_residual_drops_beams_with_no_echo():
+  """NaN rows are the normal case at the edge of a swath, not an error."""
+  surface = np.array([[0.0, 0.0, -70.0]])
+  points = np.array([[0.0, 0.0, -69.0], [np.nan, np.nan, np.nan]])
+
+  residual, kept = surface_residual(points, surface)
+  assert kept.tolist() == [True, False]
+  assert residual == pytest.approx([1.0])
+
+
+def test_surface_residual_mask_lines_up_with_the_input():
+  surface = np.array([[0.0, 0.0, -70.0]])
+  points = np.array([[0.0, 0.0, np.inf], [0.0, 0.0, -69.0]])
+
+  residual, kept = surface_residual(points, surface)
+  assert kept.tolist() == [False, True]
+  assert len(residual) == int(kept.sum())
+
+
+def test_surface_residual_of_nothing_finite_is_empty():
+  residual, kept = surface_residual(
+    np.full((2, 3), np.nan), np.array([[0.0, 0.0, 0.0]])
+  )
+  assert len(residual) == 0
+  assert not kept.any()
+
+
+def test_surface_residual_rejects_bad_shapes():
+  with pytest.raises(ValueError, match="points"):
+    surface_residual(np.zeros((2, 2)), np.zeros((1, 3)))
+  with pytest.raises(ValueError, match="surface"):
+    surface_residual(np.zeros((2, 3)), np.zeros((1, 2)))
+
+
+def test_robust_spread_ignores_a_second_population():
+  """The property the mean lacks, and why this function exists."""
+  bulk = np.zeros(60)
+  outliers = np.full(40, -4.5)
+  median, spread = robust_spread(np.concatenate([bulk, outliers]))
+
+  assert median == pytest.approx(0.0)
+  assert spread == pytest.approx(0.0)
+  # A mean would land at -1.8, describing neither population.
+  assert np.mean(np.concatenate([bulk, outliers])) == pytest.approx(-1.8)
+
+
+def test_robust_spread_matches_std_on_clean_data():
+  sample = np.random.default_rng(0).normal(3.0, 2.0, 20000)
+  median, spread = robust_spread(sample)
+  assert median == pytest.approx(3.0, abs=0.05)
+  assert spread == pytest.approx(2.0, abs=0.05)
+
+
+def test_robust_spread_of_nothing_is_nan():
+  median, spread = robust_spread(np.empty(0))
+  assert np.isnan(median) and np.isnan(spread)
+
+
+def test_cached_surface_returns_the_same_answer(tmp_path):
+  tiles = tmp_path / "tiles"
+  tiles.mkdir()
+  write_tile(tiles, "0_0_0.json", {"p": [0, 0, 0], "l": [leaf(0, 0, -7000)]})
+  bounds = (-1.0, 1.0, -1.0, 1.0)
+
+  direct = load_surface(tiles, bounds=bounds)
+  cached = cached_surface(tiles, bounds, cache_dir=tmp_path / "cache")
+  assert cached == pytest.approx(direct)
+
+
+def test_cached_surface_does_not_reread_the_tiles(tmp_path):
+  """The point of the cache: a second call must not touch the 45 GB source."""
+  tiles = tmp_path / "tiles"
+  tiles.mkdir()
+  write_tile(tiles, "0_0_0.json", {"p": [0, 0, 0], "l": [leaf(0, 0, -7000)]})
+  bounds = (-1.0, 1.0, -1.0, 1.0)
+  cache = tmp_path / "cache"
+
+  first = cached_surface(tiles, bounds, cache_dir=cache)
+  (tiles / "0_0_0.json").unlink()
+
+  assert cached_surface(tiles, bounds, cache_dir=cache) == pytest.approx(first)
+
+
+def test_cached_surface_keys_on_the_bounds(tmp_path):
+  tiles = tmp_path / "tiles"
+  tiles.mkdir()
+  write_tile(
+    tiles,
+    "0_0_0.json",
+    {"p": [0, 0, 0], "l": [leaf(0, 0, -7000), leaf(500, 0, -6900)]},
+  )
+  cache = tmp_path / "cache"
+
+  narrow = cached_surface(tiles, (-1.0, 1.0, -1.0, 1.0), cache_dir=cache)
+  wide = cached_surface(tiles, (-1.0, 10.0, -1.0, 1.0), cache_dir=cache)
+  assert len(narrow) == 1
+  assert len(wide) == 2
+
+
+def test_refresh_recomputes(tmp_path):
+  tiles = tmp_path / "tiles"
+  tiles.mkdir()
+  write_tile(tiles, "0_0_0.json", {"p": [0, 0, 0], "l": [leaf(0, 0, -7000)]})
+  bounds = (-1.0, 1.0, -1.0, 1.0)
+  cache = tmp_path / "cache"
+
+  cached_surface(tiles, bounds, cache_dir=cache)
+  write_tile(tiles, "0_0_0.json", {"p": [0, 0, 0], "l": [leaf(0, 0, -6800)]})
+
+  assert cached_surface(tiles, bounds, cache_dir=cache)[0, 2] == pytest.approx(
+    -70.0
+  )
+  refreshed = cached_surface(tiles, bounds, cache_dir=cache, refresh=True)
+  assert refreshed[0, 2] == pytest.approx(-68.0)
+
+
+def test_cache_leaves_no_partial_file(tmp_path):
+  tiles = tmp_path / "tiles"
+  tiles.mkdir()
+  write_tile(tiles, "0_0_0.json", {"p": [0, 0, 0], "l": [leaf(0, 0, -7000)]})
+  cache = tmp_path / "cache"
+
+  cached_surface(tiles, (-1.0, 1.0, -1.0, 1.0), cache_dir=cache)
+  assert list(cache.glob("*.partial")) == []
+
+
 @pytest.mark.skipif(
   not CACHE.is_dir(), reason="no local octree cache; needs a simulator run"
 )
@@ -181,21 +319,22 @@ def test_agrees_with_the_survey_soundings_that_picked_the_right_peak():
   with this surface to better than the sonar's own 0.113 m quantisation, or the
   reader is not ground truth and nothing may be concluded from it.
   """
-  from scipy.spatial import KDTree
-
   surface = load_surface(CACHE, bounds=(-40.0, 0.0, -20.0, 0.0))
   assert len(surface) > 10_000
 
   frame = pd.concat([pd.read_csv("map.csv"), pd.read_csv("map1.csv")])
-  _, nearest = KDTree(surface[:, :2]).query(frame[["x", "y"]].to_numpy())
-  residual = surface[nearest, 2] + frame["sonar_depth"].to_numpy()
+  depth = frame["sonar_depth"].to_numpy()
+  # The survey never recorded its own z, so treat it as 0: any constant offset
+  # that comes out is the vehicle's true depth.
+  soundings = np.column_stack(
+    [frame["x"].to_numpy(), frame["y"].to_numpy(), -depth]
+  )
 
-  far = residual[frame["sonar_depth"].to_numpy() >= 67.5]
-  median = np.median(far)
-  spread = np.median(np.abs(far - median)) * 1.4826
+  residual, kept = surface_residual(soundings, surface)
+  far = residual[depth[kept] >= 67.5]
+  median, spread = robust_spread(far)
 
   assert spread < 0.113, (
     f"MAD-std {spread:.4f} m exceeds the quantisation floor"
   )
-  # The offset is the survey vehicle's actual depth, which was never recorded.
   assert abs(median) < 0.5

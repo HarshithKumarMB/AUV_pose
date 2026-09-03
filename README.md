@@ -52,7 +52,8 @@ Run from the repository root.
 
 | Step | Command | Needs sim | Output |
 |---|---|---|---|
-| 1. Survey the seabed | `python experiments/survey.py` | yes | `map1.csv` — `x, y, sonar_depth` |
+| 0. Extract the true seabed | `python experiments/extract_seabed.py` | no | `seabed_truth.csv` — `x, y, z` |
+| 1. Survey the seabed | `python experiments/survey.py` | yes | `map1.csv` — `x, y, z` |
 | 2. Fit the GP bathymetry map | `python experiments/train_map.py` | no | `svgp_bathymetry.pkl`, `gp_bathymetry_surface.png` |
 | 3. Query a depth | `python experiments/predict_depth.py` | no | prints depth |
 | 4. Navigate with the EKF | `python experiments/navigate.py` | yes | `wp_c.csv` |
@@ -105,13 +106,28 @@ recursive estimators and `smoothers.py` the non-causal backward pass. State is a
 value passed through `predict(state, ...)` and `condition(state, obs)`, so a run's
 history is a list of values and smoothing is a pure function over it.
 
-World frame is **NED** — x north, y east, **z down** — matching HoloOcean's sensors
-in the `IMUSocket`, with gravity `[0, 0, +9.81]`. Quaternions are scalar-first
-`[w, x, y, z]` and rotate body vectors into the world. See `auv_pose/estimation/`.
+World frame is **z up**, with gravity `[0, 0, -9.81]` — `GRAVITY_NWU`, which is
+what `navigate.py` uses by default. The vehicle floats at `z ≈ -0.4` and the
+seabed sits near `z = -69`. Body axes are HoloOcean's `IMUSocket`, where the
+body-to-world rotation is `diag(1, -1, -1)` at rest, so body `+z` points down.
+Quaternions are scalar-first `[w, x, y, z]` and rotate body vectors into the
+world. See `auv_pose/estimation/`.
 
-Survey CSVs store `sonar_depth` as a positive range to the seabed; the GP is fitted
-on negated depth so the modelled surface increases upward. `auv_pose.io.soundings`
-owns that sign flip.
+(This paragraph previously said NED with `z` down and gravity `[0, 0, +9.81]`.
+That was left over from before the frame fix on this branch and contradicted
+both the logs and `navigate.py`'s default; `--legacy-frames` still reproduces
+the old behaviour.)
+
+Survey CSVs store `x, y, z`: where a beam struck the seabed, in the world frame,
+`z` increasing upward. The GP models that elevation directly.
+`auv_pose.io.soundings` owns the schema.
+
+The simulator caches the octree its sonar raycasts against as JSON on disk, so
+the true seabed can be read without a run — `auv_pose.mapping.octree`. It is
+ground truth rather than a second estimate, which is what makes it worth
+scoring against: measured through it, the singlebeam's strongest-return range is
+biased 4.17 m and a constant beats every bin-selection rule. That is why the
+survey flies a multibeam.
 
 `vendor/holoocean/` is an unmodified copy of upstream tag `v2.3.0`, reduced to the
 596 KB the build needs. Upstream is a private, Epic-gated repository —

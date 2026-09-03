@@ -16,6 +16,8 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+  "PROFILER_NADIR_AXIS",
+  "PROFILER_SWATH_AXIS",
   "blue_rov_agent",
   "depth_sensor",
   "dvl_sensor",
@@ -92,6 +94,22 @@ def singlebeam_sonar(
       "RangeBins": range_bins,
     },
   }
+
+
+#: Where the multibeam's fan points, in the **body** frame, given the
+#: ``rotation`` in :func:`profiling_sonar`'s block below.
+#:
+#: These belong next to the sensor block because they are two halves of one
+#: fact: the block aims the sensor, and these say where it ended up.
+#: :func:`~auv_pose.mapping.sonar.seabed_points` does not apply the mount
+#: rotation itself, so if the block's ``rotation`` changes and these do not, the
+#: reconstruction silently keeps using the old aim -- and a wrong swath sign
+#: mirrors the whole map across the track while still looking plausible.
+#:
+#: Measured against the octree: enumeration picked this pair, and a
+#: five-parameter fit moved it by 0.005 degrees.
+PROFILER_NADIR_AXIS = (0.0, 0.0, 1.0)
+PROFILER_SWATH_AXIS = (0.0, -1.0, 0.0)
 
 
 def profiling_sonar(

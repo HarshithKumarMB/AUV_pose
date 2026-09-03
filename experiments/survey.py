@@ -1,12 +1,23 @@
 """Survey the seabed on a lawnmower track, logging soundings.
 
-    nix run .#sim -- -c "python experiments/survey.py --out map1.csv"
+    nix run .#sim -- -c "python -u experiments/survey.py --out map1.csv"
 
-Flies a boustrophedon pattern with a downward singlebeam sonar and writes
-``x, y, sonar_depth`` for every step. The output feeds ``train_map.py``.
+Flies a boustrophedon pattern with a downward **multibeam** and writes one
+``x, y, z`` row per beam that returned an echo -- the world-frame point where
+that beam struck the seabed. The output feeds ``train_map.py``.
 
-Uses the ground-truth pose to position each sounding: this builds the reference map
-that navigation is later corrected against, so it must not itself be drifting.
+The sensor changed because the singlebeam could not measure depth. Scored
+against the simulator's own octree, its strongest-return range is biased 4.17 m
+against nadir truth and a constant beats every bin-selection rule (0.888 m rms
+against 4.184 m): a 10 degree cone at survey altitude is a 12 m footprint, so a
+range bin is evidence about seabed *area* at that slant range, not about the
+depth under the vehicle. The multibeam's per-beam return is 0.40 m wide.
+
+Uses the ground-truth pose *and attitude* to place each sounding: every beam but
+nadir lands ``range * sin(bearing)`` from the vehicle, so a survey that records
+soundings at the vehicle's own ``(x, y)`` misplaces all of them. This builds the
+reference map that navigation is later corrected against, so it must not itself
+be drifting.
 """
 
 from __future__ import annotations
@@ -19,13 +30,36 @@ import numpy as np
 
 from auv_pose.io.logs import CsvLogger
 from auv_pose.io.soundings import SOUNDING_COLUMNS
-from auv_pose.mapping.sonar import bottom_return_range, range_bins
+from auv_pose.mapping.sonar import (
+  azimuth_angles,
+  bottom_return_ranges,
+  range_bins,
+  seabed_points,
+)
 from experiments.cli import configure_sdl, refuse_overwrite
 from experiments.guidance import WaypointFollower
-from experiments.scenarios import ocean_scenario, pose_sensor, singlebeam_sonar
+from experiments.scenarios import (
+  PROFILER_NADIR_AXIS,
+  PROFILER_SWATH_AXIS,
+  ocean_scenario,
+  orientation_sensor,
+  pose_sensor,
+  profiling_sonar,
+)
 
 TICK_RATE_HZ = 30
-SONAR = {"range_min": 0.5, "range_max": 100.0, "range_bins": 256}
+
+# 5 Hz, not the tick rate: raycasting a 240-beam fan is the expensive part of a
+# tick, and at survey speed 5 Hz still oversamples the along-track footprint.
+SONAR_HZ = 5
+SONAR = {
+  "range_min": 0.5,
+  "range_max": 100.0,
+  "range_bins": 1000,
+  "azimuth": 60.0,
+  "azimuth_bins": 240,
+  "elevation": 1.0,
+}
 
 
 def lawnmower(
@@ -55,7 +89,10 @@ def build_scenario(start: list[float], octree_min: float) -> dict:
     octree_min=octree_min,
     sensors=[
       pose_sensor(),
-      singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ, **SONAR),
+      # Seabed points need attitude, not just position. The socket is
+      # load-bearing -- see orientation_sensor's docstring.
+      orientation_sensor(),
+      profiling_sonar("multibeam", hz=SONAR_HZ, **SONAR),
     ],
   )
 
@@ -73,26 +110,32 @@ def parse_args() -> argparse.Namespace:
     type=Path,
     default=None,
     help=(
-      "also write the raw intensity profiles to this .npz, for diagnosing what "
-      "the range picker is choosing between. Only the picked range has ever "
-      "been logged, which is why a second echo 12 range bins short of the "
-      "bottom went unnoticed in ~47%% of the shipped soundings"
+      "also write the raw sonar images, poses and attitudes to this .npz. "
+      "analyse_multibeam.py and fit_beam_geometry.py read it directly, so beam "
+      "geometry can be checked on survey data -- where the lawnmower's y sweep "
+      "means a patch of seabed is seen by different beams -- rather than on a "
+      "dedicated straight-line flight, where beam index and terrain are "
+      "confounded and no fit can separate them"
     ),
   )
   parser.add_argument(
     "--profile-steps",
     type=int,
-    default=5000,
-    help="stop recording profiles after this many; diagnosis, not a survey",
+    default=400,
+    help="stop recording pings after this many; diagnosis, not a survey",
   )
   parser.add_argument(
     "--octree-min",
     type=float,
     default=0.02,
     help=(
-      "finest octree voxel in metres. holoocean's default of 0.02 is 19x "
-      "finer than the singlebeam's 0.39 m range bins and generates octrees "
-      "at several GB per minute; 0.1 is still 4x finer than a bin"
+      "finest octree voxel in metres. The multibeam's range bins are 0.0995 m, "
+      "so holoocean's default of 0.02 is 5x finer -- about the right ratio. "
+      "Budget ~30 GB and three minutes of octree generation at startup, after "
+      "which it stops: InitOctreeRange builds the neighbourhood once and the "
+      "run writes nothing more. Raising this is not a free speedup, because "
+      "ShadowEpsilon defaults to 4*OctreeMin, so it changes sonar returns and "
+      "makes surveys inconsistent with maps built at another value"
     ),
   )
   parser.add_argument(
@@ -119,12 +162,16 @@ def main() -> None:
   ranges = range_bins(
     SONAR["range_min"], SONAR["range_max"], SONAR["range_bins"]
   )
+  bearings = azimuth_angles(SONAR["azimuth"], SONAR["azimuth_bins"])
 
   follower = WaypointFollower(waypoints, args.arrival_radius)
   command = np.zeros(8)
   soundings = 0
-  profiles: list[np.ndarray] = []
-  profile_poses: list[np.ndarray] = []
+  pings = 0
+  live_beams = 0
+  images: list[np.ndarray] = []
+  image_poses: list[np.ndarray] = []
+  image_rotations: list[np.ndarray] = []
 
   with CsvLogger(args.out, SOUNDING_COLUMNS) as log:
     for step in range(args.max_steps):
@@ -139,18 +186,33 @@ def main() -> None:
         continue
       command = next_command
 
-      profile = np.asarray(state["singlebeam"], dtype=float)
-      if args.profiles and len(profiles) < args.profile_steps:
-        profiles.append(profile.ravel().copy())
-        # The vehicle's z, which the sounding CSV does not record. Without it
-        # the true range cannot be recovered from a known seabed, so the
-        # profiles could not say which peak is the bottom.
-        profile_poses.append(position.copy())
+      # The sonar runs slower than the tick, so most steps carry no image.
+      if "multibeam" not in state:
+        continue
 
-      sonar_depth = bottom_return_range(profile, ranges)
-      if not np.isnan(sonar_depth):
-        log.write(x=position[0], y=position[1], sonar_depth=sonar_depth)
-        soundings += 1
+      image = np.asarray(state["multibeam"], dtype=float)
+      rotation = np.array(state["orient"], dtype=float)
+      if args.profiles and len(images) < args.profile_steps:
+        images.append(image.copy())
+        image_poses.append(position.copy())
+        image_rotations.append(rotation.copy())
+
+      beam_ranges = bottom_return_ranges(image, ranges)
+      points = seabed_points(
+        position,
+        rotation,
+        beam_ranges,
+        bearings,
+        swath_axis=PROFILER_SWATH_AXIS,
+        nadir_axis=PROFILER_NADIR_AXIS,
+      )
+
+      pings += 1
+      finite = np.isfinite(points).all(axis=1)
+      live_beams += int(finite.sum())
+      for x, y, z in points[finite]:
+        log.write(x=x, y=y, z=z)
+      soundings += int(finite.sum())
 
       if step % 1000 == 0:
         print(
@@ -161,18 +223,26 @@ def main() -> None:
       print(f"stopped after {args.max_steps} steps without finishing")
 
   print(f"Wrote {soundings} soundings to {args.out}")
+  if pings:
+    # A geometry or range regression shows up here first: beams past the edge
+    # of the swath legitimately return nothing, but a sharp drop means the
+    # sensor stopped reaching the seabed.
+    fraction = live_beams / (pings * len(bearings))
+    print(f"{pings} pings, {100 * fraction:.1f}% of beams returned an echo")
 
-  if args.profiles and profiles:
+  if args.profiles and images:
+    # Same layout check_multibeam.py writes, so analyse_multibeam.py and
+    # fit_beam_geometry.py read survey data without a separate flight -- which
+    # matters because the lawnmower sweeps across the swath and a dedicated
+    # straight-line check does not.
     np.savez_compressed(
       args.profiles,
-      profiles=np.array(profiles),
-      positions=np.array(profile_poses),
-      ranges=ranges,
-      range_min=SONAR["range_min"],
-      range_max=SONAR["range_max"],
-      range_bins=SONAR["range_bins"],
+      images=np.array(images),
+      positions=np.array(image_poses),
+      rotations=np.array(image_rotations),
+      **SONAR,
     )
-    print(f"Wrote {len(profiles)} profiles to {args.profiles}")
+    print(f"Wrote {len(images)} pings to {args.profiles}")
 
 
 if __name__ == "__main__":
