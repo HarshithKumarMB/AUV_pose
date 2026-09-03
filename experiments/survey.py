@@ -69,6 +69,23 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--max-steps", type=int, default=100_000)
   parser.add_argument("--arrival-radius", type=float, default=0.5)
   parser.add_argument(
+    "--profiles",
+    type=Path,
+    default=None,
+    help=(
+      "also write the raw intensity profiles to this .npz, for diagnosing what "
+      "the range picker is choosing between. Only the picked range has ever "
+      "been logged, which is why a second echo 12 range bins short of the "
+      "bottom went unnoticed in ~47%% of the shipped soundings"
+    ),
+  )
+  parser.add_argument(
+    "--profile-steps",
+    type=int,
+    default=5000,
+    help="stop recording profiles after this many; diagnosis, not a survey",
+  )
+  parser.add_argument(
     "--octree-min",
     type=float,
     default=0.02,
@@ -106,6 +123,8 @@ def main() -> None:
   follower = WaypointFollower(waypoints, args.arrival_radius)
   command = np.zeros(8)
   soundings = 0
+  profiles: list[np.ndarray] = []
+  profile_poses: list[np.ndarray] = []
 
   with CsvLogger(args.out, SOUNDING_COLUMNS) as log:
     for step in range(args.max_steps):
@@ -120,7 +139,15 @@ def main() -> None:
         continue
       command = next_command
 
-      sonar_depth = bottom_return_range(np.asarray(state["singlebeam"]), ranges)
+      profile = np.asarray(state["singlebeam"], dtype=float)
+      if args.profiles and len(profiles) < args.profile_steps:
+        profiles.append(profile.ravel().copy())
+        # The vehicle's z, which the sounding CSV does not record. Without it
+        # the true range cannot be recovered from a known seabed, so the
+        # profiles could not say which peak is the bottom.
+        profile_poses.append(position.copy())
+
+      sonar_depth = bottom_return_range(profile, ranges)
       if not np.isnan(sonar_depth):
         log.write(x=position[0], y=position[1], sonar_depth=sonar_depth)
         soundings += 1
@@ -134,6 +161,18 @@ def main() -> None:
       print(f"stopped after {args.max_steps} steps without finishing")
 
   print(f"Wrote {soundings} soundings to {args.out}")
+
+  if args.profiles and profiles:
+    np.savez_compressed(
+      args.profiles,
+      profiles=np.array(profiles),
+      positions=np.array(profile_poses),
+      ranges=ranges,
+      range_min=SONAR["range_min"],
+      range_max=SONAR["range_max"],
+      range_bins=SONAR["range_bins"],
+    )
+    print(f"Wrote {len(profiles)} profiles to {args.profiles}")
 
 
 if __name__ == "__main__":
