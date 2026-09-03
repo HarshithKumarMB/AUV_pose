@@ -5,6 +5,10 @@
 result
 result-*
 
+# direnv's cached dev shell: machine-local symlinks into /nix/store, which
+# change on every flake update and mean nothing on another machine.
+.direnv/
+
 # Generated plots -- regenerate with train_map.py / plot_trajectory.py.
 # visuals/ is the exception: figures kept deliberately, not scratch output.
 *.png
