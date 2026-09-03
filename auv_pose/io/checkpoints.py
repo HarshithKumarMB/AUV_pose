@@ -38,10 +38,22 @@ def save_map(
   y_mean: float,
   y_std: float,
 ) -> None:
-  """Write a fitted map to ``path`` as a pickle."""
+  """Write a fitted map to ``path`` as a pickle.
+
+  Tensors are forced onto the CPU. ``torch.nn.Module.to`` moves a model in
+  place, so anything that has evaluated the map on a GPU -- including
+  :class:`~auv_pose.mapping.svgp.BathymetryMap` constructed with
+  ``device="cuda"`` -- leaves the caller holding a model whose state dict is
+  full of CUDA tensors, and a checkpoint written from that only loads on a
+  machine with a GPU.
+  """
   payload = {
-    "model_state_dict": model.state_dict(),
-    "likelihood_state_dict": likelihood.state_dict(),
+    "model_state_dict": {
+      key: value.cpu() for key, value in model.state_dict().items()
+    },
+    "likelihood_state_dict": {
+      key: value.cpu() for key, value in likelihood.state_dict().items()
+    },
     "inducing_points": inducing_points.cpu(),
     "x_scaler": x_scaler,
     "y_mean": float(y_mean),

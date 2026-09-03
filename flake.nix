@@ -7,7 +7,57 @@
     { self, nixpkgs }:
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs { inherit system; };
+
+      # CUDA, for fitting the bathymetry GP. nixpkgs' own `torch` is built
+      # without it, so `torch.cuda.is_available()` is False however good the
+      # card is; `torch-bin` is upstream's wheel and ships the CUDA runtime.
+      #
+      # That wheel is unfree -- `unfreeRedistributable` plus NVIDIA's `issl`,
+      # the CUDA SDK licence -- so it needs `allowUnfree`, which is a licence
+      # decision and not merely a build flag. Setting it here scopes the
+      # decision to this flake rather than to the machine.
+      #
+      # Only `torch` is overridden, not the whole tree: `cudaSupport = true`
+      # would rebuild torch and its dependents from source, which is hours of
+      # compilation for the same result.
+      #
+      # CUDA is pinned forward because this nixpkgs defaults to 12.9.7 while the
+      # wheel wants cuda-bindings >= 13.0.3, and nixpkgs refuses to evaluate it
+      # otherwise. That refusal is a real check rather than noise, so it is
+      # answered by supplying a new enough CUDA rather than by setting
+      # `problems.handlers` to ignore it.
+      #
+      # `cuda-bindings` is a Python package in its own right and is what the
+      # version check actually reads, so overriding `torch-bin`'s `cudaPackages`
+      # alone changes nothing -- it has to be overridden in the set, from which
+      # `torch-bin` then picks it up.
+      pkgs = import nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
+        overlays = [
+          (final: prev: {
+            pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+              (pyFinal: pyPrev: {
+                cuda-bindings = pyPrev.cuda-bindings.override {
+                  cudaPackages = final.cudaPackages_13;
+                };
+                # The wheel's metadata pins `setuptools<82` and nixpkgs carries
+                # 83, which fails a runtime-dependency check rather than
+                # anything that matters: torch uses setuptools only for
+                # `torch.utils.cpp_extension`, which nothing here calls, and it
+                # imports and runs fine against 83.
+                torch =
+                  (pyFinal.torch-bin.override {
+                    cudaPackages = final.cudaPackages_13;
+                  }).overrideAttrs
+                    (_: {
+                      dontCheckRuntimeDeps = true;
+                    });
+              })
+            ];
+          })
+        ];
+      };
 
       # NOT pkgs.python3 -- that is 3.14 in this nixpkgs, and torch/gpytorch
       # are only built for 3.13.

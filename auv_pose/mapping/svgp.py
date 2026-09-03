@@ -176,6 +176,13 @@ class BathymetryMap:
       rate, where moving that point to a GPU and the answer back costs far more
       than the arithmetic saves. Pass ``"cuda"`` when scoring a large held-out
       set or rendering a grid, which is where it does pay.
+
+  Note:
+      ``torch.nn.Module.to`` moves in place, so passing a non-CPU device moves
+      the caller's ``model`` too rather than taking a copy. That is ordinary
+      PyTorch behaviour, but it means a checkpoint written afterwards would hold
+      CUDA tensors -- :func:`auv_pose.io.checkpoints.save_map` forces them back
+      to the CPU for exactly this reason.
   """
 
   def __init__(
