@@ -24,6 +24,7 @@ __all__ = [
   "ocean_scenario",
   "orientation_sensor",
   "pose_sensor",
+  "profiling_sonar",
   "sidescan_sonar",
   "singlebeam_sonar",
 ]
@@ -89,6 +90,70 @@ def singlebeam_sonar(
       "RangeMin": range_min,
       "RangeMax": range_max,
       "RangeBins": range_bins,
+    },
+  }
+
+
+def profiling_sonar(
+  name: str = "multibeam",
+  hz: int = 5,
+  range_min: float = 0.5,
+  range_max: float = 100.0,
+  range_bins: int = 1000,
+  azimuth: float = 60.0,
+  azimuth_bins: int = 240,
+  elevation: float = 1.0,
+) -> dict[str, Any]:
+  """Downward-facing multibeam, for seabed mapping.
+
+  Replaces :func:`singlebeam_sonar` for surveying. **The singlebeam does not
+  measure the depth beneath the vehicle**: measured against the simulator's own
+  octree over 3986 pings, its strongest-return range is biased 4.17 m against
+  nadir truth, and predicting a constant beats every bin-selection rule (0.888 m
+  rms against 4.184 m). Its ``OpeningAngle`` of 10 degrees is a 12 m footprint at
+  survey altitude -- empirically wider still -- so a range bin is evidence about
+  the *area of seabed at that slant range within the cone*, not about the depth
+  under the vehicle. No picker recovers what the beam integrated away.
+
+  This fan is ~0.31 m across-track by ~1.2 m along-track at 70 m altitude, small
+  enough that treating a beam as a point sounding is a fair approximation.
+
+  Note:
+      Noise is deliberately absent. :func:`~auv_pose.mapping.sonar.bottom_return_ranges`
+      recognises a beam that saw nothing by its profile being flat, and that test
+      never fires once additive noise is on -- every off-swath beam would then
+      report a confident sounding at whatever bin the noise peaked in.
+
+  :param name: Sensor name in the state dict.
+  :param hz: Update rate. Sonar raycasting dominates the tick, and a 240-beam
+      fan is far more work per ping than one beam, so this is well below the
+      simulation rate.
+  :param range_min: Minimum range, metres.
+  :param range_max: Maximum range, metres. Must exceed the slant range at the
+      edge of the swath -- at 70 m altitude and a 60 degree fan that is 80.8 m --
+      or the outer beams return nothing.
+  :param range_bins: Range bins. 1000 over 99.5 m is 0.0995 m per bin, against
+      the singlebeam's 0.39 m.
+  :param azimuth: Total swath width, degrees. holoocean defaults to 120, which
+      at survey altitude is a 242 m swath against a 100 m range -- most of that
+      fan never reaches the seabed.
+  :param azimuth_bins: Beams across the swath.
+  :param elevation: Along-track beam width, degrees.
+  :return: A sensor configuration block.
+  """
+  return {
+    "sensor_name": name,
+    "sensor_type": "ProfilingSonar",
+    "socket": "IMUSocket",
+    "rotation": [0, -90, 0],
+    "Hz": hz,
+    "configuration": {
+      "RangeMin": range_min,
+      "RangeMax": range_max,
+      "RangeBins": range_bins,
+      "Azimuth": azimuth,
+      "AzimuthBins": azimuth_bins,
+      "Elevation": elevation,
     },
   }
 
