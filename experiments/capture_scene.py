@@ -2,19 +2,24 @@
 
     nix run .#sim -- -c "python -u experiments/capture_scene.py --out shots/"
 
-The multibeam and the octree disagree by 4-5 m over compact patches whose world
-position and ~10 m size hold across altitudes of 17, 40 and 69 m. That is the
-signature of an object standing on the seabed, and the octree contains no
-geometry there -- but "an object the octree omits" and "a sonar artefact that
-happens to be world-locked" predict the same ranges. A picture separates them:
-either something is visibly there or nothing is.
+Sonar and octree disagree by 4-5 m over compact patches of the Dam seabed. Two
+explanations predicted identical ranges -- a sonar artefact that happens to be
+world-locked, or an object the octree does not contain -- and no amount of
+further ranging could separate them. A photograph could, and did: **they are
+bolted pipelines lying on the seabed**, with a valve manifold and the dam wall
+behind. The sonar was right; octree generation voxelises only landscape.
+
+That is worth keeping as a tool rather than a one-off. It is the cheapest way to
+answer "is the reference wrong or is the sensor wrong", and the calibration
+worlds have to be checked the same way before anything measured in them is
+trusted -- an octree that silently omits geometry invalidates every score taken
+against it.
 
 Uses ``ViewportCapture`` with :meth:`move_viewport`, so the camera flies free of
-the vehicle and can be put wherever the view is best. Water fog is turned down,
-without which 70 m down is opaque and the frame says nothing either way.
-
-``--mark`` draws a wireframe box where the sonar puts the surface, so the render
-can be compared against the measurement rather than eyeballed on its own.
+the vehicle. Water fog is turned off, without which 70 m down is opaque and the
+frame says nothing either way. ``--mark`` draws a box where the sonar puts the
+surface, so the render can be compared against the measurement rather than
+eyeballed.
 """
 
 from __future__ import annotations
@@ -33,43 +38,30 @@ from experiments.scenarios import (
   viewport_capture,
 )
 
-#: Where the sonar says something stands that the octree does not contain:
-#: centred (x, y), apex and seabed elevation, and its measured width.
-SUSPECT = {"x": -21.0, "y": -1.7, "apex": -65.1, "seabed": -69.7, "width": 10.0}
 
-#: Ground the sonar and the octree agree on to 0.035 m, for a control shot. If
-#: the suspect looks like an object and this looks like bare seabed, that is the
-#: comparison; if both look the same, the render is not resolving the question.
-CONTROL = {
-  "x": -24.0,
-  "y": -25.0,
-  "apex": -68.7,
-  "seabed": -68.7,
-  "width": 10.0,
-}
+def views(
+  x: float, y: float, seabed: float, apex: float, standoff: float, height: float
+) -> list[tuple[str, list[float], list[float]]]:
+  """``(label, location, rotation)`` looking at the target from several sides.
 
-
-def views(target: dict, standoff: float, height: float) -> list[tuple]:
-  """(label, location, rotation) triples looking at ``target`` from several sides.
-
-  One angle is not enough: a dome is unmistakable in silhouette against the
-  water and nearly invisible from directly above, and a sonar artefact would
-  show in none of them.
+  One angle is not enough: something standing proud of the seabed is
+  unmistakable in silhouette from low down and nearly invisible from overhead,
+  and a sensor artefact would show in none of them.
   """
-  x, y = target["x"], target["y"]
-  mid = 0.5 * (target["apex"] + target["seabed"])
+  mid = 0.5 * (apex + seabed)
+  pitch = float(np.degrees(np.arctan2(height, standoff)))
   return [
-    # Low and to the side: puts anything standing proud against open water.
+    # Low and to the side, which puts anything standing proud against water.
     ("side_south", [x, y - standoff, mid + 1.0], [0.0, 0.0, 90.0]),
     ("side_west", [x - standoff, y, mid + 1.0], [0.0, 0.0, 0.0]),
-    # Raised three-quarter view, the most readable of a mound.
+    # Raised three-quarter view, the most readable of a mound or a pipe.
     (
       "oblique",
-      [x - standoff * 0.7, y - standoff * 0.7, target["seabed"] + height],
-      [0.0, -np.degrees(np.arctan2(height, standoff)), 45.0],
+      [x - standoff * 0.7, y - standoff * 0.7, seabed + height],
+      [0.0, -pitch, 45.0],
     ),
-    # Straight down, which gives the footprint rather than the profile.
-    ("overhead", [x, y, target["seabed"] + height * 1.6], [0.0, -90.0, 0.0]),
+    # Looking down, which gives the footprint rather than the profile.
+    ("overhead", [x, y, seabed + height * 1.6], [0.0, -90.0, 0.0]),
   ]
 
 
@@ -77,11 +69,33 @@ def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--out", type=Path, default=Path("scene"))
   parser.add_argument(
-    "--target",
-    choices=("suspect", "control", "both"),
-    default="both",
-    help="which patch to photograph; 'both' gives the comparison",
+    "--at",
+    type=float,
+    nargs=2,
+    metavar=("X", "Y"),
+    default=[-21.0, -1.7],
+    help=(
+      "world position to photograph. The default is the Dam pipeline that "
+      "started this -- pass the centre of whatever check_beam_validity.py "
+      "reports a disagreement over"
+    ),
   )
+  parser.add_argument(
+    "--seabed",
+    type=float,
+    default=-69.7,
+    help="seabed elevation there, metres; sets where the camera sits",
+  )
+  parser.add_argument(
+    "--apex",
+    type=float,
+    default=-65.1,
+    help=(
+      "elevation the sonar reports, metres. Only frames the shot and places "
+      "--mark; pass the seabed value if nothing is expected to stand there"
+    ),
+  )
+  parser.add_argument("--width-m", type=float, default=10.0, help="--mark size")
   parser.add_argument("--standoff", type=float, default=16.0)
   parser.add_argument("--height", type=float, default=14.0)
   parser.add_argument("--width", type=int, default=1280)
@@ -107,10 +121,11 @@ def parse_args() -> argparse.Namespace:
     default=30,
     help=(
       "ticks between moving the camera and grabbing the frame. The teleport "
-      "applies on the next tick and the water surface takes a few more to "
-      "settle, so a frame grabbed immediately can be of the old viewpoint"
+      "applies on the next tick and the water takes a few more to settle, so "
+      "a frame grabbed immediately can be of the old viewpoint"
     ),
   )
+  parser.add_argument("--world", default="Dam")
   parser.add_argument("--octree-min", type=float, default=0.02)
   return parser.parse_args()
 
@@ -122,16 +137,12 @@ def main() -> None:
 
   from PIL import Image
 
-  targets = {"suspect": SUSPECT, "control": CONTROL}
-  wanted = list(targets) if args.target == "both" else [args.target]
-
-  # Spawn somewhere harmless; the vehicle is only a carrier for the sensor, and
-  # the camera is moved off it immediately.
-  start = [targets[wanted[0]]["x"], targets[wanted[0]]["y"], -40.0]
+  x, y = args.at
   env = holoocean.make(
     scenario_cfg=ocean_scenario(
       "scene_capture",
-      start=start,
+      start=[x, y, args.seabed + 30.0],
+      world=args.world,
       octree_min=args.octree_min,
       sensors=[
         pose_sensor(),
@@ -147,39 +158,34 @@ def main() -> None:
   env.should_render_viewport(True)
 
   written = []
-  for name in wanted:
-    target = targets[name]
-    for label, location, rotation in views(target, args.standoff, args.height):
-      env.move_viewport(location, rotation)
-      if args.mark:
-        centre = [
-          target["x"],
-          target["y"],
-          0.5 * (target["apex"] + target["seabed"]),
-        ]
-        half = 0.5 * (target["seabed"] - target["apex"])
-        env.draw_box(
-          centre,
-          [target["width"] / 2, target["width"] / 2, abs(half)],
-          color=[255, 0, 0],
-          thickness=6.0,
-          lifetime=0.0,
-        )
+  for label, location, rotation in views(
+    x, y, args.seabed, args.apex, args.standoff, args.height
+  ):
+    env.move_viewport(location, rotation)
+    if args.mark:
+      half = 0.5 * abs(args.apex - args.seabed)
+      env.draw_box(
+        [x, y, 0.5 * (args.apex + args.seabed)],
+        [args.width_m / 2, args.width_m / 2, max(half, 0.25)],
+        color=[255, 0, 0],
+        thickness=6.0,
+        lifetime=0.0,
+      )
 
-      frame = None
-      for _ in range(args.settle):
-        state = env.tick()
-        if "ViewportCapture" in state:
-          frame = state["ViewportCapture"]
+    frame = None
+    for _ in range(args.settle):
+      state = env.tick()
+      if "ViewportCapture" in state:
+        frame = state["ViewportCapture"]
 
-      if frame is None:
-        print(f"  {name}/{label}: no frame returned")
-        continue
+    if frame is None:
+      print(f"  {label}: no frame returned")
+      continue
 
-      path = args.out / f"{name}_{label}.png"
-      Image.fromarray(np.asarray(frame)[..., :3]).save(path)
-      written.append(path)
-      print(f"  wrote {path}  camera {location} rot {rotation}")
+    path = args.out / f"{label}.png"
+    Image.fromarray(np.asarray(frame)[..., :3]).save(path)
+    written.append(path)
+    print(f"  wrote {path}  camera {location} rot {rotation}")
 
   print(f"\n{len(written)} frames in {args.out}")
 

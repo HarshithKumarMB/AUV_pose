@@ -1,54 +1,43 @@
-"""Compare every multibeam beam against a ray-cast through the simulator's octree.
+"""Score every multibeam beam against a ray-cast through the simulator's octree.
 
     python experiments/check_beam_validity.py multibeam_check.npz
 
-Each beam's reported range is checked against **where its ray actually first
-meets the seabed**, traced through the octree surface. That is the only test
-that works over real ground: a beam pointing at a mound legitimately comes back
-shorter than the vehicle's altitude, so the cheaper "a range cannot be shorter
-than the altitude" check calls honest returns fabricated as soon as the swath
-is not flat. Measured here, the swath at the Dam test site has 4.04 m of relief
-across it while the ground *under the track* varies by 0.02 m -- so the cheap
-test was being applied exactly where it does not hold.
+Each beam's reported range is compared to where its ray actually first meets
+the seabed, traced with :mod:`auv_pose.mapping.raycast`. Ray-casting is what
+makes an off-nadir beam scorable at all: a beam pointed at a mound legitimately
+comes back shorter than the vehicle's altitude, so the cheaper "a range cannot
+be shorter than the altitude" test calls honest returns fabricated the moment
+the swath is not flat -- and at the Dam site the ground under the track varies
+by 0.02 m while the swath spans 4.04 m.
 
-What survives the stricter test: over a contiguous **angular** sector the sonar
-reports ranges 3-5 m shorter than the ray-cast, while every beam outside it
-agrees to 0.01-0.07 m. Beams do not merely mis-range there -- the true echo is
-absent from the profile entirely, so no bin-selection rule recovers it.
-
-The readout is the sector's angular bounds. Re-flying with a different fan, a
-different altitude or a different patch of seabed and watching what moves is
-what separates a sensor defect from a real object the octree does not contain.
+**What this found, and what it is for now.** The sonar agrees with the octree to
+a 0.035 m MAD-std, inside its own 0.0996 m quantisation. Where it disagrees it
+reports 4-5 m short, and that turned out to be **pipelines lying on the Dam
+seabed that octree generation omits** -- photographed with ``capture_scene.py``.
+So a disagreement here is a question about the *reference*, not a verdict on the
+sensor. The sector's angular bounds, and how they move with altitude and
+position, are what distinguish the two: a sensor defect holds its angular width
+and follows the vehicle, an object holds its physical width and stays put.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
 
 from auv_pose.mapping.octree import cached_surface, robust_spread
-from auv_pose.mapping.sonar import (
-  azimuth_angles,
-  bottom_return_ranges,
-  range_bins,
-)
+from auv_pose.mapping.raycast import Heightfield, raycast
+from experiments.captures import Capture
+from experiments.cli import add_octree_args, octree_directory
 from experiments.scenarios import PROFILER_NADIR_AXIS, PROFILER_SWATH_AXIS
-
-DEFAULT_ROOT = Path(
-  os.environ.get("HOLODECKPATH", Path.home() / "data" / "holoocean")
-)
 
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("capture", type=Path)
-  parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-  parser.add_argument("--version", default="2.3.0")
-  parser.add_argument("--world", default="Dam")
-  parser.add_argument("--cache", default="min2_max512")
+  add_octree_args(parser)
   parser.add_argument(
     "--pad",
     type=float,
@@ -72,8 +61,8 @@ def parse_args() -> argparse.Namespace:
     default=0.5,
     help=(
       "how far short of the ray-cast a range may fall before the beam counts "
-      "as bad, metres. Well above the 0.0996 m range quantisation and well "
-      "below the 3-5 m the affected beams are out by, so the sector's bounds "
+      "as disagreeing, metres. Well above the 0.0996 m quantisation and well "
+      "below the 4-5 m the affected beams are out by, so the sector's bounds "
       "do not depend on it"
     ),
   )
@@ -86,121 +75,73 @@ def parse_args() -> argparse.Namespace:
   return parser.parse_args()
 
 
-class Heightfield:
-  """The octree surface as a raster, so a ray can be marched by indexing.
+def report_beam_width(capture: Capture) -> None:
+  """How many range bins carry a single beam's return.
 
-  A KD-tree lookup per marched point costs tens of millions of queries for one
-  capture. Rasterising once and indexing is the same answer far faster, and the
-  surface is already a per-cell reduction -- it *is* a raster that happens to be
-  stored as points.
+  A point-like return is one or two bins. The singlebeam's spans ~14, which is
+  why ``argmax`` on it means little; if the profiler smeared the same way,
+  treating a beam as a point sounding would be no more valid here.
   """
+  live = capture.images.max(axis=1) > 0
+  peak = capture.images.max(axis=1, keepdims=True)
+  with np.errstate(invalid="ignore"):
+    widths = (capture.images >= 0.5 * peak).sum(axis=1)[live]
 
-  def __init__(self, surface: np.ndarray, cell: float) -> None:
-    self.cell = cell
-    self.x0, self.y0 = surface[:, 0].min(), surface[:, 1].min()
-    nx = int(np.ceil((surface[:, 0].max() - self.x0) / cell)) + 1
-    ny = int(np.ceil((surface[:, 1].max() - self.y0) / cell)) + 1
-    self.grid = np.full((nx, ny), -np.inf)
-    ix = np.rint((surface[:, 0] - self.x0) / cell).astype(int)
-    iy = np.rint((surface[:, 1] - self.y0) / cell).astype(int)
-    # Maximum rather than last-wins: two points can land in one raster cell and
-    # the surface is the top of the geometry.
-    np.maximum.at(self.grid, (ix, iy), surface[:, 2])
-    self.covered = np.isfinite(self.grid)
-
-  def elevation(self, points: np.ndarray) -> np.ndarray:
-    """Surface height under each point; ``-inf`` outside the raster."""
-    ix = np.rint((points[..., 0] - self.x0) / self.cell).astype(int)
-    iy = np.rint((points[..., 1] - self.y0) / self.cell).astype(int)
-    inside = (
-      (ix >= 0)
-      & (ix < self.grid.shape[0])
-      & (iy >= 0)
-      & (iy < self.grid.shape[1])
+  median = float(np.median(widths))
+  print(
+    f"beam return width: median {median:.1f} bins "
+    f"({median * capture.bin_width:.2f} m), "
+    f"p90 {np.percentile(widths, 90):.1f}, max {widths.max()}"
+  )
+  if median > 4:
+    print(
+      "  *** the return is not point-like. argmax on it is the same mistake "
+      "the singlebeam made -- a range bin is evidence about area at that "
+      "slant range, not about depth under the beam ***"
     )
-    out = np.full(ix.shape, -np.inf)
-    out[inside] = self.grid[ix[inside], iy[inside]]
-    return out
-
-
-def cast(
-  field: Heightfield,
-  origin: np.ndarray,
-  directions: np.ndarray,
-  t_max: float,
-  step: float,
-) -> np.ndarray:
-  """First range at which each ray drops to or below the surface."""
-  t = np.arange(step, t_max, step)
-  points = origin[None, None, :] + t[:, None, None] * directions[None, :, :]
-  below = points[..., 2] <= field.elevation(points)
-  hit = below.any(axis=0)
-  first = np.where(hit, t[np.argmax(below, axis=0)], np.nan)
-  return first
 
 
 def main() -> None:
   args = parse_args()
-  data = np.load(args.capture)
-  images, positions = data["images"], data["positions"]
-  rotations = data["rotations"]
+  capture = Capture.load(args.capture)
+  print(capture.describe())
 
-  ranges = range_bins(
-    float(data["range_min"]), float(data["range_max"]), int(data["range_bins"])
-  )
-  bearings = azimuth_angles(float(data["azimuth"]), int(data["azimuth_bins"]))
-  reported = np.array([bottom_return_ranges(im, ranges) for im in images])
-  n_pings, n_beams = reported.shape
-
-  print(
-    f"{n_pings} pings, {n_beams} beams, "
-    f"azimuth {float(data['azimuth']):.1f} deg, "
-    f"{float(data['range_max']):.1f} m in {int(data['range_bins'])} bins "
-    f"({ranges[1] - ranges[0]:.4f} m)"
-  )
-
-  directory = (
-    args.root
-    / args.version
-    / "worlds/Ocean/Linux/Holodeck/Octrees"
-    / args.world
-    / args.cache
-  )
   surface = cached_surface(
-    directory,
+    octree_directory(args),
     (
-      positions[:, 0].min() - args.pad,
-      positions[:, 0].max() + args.pad,
-      positions[:, 1].min() - args.pad,
-      positions[:, 1].max() + args.pad,
+      capture.positions[:, 0].min() - args.pad,
+      capture.positions[:, 0].max() + args.pad,
+      capture.positions[:, 1].min() - args.pad,
+      capture.positions[:, 1].max() + args.pad,
     ),
     cell=args.cell,
   )
   if not len(surface):
-    raise SystemExit(f"no octree geometry under the track in {directory}")
+    raise SystemExit("no octree geometry under the track")
   field = Heightfield(surface, args.cell)
-  print(f"octree surface: {len(surface)} cells")
+  print(
+    f"octree surface: {len(surface)} cells, "
+    f"raster {100 * field.coverage:.1f}% covered"
+  )
+  print()
 
-  # Beam directions in the body frame, the convention measured in
-  # analyse_multibeam.py and stored beside the sensor block.
-  nadir = np.asarray(PROFILER_NADIR_AXIS, dtype=float)
-  swath = np.asarray(PROFILER_SWATH_AXIS, dtype=float)
-  body = np.cos(bearings)[:, None] * nadir + np.sin(bearings)[:, None] * swath
+  report_beam_width(capture)
+  print()
 
-  chosen = np.linspace(0, n_pings - 1, min(args.pings, n_pings)).astype(int)
-  truth = np.full((len(chosen), n_beams), np.nan)
+  chosen = np.linspace(
+    0, capture.n_pings - 1, min(args.pings, capture.n_pings)
+  ).astype(int)
+  truth = np.full((len(chosen), capture.n_beams), np.nan)
   for row, ping in enumerate(chosen):
-    directions = body @ rotations[ping].T
-    truth[row] = cast(
+    truth[row] = raycast(
       field,
-      positions[ping],
-      directions,
-      float(data["range_max"]),
+      capture.positions[ping],
+      capture.beam_directions(ping, PROFILER_NADIR_AXIS, PROFILER_SWATH_AXIS),
+      capture.settings["range_max"],
       args.step,
     )
 
-  seen = reported[chosen]
-  shortfall = truth - seen  # positive: the sonar reports too near
+  shortfall = truth - capture.beam_ranges[chosen]  # positive: reported too near
   valid = np.isfinite(shortfall)
   print(
     f"ray-cast {len(chosen)} pings; {100 * valid.mean():.1f}% of beams have "
@@ -208,38 +149,51 @@ def main() -> None:
   )
 
   # Relief across the swath, which is why this ray-casts rather than assuming
-  # a flat seabed. Reported because it is the assumption the cheaper test made.
-  under = field.elevation(positions[:, None, :])[:, 0]
-  hit_z = positions[chosen][:, None, 2] - truth * np.cos(bearings)[None, :]
+  # flat ground. Reported because it is the assumption the cheap test made.
+  under = field.elevation(capture.positions)
+  hit_z = (
+    capture.positions[chosen][:, None, 2]
+    - truth * np.cos(capture.bearings)[None, :]
+  )
   print(
     f"seabed under the track {np.ptp(under):.2f} m of relief; "
     f"across the swath {np.nanmax(hit_z) - np.nanmin(hit_z):.2f} m"
   )
   print()
 
-  bad = (shortfall > args.tolerance) & valid
-  per_beam = bad.sum(axis=0) > 0.5 * np.maximum(valid.sum(axis=0), 1)
+  disagrees = (shortfall > args.tolerance) & valid
+  per_beam = disagrees.sum(axis=0) > 0.5 * np.maximum(valid.sum(axis=0), 1)
 
   if not per_beam.any():
-    print("every beam agrees with the ray-cast. The whole fan is usable.")
+    print("every beam agrees with the octree. Nothing unmodelled in the swath.")
   else:
-    idx = np.flatnonzero(per_beam)
-    lo, hi = np.degrees(bearings[idx[0]]), np.degrees(bearings[idx[-1]])
-    print("*** the sector, which is the reason to run this ***")
+    index = np.flatnonzero(per_beam)
+    low, high = np.degrees(capture.bearings[index[[0, -1]]])
+    print("*** where the sonar and the octree disagree ***")
     print(
-      f"  bearings          : {lo:+.2f} to {hi:+.2f} deg  ({hi - lo:.2f} wide)"
-    )
-    print(f"  beam indices      : {idx[0]} to {idx[-1]} of {n_beams}")
-    print(f"  contiguous        : {bool(per_beam[idx[0] : idx[-1] + 1].all())}")
-    print(
-      f"  shortfall         : median {np.median(shortfall[bad]):.2f} m, "
-      f"max {shortfall[bad].max():.2f} m"
+      f"  bearings          : {low:+.2f} to {high:+.2f} deg ({high - low:.2f} wide)"
     )
     print(
-      "\n  The index moves with the fan and the bearings do not, so quote the "
-      "bearings. Watch what the bounds do against altitude and against a "
-      "different patch of seabed: a sensor defect follows the vehicle, a real "
-      "object the octree lacks stays where it is."
+      f"  beam indices      : {index[0]} to {index[-1]} of {capture.n_beams}"
+    )
+    print(
+      f"  contiguous        : {bool(per_beam[index[0] : index[-1] + 1].all())}"
+    )
+    print(
+      f"  reported short by : median {np.median(shortfall[disagrees]):.2f} m, "
+      f"max {shortfall[disagrees].max():.2f} m"
+    )
+
+    altitude = float(np.median(capture.positions[chosen][:, 2] - under[chosen]))
+    print(
+      f"  physical width    : {np.radians(high - low) * altitude:.2f} m at "
+      f"{altitude:.1f} m altitude"
+    )
+    print(
+      "\n  Re-fly at another altitude before concluding anything. Constant "
+      "angular width means the fan; constant physical width and world "
+      "position means an object the octree does not contain, which at Dam is "
+      "a pipeline -- see capture_scene.py."
     )
 
   print()
@@ -253,9 +207,7 @@ def main() -> None:
     print(
       f"  {label:>12s} {median:+9.4f} {spread:9.4f} {int(selected.sum()):8d}"
     )
-
-  quantisation = float(ranges[1] - ranges[0])
-  print(f"  range quantisation {quantisation:.4f} m")
+  print(f"  range quantisation {capture.bin_width:.4f} m")
 
 
 if __name__ == "__main__":

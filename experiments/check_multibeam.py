@@ -1,21 +1,24 @@
-"""Check the multibeam's geometry against the simulator's own octree.
+"""Capture raw multibeam pings over a chosen patch of seabed.
 
     nix run .#sim -- -c "python -u experiments/check_multibeam.py --out mb.npz"
 
-Two questions have to be answered before a survey is flown with this sensor, and
-both are settled offline against :mod:`auv_pose.mapping.octree`:
+Flies a short track and writes every ping's intensity image with the pose and
+attitude it was taken at; ``check_beam_validity.py`` scores them offline against
+a ray-cast through the octree.
 
-1. **Is a beam's return narrow enough for ``argmax`` to mean anything?** The
-   singlebeam's is not -- it spans ~14 range bins, and no bin-selection rule
-   recovers the depth beneath the vehicle from it. If the profiler smears the
-   same way, picking a bin is no more valid here than it was there.
-2. **Is the beam geometry right?** :func:`~auv_pose.mapping.sonar.seabed_points`
-   takes its ``nadir_axis`` and ``swath_axis`` in the body frame, but the sensor
-   carries a mount ``rotation`` that nothing applies. A wrong ``swath_axis``
-   sign mirrors the whole swath across the track and still looks entirely
-   plausible in isolation -- against a known surface it does not.
+The two questions this was originally built for are both settled. A beam's
+return is **1 bin wide, 0.10 m** -- point-like, so ``argmax`` on it is
+meaningful in a way it never was for the singlebeam's ~14 bins. And the body
+frame is ``nadir +z, swath -y``, enumerated against the octree and then moved
+0.005 degrees by a five-parameter fit; it is recorded on
+:data:`~experiments.scenarios.PROFILER_NADIR_AXIS`.
 
-Writes the raw images and poses; ``analyse_multibeam.py`` scores them.
+What the knobs below are for now is the question those answers raised. The sonar
+agrees with the octree to 0.035 m almost everywhere and reports 4-5 m short over
+compact patches, and telling a sensor defect from a gap in the reference means
+re-flying the *same ground* with one thing changed at a time. Doing that with
+two captures over different ground produced three wrong conclusions in a row,
+which is the whole reason these are arguments rather than edits.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from pathlib import Path
 import holoocean
 import numpy as np
 
+from experiments.captures import write_capture
 from experiments.cli import configure_sdl, refuse_overwrite
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
@@ -120,10 +124,12 @@ def parse_args() -> argparse.Namespace:
     type=float,
     default=5.0,
     help=(
-      "coarsest octree voxel, metres. The phantom returns sit 0-5 m above the "
-      "true surface against a default of 5.0, which is why this is a knob "
-      "worth turning: if the sonar is resolving against coarse nodes rather "
-      "than the leaves inside them, the error should scale with this"
+      "coarsest octree voxel, metres. **Measured, this changes nothing**: "
+      "5.12 m against 10.24 m gave bit-identical returns, not one beam moved. "
+      "That is worth knowing rather than forgetting -- it says the sonar does "
+      "not raycast the octree at all, which is why the octree can be missing "
+      "geometry the sonar sees. Changing it strands the existing cache and "
+      "costs tens of GB to rebuild"
     ),
   )
   parser.add_argument(
@@ -131,15 +137,16 @@ def parse_args() -> argparse.Namespace:
     type=float,
     default=0.0,
     help=(
-      "starting heading in degrees, held for the run. Flying the same patch at "
-      "0 and 180 asks whether a sensor defect is fixed in the sensor's frame "
-      "or the world's: sensor-fixed keeps the same beam indices bad while they "
-      "point the opposite way, world-fixed moves which indices are bad"
+      "starting heading in degrees, held for the run -- nothing commands yaw. "
+      "Flying the same patch at 0 and 180 asks whether an effect is fixed in "
+      "the sensor's frame or the world's: sensor-fixed keeps the same bearings "
+      "affected while they point the opposite way, world-fixed swaps them"
     ),
   )
-  # Overrides for isolating the phantom-return boundary. Beams past ~106 return
-  # ranges shorter than the vehicle's altitude over flat ground, which no
-  # geometry can produce; varying the fan tells index-based from angle-based.
+  # Vary the fan to separate an effect that is a property of the sensor from
+  # one that is a property of the ground. Changing Azimuth while holding
+  # AzimuthBins moves every beam's index without moving its bearing, so
+  # whichever of the two holds still is the one the effect is indexed by.
   for key, value in SONAR.items():
     parser.add_argument(
       f"--{key.replace('_', '-')}",
@@ -151,9 +158,10 @@ def parse_args() -> argparse.Namespace:
     "--use-approx",
     action="store_true",
     help=(
-      "restore holoocean's approximate atan2 for azimuth binning. Only for "
-      "measuring what it costs: flying the same track with and without is the "
-      "controlled comparison, since two captures over different ground are not"
+      "restore holoocean's approximate atan2 for azimuth binning. Measured on "
+      "the same track it costs nothing -- 1.879 vs 1.896 m MAD-std against the "
+      "octree, same pattern. An earlier capture said otherwise and was two "
+      "flights over different ground"
     ),
   )
   parser.add_argument("--force", action="store_true")
@@ -222,13 +230,7 @@ def main() -> None:
   if not images:
     raise SystemExit("no sonar returns; check the sensor name and Hz")
 
-  np.savez_compressed(
-    args.out,
-    images=np.array(images),
-    positions=np.array(positions),
-    rotations=np.array(rotations),
-    **sonar,
-  )
+  write_capture(args.out, images, positions, rotations, sonar)
   print(f"Wrote {len(images)} pings of {images[0].shape} to {args.out}")
 
 

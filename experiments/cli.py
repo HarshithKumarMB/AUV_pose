@@ -2,10 +2,70 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 
-__all__ = ["configure_sdl", "refuse_overwrite"]
+__all__ = [
+  "DEFAULT_ROOT",
+  "add_octree_args",
+  "configure_sdl",
+  "octree_directory",
+  "refuse_overwrite",
+]
+
+#: Where the simulator keeps its world binaries and octree caches. The flake
+#: sets ``HOLODECKPATH``; the fallback is what holoocean would use unaided.
+DEFAULT_ROOT = Path(
+  os.environ.get("HOLODECKPATH", Path.home() / "data" / "holoocean")
+)
+
+
+def add_octree_args(parser: argparse.ArgumentParser) -> None:
+  """Add the arguments :func:`octree_directory` consumes.
+
+  Every script that scores against the octree needs the same four, and they
+  were copied into each one separately -- which is how three of them ended up
+  with their own ``DEFAULT_ROOT``.
+  """
+  group = parser.add_argument_group("octree cache")
+  group.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+  group.add_argument("--version", default="2.3.0")
+  group.add_argument("--world", default="Dam")
+  group.add_argument(
+    "--cache",
+    default="min2_max512",
+    help=(
+      "octree cache directory, named for its voxel bounds in centimetres. "
+      "holoocean rounds the coarsest node up to octree_min * 2^n, so "
+      "octree_max = 5.0 with octree_min = 0.02 gives 5.12 m -- 'max512', not "
+      "'max500'. Scoring against the wrong cache compares a run to a "
+      "differently resolved world"
+    ),
+  )
+
+
+def octree_directory(args: argparse.Namespace) -> Path:
+  """The octree cache directory named by :func:`add_octree_args`.
+
+  Raises:
+      SystemExit: If it does not exist, with the reason it usually does not --
+          the world has never been run with a sonar at these settings.
+  """
+  directory = (
+    args.root
+    / args.version
+    / "worlds/Ocean/Linux/Holodeck/Octrees"
+    / args.world
+    / args.cache
+  )
+  if not directory.is_dir():
+    raise SystemExit(
+      f"no octree cache at {directory}. The simulator writes one the first "
+      f"time a sonar runs in {args.world} at these octree bounds; run a "
+      "scenario there once, or pass --root/--world/--cache."
+    )
+  return directory
 
 
 def configure_sdl(headless: bool) -> None:
@@ -39,8 +99,8 @@ def configure_sdl(headless: bool) -> None:
 def refuse_overwrite(path: Path, force: bool) -> None:
   """Stop rather than clobber an existing output file.
 
-  The committed ``map*.csv`` and ``svgp_bathymetry.pkl`` are the only record of
-  a survey that takes a simulator run to reproduce, and they are the default
+  A survey and the map fitted on it are the only record of a simulator run that
+  takes minutes and tens of GB of octree to reproduce, and they are the default
   output paths of the scripts that would overwrite them. Refuse by default.
 
   :param path: Output path about to be written.

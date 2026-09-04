@@ -104,15 +104,17 @@ def bottom_return_ranges(
       flat, so NaN is the normal case at the edges of the swath rather than a
       fault.
 
-  Warning:
-      **A finite range here is not evidence that the beam saw the seabed.**
-      HoloOcean's ``ProfilingSonar`` returns confident, point-like echoes across
-      a contiguous block of its fan at ranges *shorter than the vehicle's
-      altitude*, which no terrain can produce and where the octree holds no
-      geometry at all. Every beam returning an echo therefore reads as 100%
-      coverage while over half of it is fabricated. Restrict the fan to the
-      beams measured good -- see ``experiments/check_beam_validity.py`` -- and
-      do not treat this function's output as validated soundings.
+  Note:
+      **A range that disagrees with the octree is not automatically wrong.**
+      Measured against a ray-cast through the octree, these ranges agree to a
+      0.035 m MAD-std -- inside the 0.0996 m quantisation. Where they disagree,
+      by 4-5 m, the sonar turned out to be right: it sees pipelines lying on the
+      Dam seabed that octree generation omits, and they were eventually
+      photographed. Three separate explanations were fitted to that discrepancy
+      -- beam geometry, an ``atan2`` approximation, fabricated returns -- and
+      all three were wrong, because the reference was incomplete rather than the
+      sensor. Score with ``experiments/check_beam_validity.py`` and suspect the
+      octree first.
   """
   image = np.asarray(image, dtype=float)
   ranges = np.asarray(ranges, dtype=float)

@@ -20,7 +20,6 @@ surface, snapping to its edge and reporting a confident, meaningless error.
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
@@ -32,41 +31,13 @@ from auv_pose.mapping.octree import (
   robust_spread,
   surface_residual,
 )
-from experiments.cli import refuse_overwrite
-
-#: Where the packaged worlds unpack to. ``flake.nix`` exports HOLODECKPATH.
-DEFAULT_ROOT = Path(
-  os.environ.get("HOLODECKPATH", Path.home() / "data" / "holoocean")
-)
-
-#: The cache built for ``octree_min: 0.02`` / ``octree_max: 5.12``, which is what
-#: the surveys ran at. ``min50_max800`` is the coarse alternative; measured, the
-#: two agree on the seabed, so this is a resolution choice and not a correctness
-#: one.
-DEFAULT_CACHE = "min2_max512"
-
-
-def cache_directory(root: Path, version: str, world: str, cache: str) -> Path:
-  return (
-    root
-    / version
-    / "worlds"
-    / "Ocean"
-    / "Linux"
-    / "Holodeck"
-    / "Octrees"
-    / world
-    / cache
-  )
+from experiments.cli import add_octree_args, octree_directory, refuse_overwrite
 
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--out", type=Path, default=Path("seabed_truth.csv"))
-  parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-  parser.add_argument("--version", default="2.3.0")
-  parser.add_argument("--world", default="Dam")
-  parser.add_argument("--cache", default=DEFAULT_CACHE)
+  add_octree_args(parser)
   parser.add_argument(
     "--bounds",
     type=float,
@@ -149,12 +120,7 @@ def main() -> None:
   args = parse_args()
   refuse_overwrite(args.out, args.force)
 
-  directory = cache_directory(args.root, args.version, args.world, args.cache)
-  if not directory.is_dir():
-    raise SystemExit(
-      f"no octree cache at {directory}. The simulator builds it on first use "
-      "and caches it; run a sonar scenario in this world once, or pass --root."
-    )
+  directory = octree_directory(args)
 
   bounds = list(args.bounds)
   if args.check:
