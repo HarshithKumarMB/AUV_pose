@@ -41,10 +41,15 @@ def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
     "surveys",
-    nargs="*",
-    default=["map.csv", "map1.csv"],
+    nargs="+",
     type=Path,
-    help="survey CSVs to fit (default: map.csv map1.csv)",
+    help=(
+      "survey CSVs to fit. Required: this used to default to map.csv and "
+      "map1.csv, which were singlebeam surveys in the pre-a1fd5b1 "
+      "'x, y, sonar_depth' schema. They could not be migrated -- the vehicle's "
+      "own z was never recorded, so seabed elevation is unrecoverable -- and a "
+      "default that always failed was worse than none"
+    ),
   )
   parser.add_argument("--out", type=Path, default=Path("svgp_bathymetry.pkl"))
   parser.add_argument(

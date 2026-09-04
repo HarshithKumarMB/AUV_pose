@@ -4,7 +4,7 @@ Terrain-aided pose estimation for an underwater vehicle (BlueROV2) in the
 [HoloOcean](https://byu-holoocean.github.io/holoocean-docs/) simulator.
 
 IMU dead reckoning drifts. The approach here corrects it against a bathymetry map: survey
-the seabed with a downward singlebeam sonar, fit a sparse Gaussian process to the
+the seabed with a downward multibeam sonar, fit a sparse Gaussian process to the
 soundings, then use `sonar_altitude + map_depth` as a position measurement in an EKF.
 
 ## Setup
@@ -53,19 +53,29 @@ Run from the repository root.
 | Step | Command | Needs sim | Output |
 |---|---|---|---|
 | 0. Extract the true seabed | `python experiments/extract_seabed.py` | no | `seabed_truth.csv` — `x, y, z` |
-| 1. Survey the seabed | `python experiments/survey.py` | yes | `map1.csv` — `x, y, z` |
-| 2. Fit the GP bathymetry map | `python experiments/train_map.py` | no | `svgp_bathymetry.pkl`, `gp_bathymetry_surface.png` |
+| 1. Survey the seabed | `python experiments/survey.py --out map2.csv` | yes | `map2.csv` — `x, y, z` |
+| 2. Fit the GP bathymetry map | `python experiments/train_map.py map2.csv` | no | `svgp_bathymetry.pkl`, `gp_bathymetry_surface.png` |
 | 3. Query a depth | `python experiments/predict_depth.py` | no | prints depth |
 | 4. Navigate with the EKF | `python experiments/navigate.py` | yes | `wp_c.csv` |
 | 5. Plot tracks and error | `python experiments/plot_trajectory.py` | no | `trajectory_*.png` |
 
-Steps 2, 3 and 5 need no simulator: `map.csv` and `map1.csv` are committed (~82 k
-soundings). Every script takes `--help`.
+**No survey is committed, so the pipeline starts at step 1 and needs the
+simulator.** `map.csv` and `map1.csv` used to be, but they were singlebeam runs
+in the old `x, y, sonar_depth` schema and could not be migrated — the vehicle's
+own `z` was never recorded, so seabed elevation is unrecoverable. They are in
+git history. `wp_c.csv` is still committed, so step 5 runs, but it is a
+navigation log from before the multibeam. Every script takes `--help`.
 
-`survey.py` and `train_map.py` refuse to overwrite an existing output. The
-committed `map*.csv` and `svgp_bathymetry.pkl` are the only record of a survey
-that costs a simulator run to reproduce, so pass `--out` to write elsewhere, or
+`survey.py` and `train_map.py` refuse to overwrite an existing output, since a
+survey costs a simulator run to reproduce; pass `--out` to write elsewhere, or
 `--force` once you are sure.
+
+### Diagnosing the sonar
+
+- `check_multibeam.py` captures raw pings over a chosen patch;
+  `check_beam_validity.py` scores them against a ray-cast through the octree.
+- `capture_scene.py` photographs a patch of seabed. This is what settled a
+  three-session disagreement between sonar and octree — see below.
 
 ### Other experiments
 
@@ -77,7 +87,7 @@ that costs a simulator run to reproduce, so pass `--out` to write elsewhere, or
 ```
 auv_pose/                    # algorithms -- importable, no I/O, no simulator
   estimation/                # quaternion, strapdown, filters, smoothers
-  mapping/                   # SVGP bathymetry, sonar range extraction
+  mapping/                   # SVGP bathymetry, sonar ranges, octree + raycast
   io/                        # soundings, checkpoints, run logs
 experiments/                 # runnable scripts composing auv_pose
 tests/                       # pytest; no simulator required
@@ -122,12 +132,17 @@ Survey CSVs store `x, y, z`: where a beam struck the seabed, in the world frame,
 `z` increasing upward. The GP models that elevation directly.
 `auv_pose.io.soundings` owns the schema.
 
-The simulator caches the octree its sonar raycasts against as JSON on disk, so
-the true seabed can be read without a run — `auv_pose.mapping.octree`. It is
-ground truth rather than a second estimate, which is what makes it worth
-scoring against: measured through it, the singlebeam's strongest-return range is
-biased 4.17 m and a constant beats every bin-selection rule. That is why the
-survey flies a multibeam.
+The simulator caches an octree of the world as JSON on disk, so the seabed can be
+read without a run — `auv_pose.mapping.octree`, traced with
+`auv_pose.mapping.raycast`.
+
+**It is a reference, not ground truth.** Over bare seabed it and the multibeam
+agree to a 0.035 m MAD-std, below the sonar's 0.0996 m quantisation. But it holds
+only landscape: the pipelines lying on the Dam seabed are absent from it, so the
+sonar reads 4-5 m short over them and is right to. Doubling `octree_max` leaves
+the returns bit-identical, so the sonar does not consult it at all. Score with
+`experiments/check_beam_validity.py`, and read a disagreement as a question about
+which of the two is incomplete.
 
 `vendor/holoocean/` is an unmodified copy of upstream tag `v2.3.0`, reduced to the
 596 KB the build needs. Upstream is a private, Epic-gated repository —

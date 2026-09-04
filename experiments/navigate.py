@@ -2,8 +2,10 @@
 
     nix run .#sim -- -c "python experiments/navigate.py"
 
-Dead reckons the IMU, ranges the seabed with a singlebeam sonar, looks the seabed
-depth up in the fitted GP map, and corrects the depth estimate in an EKF.
+Dead reckons the IMU, ranges the seabed with the multibeam's nadir beam, looks
+the seabed depth up in the fitted GP map, and corrects the depth estimate in an
+EKF. The sensor matches the one ``survey.py`` built the map with -- while it did
+not, a singlebeam bias and a survey bias partly cancelled, which hid both.
 
 Three properties worth knowing before comparing runs:
 
@@ -59,7 +61,11 @@ from auv_pose.estimation.strapdown import StrapdownIntegrator
 from auv_pose.estimation.typing import Measurement
 from auv_pose.io.checkpoints import load_map
 from auv_pose.io.logs import CsvLogger
-from auv_pose.mapping.sonar import bottom_return_range, range_bins
+from auv_pose.mapping.sonar import (
+  azimuth_angles,
+  bottom_return_ranges,
+  range_bins,
+)
 from experiments.cli import configure_sdl
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
@@ -69,7 +75,7 @@ from experiments.scenarios import (
   ocean_scenario,
   orientation_sensor,
   pose_sensor,
-  singlebeam_sonar,
+  profiling_sonar,
 )
 
 TICK_RATE_HZ = 30
@@ -102,7 +108,21 @@ DEPTH_H = np.array(
 # at all: without it, position comes from doubly integrating acceleration.
 VELOCITY_H = np.hstack([np.zeros((3, 3)), np.eye(3)])
 
-SONAR = {"range_min": 0.5, "range_max": 100.0, "range_bins": 256}
+# The same fan survey.py flies. Ranging with a different sensor than the map was
+# built with is how the two biases used to partly cancel, which hid both.
+SONAR = {
+  "range_min": 0.5,
+  "range_max": 100.0,
+  "range_bins": 1000,
+  "azimuth": 60.0,
+  "azimuth_bins": 240,
+  "elevation": 1.0,
+}
+
+# 5 Hz, not the tick rate: raycasting 240 beams is the expensive part of a tick,
+# and survey.py already runs it here for the same reason. Most ticks therefore
+# carry no ping, which the depth-only branch below already handles.
+SONAR_HZ = 5
 
 COLUMNS = (
   "step",
@@ -181,7 +201,7 @@ def build_scenario(
         ang_vel_bias_sigma=ang_vel_bias_sigma,
       ),
       dvl_sensor("dvl", hz=TICK_RATE_HZ),
-      singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ, **SONAR),
+      profiling_sonar("multibeam", hz=SONAR_HZ, **SONAR),
     ],
   )
 
@@ -218,7 +238,7 @@ def parse_args() -> argparse.Namespace:
     default=0.02,
     help=(
       "finest octree voxel in metres. holoocean's default of 0.02 is 19x "
-      "finer than the singlebeam's 0.39 m range bins and generates octrees "
+      "finer than the multibeam's 0.0996 m range bins and generates octrees "
       "at several GB per minute; 0.1 is still 4x finer than a bin"
     ),
   )
@@ -404,8 +424,17 @@ def main() -> None:
 
   bathymetry = load_map(args.map)
   ranges = range_bins(
-    SONAR["range_min"], SONAR["range_max"], SONAR["range_bins"]
+    SONAR["range_min"], SONAR["range_max"], int(SONAR["range_bins"])
   )
+
+  # Range from the beam nearest nadir, so the measurement model is unchanged:
+  # its bearing is -0.125 degrees, where cos is 0.999998 and the slant range is
+  # the altitude to well inside the 0.0996 m quantisation. The other 239 beams
+  # are captured and unused -- each is an independent constraint on the map, and
+  # unlike this one they carry horizontal information, which nothing in this
+  # filter currently observes.
+  bearings = azimuth_angles(SONAR["azimuth"], int(SONAR["azimuth_bins"]))
+  nadir_beam = int(np.argmin(np.abs(bearings)))
   dt = 1.0 / TICK_RATE_HZ
 
   env = holoocean.make(
@@ -502,12 +531,18 @@ def main() -> None:
         quat_angle(dead_reckoning.attitude, truth_attitude)
       )
 
-      sonar_range = bottom_return_range(np.asarray(state["singlebeam"]), ranges)
+      # The fan runs at 5 Hz against a 30 Hz tick, so most ticks carry no ping.
+      # That is the same case as a beam with no echo, and takes the same branch.
+      if "multibeam" in state:
+        image = np.asarray(state["multibeam"], dtype=float)
+        sonar_range = float(bottom_return_ranges(image, ranges)[nadir_beam])
+      else:
+        sonar_range = float("nan")
       depth = float(np.asarray(state["depthsensor"]).ravel()[0])
 
       if np.isnan(sonar_range):
-        # No echo: the depth sensor alone. Skipping the GP here matters --
-        # it is the most expensive operation in the tick.
+        # No ping, or no echo: the depth sensor alone. Skipping the GP here
+        # matters -- it is the most expensive operation in the tick.
         map_depth = float("nan")
         observations = [Measurement([depth], DEPTH_H[:1], depth_only_noise)]
       else:

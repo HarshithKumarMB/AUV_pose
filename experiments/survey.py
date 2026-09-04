@@ -37,6 +37,7 @@ from auv_pose.mapping.sonar import (
   range_bins,
   seabed_points,
 )
+from experiments.captures import write_capture
 from experiments.cli import configure_sdl, refuse_overwrite
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
@@ -225,24 +226,20 @@ def main() -> None:
 
   print(f"Wrote {soundings} soundings to {args.out}")
   if pings:
-    # A geometry or range regression shows up here first: beams past the edge
-    # of the swath legitimately return nothing, but a sharp drop means the
-    # sensor stopped reaching the seabed.
+    # Measured, this is 100% and stays there -- every beam answers, at every
+    # altitude flown. So it is a regression check and not a quality one: a drop
+    # means the fan stopped reaching the seabed, while 100% says nothing at all
+    # about whether the ranges are right. For that, pass --profiles and score
+    # the capture with check_beam_validity.py.
     fraction = live_beams / (pings * len(bearings))
     print(f"{pings} pings, {100 * fraction:.1f}% of beams returned an echo")
 
   if args.profiles and images:
-    # Same layout check_multibeam.py writes, so analyse_multibeam.py and
-    # fit_beam_geometry.py read survey data without a separate flight -- which
-    # matters because the lawnmower sweeps across the swath and a dedicated
-    # straight-line check does not.
-    np.savez_compressed(
-      args.profiles,
-      images=np.array(images),
-      positions=np.array(image_poses),
-      rotations=np.array(image_rotations),
-      **SONAR,
-    )
+    # Same schema check_multibeam.py writes, so check_beam_validity.py scores
+    # survey data without a separate flight -- which matters because the
+    # lawnmower crosses the whole box, and the sonar's disagreements with the
+    # octree turned out to be local to particular patches of seabed.
+    write_capture(args.profiles, images, image_poses, image_rotations, SONAR)
     print(f"Wrote {len(images)} pings to {args.profiles}")
 
 
