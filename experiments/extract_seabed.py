@@ -7,13 +7,14 @@ the surface the sonar is measuring can be read directly. That makes it ground
 truth for the survey rather than an independent estimate of it: a sounding that
 disagrees with this is a sonar defect, not terrain.
 
-Writes ``x, y, z`` where ``z`` is world-frame seabed elevation -- **not** the
-``x, y, sonar_depth`` the survey writes, which is a range from an unrecorded
-vehicle depth.
+Writes ``x, y, z``: world-frame seabed elevation, the same schema the survey
+writes.
 
-With ``--check`` it scores a survey CSV against the extracted surface, which is
-what validated the reader: the far population of ``map.csv`` agrees to a
-0.059 m MAD-std, well below the sonar's own 0.113 m quantisation.
+With ``--check`` it scores a survey CSV against the extracted surface, and
+**widens the extracted region to cover those soundings**. That is not a
+convenience: a multibeam throws beams tens of metres either side of the track,
+so scoring against the survey box alone leaves most soundings outside the
+surface, snapping to its edge and reporting a confident, meaningless error.
 """
 
 from __future__ import annotations
@@ -72,7 +73,10 @@ def parse_args() -> argparse.Namespace:
     nargs=4,
     metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
     default=[-40.0, 0.0, -20.0, 0.0],
-    help="horizontal box to extract, metres; the default is the survey box",
+    help=(
+      "horizontal box to extract, metres. The default is the survey box; "
+      "--check widens it to cover the soundings being scored"
+    ),
   )
   parser.add_argument(
     "--cell",
@@ -106,22 +110,28 @@ def parse_args() -> argparse.Namespace:
 
 
 def check(surface: np.ndarray, paths: list[Path]) -> None:
-  """Score survey soundings against the extracted surface."""
-  frame = load_soundings(paths)
+  """Score survey soundings against the extracted surface.
 
-  # The survey never recorded its own z, so this is the seabed it implies if the
-  # vehicle was at z = 0. A constant offset here is the survey's true depth.
-  soundings = np.column_stack(
-    [
-      frame["x"].to_numpy(),
-      frame["y"].to_numpy(),
-      -frame["sonar_depth"].to_numpy(),
-    ]
-  )
-  residual, _ = surface_residual(soundings, surface)
+  This is the number the survey lives or dies by. The octree agrees with a good
+  sounding to about 0.06 m, so anything much above that is the sensor.
+  """
+  frame = load_soundings(paths)
+  soundings = frame[["x", "y", "z"]].to_numpy()
+
+  residual, kept = surface_residual(soundings, surface)
   median, spread = robust_spread(residual)
 
-  print(f"  {len(frame)} soundings scored against the octree")
+  covered = kept.mean()
+  print(
+    f"  {len(frame)} soundings, {100 * covered:.1f}% covered by the surface"
+  )
+  if covered < 0.95:
+    print(
+      "  *** most soundings fall outside the extracted region. A multibeam "
+      "throws beams tens of metres either side of the track, so the surface "
+      "has to cover the swath and not just the survey box -- widen --bounds ***"
+    )
+  print(f"  {int(kept.sum())} soundings scored against the octree")
   print(f"  median offset  {median:+7.3f} m")
   print(f"  MAD-std        {spread:7.3f} m")
 
@@ -129,9 +139,9 @@ def check(surface: np.ndarray, paths: list[Path]) -> None:
   print(f"  within 1 m of the median: {100 * within.mean():.1f}%")
   if within.mean() < 0.9:
     print(
-      "  *** the soundings are not one population. A singlebeam whose error is "
-      "bimodal is picking the wrong peak, not measuring rough terrain -- "
-      "compare the two clusters against this surface separately ***"
+      "  *** the soundings are not one population. That is a sensor picking "
+      "between competing returns, not rough terrain -- score the clusters "
+      "against this surface separately before believing either ***"
     )
 
 
@@ -146,15 +156,31 @@ def main() -> None:
       "and caches it; run a sonar scenario in this world once, or pass --root."
     )
 
+  bounds = list(args.bounds)
+  if args.check:
+    # Score against a surface that covers the data. The swath reaches far
+    # outside the box the vehicle flew.
+    frame = load_soundings(args.check)
+    margin = 2.0
+    bounds = [
+      min(bounds[0], float(frame["x"].min()) - margin),
+      max(bounds[1], float(frame["x"].max()) + margin),
+      min(bounds[2], float(frame["y"].min()) - margin),
+      max(bounds[3], float(frame["y"].max()) + margin),
+    ]
+    print(
+      f"Widened bounds to cover the soundings: {[round(b, 1) for b in bounds]}"
+    )
+
   print(f"Reading {directory}")
   surface = load_surface(
     directory,
-    bounds=tuple(args.bounds),
+    bounds=tuple(bounds),
     cell=args.cell,
     min_normal_z=args.min_normal_z,
   )
   if not len(surface):
-    raise SystemExit(f"no geometry in {args.bounds}")
+    raise SystemExit(f"no geometry in {bounds}")
 
   print(
     f"{len(surface)} surface cells, "

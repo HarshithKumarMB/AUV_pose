@@ -254,7 +254,7 @@ def load_surface(
 
 
 def surface_residual(
-  points: ArrayLike, surface: ArrayLike
+  points: ArrayLike, surface: ArrayLike, max_distance: float | None = 1.0
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
   """How far each sounding sits above the surface, vertically.
 
@@ -267,13 +267,22 @@ def surface_residual(
       points: Soundings, ``(n, 3)``. Non-finite rows are dropped rather than
           poisoning the result; a beam with no echo is normal, not an error.
       surface: Reference surface, ``(m, 3)``, from :func:`load_surface`.
+      max_distance: Drop soundings with no surface cell within this horizontal
+          distance, metres. **The default is not a tuning knob, it is a trap
+          guard.** A nearest-neighbour lookup always returns something, so a
+          sounding outside the extracted region silently snaps to the nearest
+          edge cell and reports a residual of whatever the terrain does there.
+          Measured, that turned a survey whose beams reach 40 m either side of
+          the track into a 1.99 m "error" against a surface covering only the
+          20 m-wide box. Pass None to disable.
 
   Returns:
       ``(residual, kept)`` where ``residual`` is the signed vertical offset of
-      each *finite* sounding from the surface beneath it, and ``kept`` is the
+      each *kept* sounding from the surface beneath it, and ``kept`` is the
       boolean mask selecting those soundings from ``points``. The mask is
       returned because callers routinely need to line residuals back up with
-      per-beam or per-ping metadata.
+      per-beam or per-ping metadata -- and because a low ``kept.mean()`` is the
+      signal that the surface does not cover the data.
 
   Raises:
       ValueError: If either array is not ``(n, 3)``.
@@ -286,13 +295,20 @@ def surface_residual(
 
   kept = np.isfinite(points).all(axis=1)
   if not kept.any() or len(surface) == 0:
-    return np.empty(0), kept
+    return np.empty(0), np.zeros(len(points), dtype=bool)
 
   # Imported here: scipy is a heavy dependency and the parsing half of this
   # module is useful without it.
   from scipy.spatial import KDTree
 
-  _, nearest = KDTree(surface[:, :2]).query(points[kept, :2])
+  distance, nearest = KDTree(surface[:, :2]).query(points[kept, :2])
+  if max_distance is not None:
+    covered = distance <= max_distance
+    nearest = nearest[covered]
+    # Fold the coverage test back into the caller-facing mask, so residuals and
+    # metadata stay aligned.
+    kept[np.flatnonzero(kept)[~covered]] = False
+
   return points[kept, 2] - surface[nearest, 2], kept
 
 

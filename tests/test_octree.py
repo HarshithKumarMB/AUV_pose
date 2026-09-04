@@ -201,6 +201,41 @@ def test_surface_residual_mask_lines_up_with_the_input():
   assert len(residual) == int(kept.sum())
 
 
+def test_surface_residual_drops_soundings_the_surface_does_not_cover():
+  """The trap: a nearest-neighbour lookup always returns *something*.
+
+  A sounding 40 m outside the extracted region snaps to the nearest edge cell
+  and reports a confident residual of whatever the terrain does there.
+  """
+  surface = np.array([[0.0, 0.0, -70.0]])
+  points = np.array([[0.0, 0.0, -69.0], [40.0, 0.0, -69.0]])
+
+  residual, kept = surface_residual(points, surface)
+  assert kept.tolist() == [True, False]
+  assert residual == pytest.approx([1.0])
+
+  # Disabling the guard reproduces the silent snap.
+  unguarded, kept = surface_residual(points, surface, max_distance=None)
+  assert kept.all()
+  assert unguarded == pytest.approx([1.0, 1.0])
+
+
+def test_surface_residual_coverage_mask_stays_aligned():
+  """kept must index the original array, not the finite subset."""
+  surface = np.array([[0.0, 0.0, -70.0]])
+  points = np.array(
+    [
+      [40.0, 0.0, -69.0],  # uncovered
+      [np.nan, np.nan, np.nan],  # no echo
+      [0.0, 0.0, -69.5],  # good
+    ]
+  )
+
+  residual, kept = surface_residual(points, surface)
+  assert kept.tolist() == [False, False, True]
+  assert residual == pytest.approx([0.5])
+
+
 def test_surface_residual_of_nothing_finite_is_empty():
   residual, kept = surface_residual(
     np.full((2, 3), np.nan), np.array([[0.0, 0.0, 0.0]])
