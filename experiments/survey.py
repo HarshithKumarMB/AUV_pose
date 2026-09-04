@@ -64,31 +64,84 @@ SONAR = {
 }
 
 
-def lawnmower(
-  x_start: float = 0.0,
-  x_end: float = -40.0,
-  x_step: float = -2.0,
-  y_near: float = 0.0,
-  y_far: float = -20.0,
-  y_step: float = -5.0,
-) -> list[list[float]]:
-  """Boustrophedon track: sweep in y, step across in x, reverse each pass."""
-  waypoints: list[list[float]] = []
-  columns = np.arange(x_start, x_end + x_step / 2, x_step)
-  sweep = list(np.arange(y_near, y_far + y_step / 2, y_step))
+#: The box to cover, ``(x_min, x_max, y_min, y_max)`` in metres.
+#:
+#: Sized from what navigation will *look at*, not where it will go.
+#: ``navigate.py`` flies x -30..-10, y -15..-5, and at 70 m altitude a 60 degree
+#: fan reaches 40.2 m either side of the vehicle -- so every beam of every ping
+#: it takes lands somewhere in this box. Surveying only the track would map the
+#: nadir beam's footprint and leave the other 239 over unsurveyed ground.
+SURVEY_BOX = (-70.0, 30.0, -55.0, 35.0)
 
-  for index, x in enumerate(columns):
-    legs = sweep if index % 2 == 0 else sweep[::-1]
-    waypoints.extend([float(x), float(y), 0.0] for y in legs)
+
+def lawnmower(
+  heading: float = 0.0,
+  box: tuple[float, float, float, float] = SURVEY_BOX,
+  spacing: float = 5.0,
+  z: float = 0.0,
+) -> list[list[float]]:
+  """Boustrophedon track aligned to ``heading``, covering ``box``.
+
+  **The vehicle travels along its own x, so the fan is across-track.** That is
+  the whole point of the alignment: the fan opens along body -y and the vehicle
+  never rotates, so a track running parallel to the fan sweeps the same strip of
+  seabed 240 times and leaves the across-track sampling at the line spacing.
+  Measured that way, a 240-beam fan bought no more coverage than one beam.
+
+  Flying the same box at several headings is then how a patch gets seen from
+  several directions, which fills the shadow a pipeline casts from any one of
+  them. Each heading is a separate run -- the spawn attitude is held for the
+  whole flight and nothing commands yaw.
+
+  Args:
+      heading: Track direction in degrees, counter-clockwise from world ``+x``.
+          Must match the vehicle's spawn yaw or the fan is not across-track.
+      box: Region to cover.
+      spacing: Line spacing in metres. Generous compared to the old 2 m,
+          because at 70 m altitude a 60 degree fan reaches 40 m either side and
+          the redundancy is now real rather than the same strip re-measured.
+      z: Depth to hold.
+
+  Returns:
+      Waypoints, ``(n, 3)`` as a list.
+  """
+  angle = np.radians(heading)
+  forward = np.array([np.cos(angle), np.sin(angle)])
+  across = np.array([-np.sin(angle), np.cos(angle)])
+
+  x_min, x_max, y_min, y_max = box
+  centre = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2])
+  length, width = x_max - x_min, y_max - y_min
+
+  # Extent of an axis-aligned box measured along a rotated axis: the projection
+  # of both sides onto it. Covers the box at any heading without flying a square
+  # big enough for the worst one.
+  along = abs(length * forward[0]) + abs(width * forward[1])
+  side = abs(length * across[0]) + abs(width * across[1])
+
+  lines = np.arange(-side / 2, side / 2 + spacing / 2, spacing)
+  ends = np.array([-along / 2, along / 2])
+
+  waypoints: list[list[float]] = []
+  for index, offset in enumerate(lines):
+    legs = ends if index % 2 == 0 else ends[::-1]
+    for reach in legs:
+      point = centre + reach * forward + offset * across
+      waypoints.append([float(point[0]), float(point[1]), z])
 
   return waypoints
 
 
-def build_scenario(start: list[float], octree_min: float) -> dict:
+def build_scenario(
+  start: list[float], octree_min: float, yaw: float = 0.0
+) -> dict:
   return ocean_scenario(
     "bathymetry_survey",
     start=start,
     octree_min=octree_min,
+    # Held for the whole run; nothing commands yaw. This is what turns the fan
+    # across-track, so it must match the heading lawnmower() was built with.
+    rotation=[0.0, 0.0, yaw],
     sensors=[
       pose_sensor(),
       # Seabed points need attitude, not just position. The socket is
@@ -104,6 +157,37 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--out", type=Path, default=Path("map1.csv"))
   parser.add_argument(
     "--force", action="store_true", help="overwrite --out if it exists"
+  )
+  parser.add_argument(
+    "--yaw",
+    type=float,
+    default=0.0,
+    help=(
+      "track heading in degrees from world +x, held for the whole run. The "
+      "fan opens along body -y, so this rotates the swath with the track and "
+      "keeps it across-track. Fly the same box at several headings -- 0 and 90 "
+      "at least -- and fit the map on all of them: a pipeline shadows the "
+      "seabed behind it from one direction and not from another"
+    ),
+  )
+  parser.add_argument(
+    "--box",
+    type=float,
+    nargs=4,
+    metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
+    default=list(SURVEY_BOX),
+    help="region to cover, metres",
+  )
+  parser.add_argument(
+    "--spacing",
+    type=float,
+    default=20.0,
+    help=(
+      "line spacing, metres. Sets redundancy, not coverage: the swath is 80 m "
+      "wide at survey altitude, so 20 m already gives four looks at every "
+      "patch from one heading. The old 2 m came from a survey whose fan lay "
+      "along the track and so covered nothing the line spacing did not"
+    ),
   )
   parser.add_argument("--max-steps", type=int, default=100_000)
   parser.add_argument("--arrival-radius", type=float, default=0.5)
@@ -154,11 +238,18 @@ def main() -> None:
   refuse_overwrite(args.out, args.force)
   configure_sdl(args.headless)
 
-  waypoints = lawnmower()
-  print(f"{len(waypoints)} waypoints")
+  waypoints = lawnmower(
+    heading=args.yaw, box=tuple(args.box), spacing=args.spacing
+  )
+  track = np.asarray(waypoints)[:, :2]
+  print(
+    f"{len(waypoints)} waypoints, heading {args.yaw:.0f} deg, "
+    f"{args.spacing:.1f} m line spacing, "
+    f"{np.linalg.norm(np.diff(track, axis=0), axis=1).sum():.0f} m of track"
+  )
 
   env = holoocean.make(
-    scenario_cfg=build_scenario(waypoints[0], args.octree_min),
+    scenario_cfg=build_scenario(waypoints[0], args.octree_min, args.yaw),
     show_viewport=not args.headless,
   )
   ranges = range_bins(
@@ -180,7 +271,11 @@ def main() -> None:
       state = env.step(command)
       position = np.array(state["pose"])[:3, 3]
 
-      next_command = follower.command(position)
+      # Steer in the body frame: at a non-zero yaw a world-frame error drives
+      # the vehicle sideways, and at 180 degrees it drives it away.
+      next_command = follower.command(
+        position, np.array(state["orient"], dtype=float)
+      )
       if next_command is None:
         if follower.finished:
           print("survey complete")
@@ -216,10 +311,13 @@ def main() -> None:
         log.write(x=x, y=y, z=z)
       soundings += int(finite.sum())
 
-      if step % 1000 == 0:
+      # Count pings, not steps. The sonar runs at 5 Hz against a 30 Hz tick and
+      # this sits below the `continue` for a tick without one, so a step-based
+      # test almost never coincides with a ping and a long run prints nothing.
+      if pings % 200 == 0:
         print(
           f"step {step} | waypoint {follower.index}/{len(waypoints)} "
-          f"| {soundings} soundings"
+          f"| {pings} pings | {soundings} soundings"
         )
     else:
       print(f"stopped after {args.max_steps} steps without finishing")

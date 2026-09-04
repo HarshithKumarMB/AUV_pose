@@ -55,6 +55,20 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--plot", type=Path, default=Path("gp_bathymetry_surface.png")
   )
+  parser.add_argument(
+    "--bounds",
+    type=float,
+    nargs=4,
+    metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
+    default=None,
+    help=(
+      "restrict the fit to this box, metres. Worth setting once the swath is "
+      "across-track: at 70 m altitude a 60 degree fan reaches 40 m either side "
+      "of the line, so a survey of a 40x20 m box returns soundings over "
+      "several times that area and the inducing points spread out over ground "
+      "nothing will ever be navigated across"
+    ),
+  )
   parser.add_argument("--inducing", type=int, default=500)
   parser.add_argument("--epochs", type=int, default=200)
   parser.add_argument(
@@ -208,6 +222,22 @@ def main() -> None:
   print(
     f"Loaded {len(X)} soundings from {', '.join(str(p) for p in args.surveys)}"
   )
+
+  if args.bounds is not None:
+    x_min, x_max, y_min, y_max = args.bounds
+    inside = (
+      (X[:, 0] >= x_min)
+      & (X[:, 0] <= x_max)
+      & (X[:, 1] >= y_min)
+      & (X[:, 1] <= y_max)
+    )
+    print(
+      f"Kept {int(inside.sum())} soundings inside {args.bounds} "
+      f"({100 * inside.mean():.1f}%)"
+    )
+    if not inside.any():
+      raise SystemExit("no soundings inside --bounds")
+    X, y = X[inside], y[inside]
 
   if args.decimate_cell > 0:
     if args.decimate_cell >= args.holdout_cell:
