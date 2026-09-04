@@ -20,7 +20,17 @@ __all__ = [
 def range_bins(
   range_min: float, range_max: float, n_bins: int
 ) -> NDArray[np.float64]:
-  """Range corresponding to each bin of a sonar intensity profile."""
+  """Range corresponding to each bin of a sonar intensity profile.
+
+  Bin *endpoints*, where :func:`azimuth_angles` uses bin *centres*. The
+  inconsistency is deliberate rather than overlooked: measured against altitude
+  read from the octree, over three fan configurations, neither convention wins.
+  Endpoints came out -0.039, -0.027 and -0.020 m; centres, which are half a bin
+  higher, +0.011, +0.023 and +0.030 m. The truth sits between them at about a
+  quarter of a bin, both are well inside the 0.0996 m quantisation, and every
+  number measured so far was measured under this one. Changing it on symmetry
+  alone would shift every range by 0.05 m to no benefit.
+  """
   return np.linspace(range_min, range_max, n_bins)
 
 
@@ -93,6 +103,16 @@ def bottom_return_ranges(
       angled far off nadir routinely fall beyond ``RangeMax`` and come back
       flat, so NaN is the normal case at the edges of the swath rather than a
       fault.
+
+  Warning:
+      **A finite range here is not evidence that the beam saw the seabed.**
+      HoloOcean's ``ProfilingSonar`` returns confident, point-like echoes across
+      a contiguous block of its fan at ranges *shorter than the vehicle's
+      altitude*, which no terrain can produce and where the octree holds no
+      geometry at all. Every beam returning an echo therefore reads as 100%
+      coverage while over half of it is fabricated. Restrict the fan to the
+      beams measured good -- see ``experiments/check_beam_validity.py`` -- and
+      do not treat this function's output as validated soundings.
   """
   image = np.asarray(image, dtype=float)
   ranges = np.asarray(ranges, dtype=float)

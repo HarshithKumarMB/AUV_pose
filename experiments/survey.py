@@ -6,12 +6,13 @@ Flies a boustrophedon pattern with a downward **multibeam** and writes one
 ``x, y, z`` row per beam that returned an echo -- the world-frame point where
 that beam struck the seabed. The output feeds ``train_map.py``.
 
-The sensor changed because the singlebeam could not measure depth. Scored
-against the simulator's own octree, its strongest-return range is biased 4.17 m
-against nadir truth and a constant beats every bin-selection rule (0.888 m rms
-against 4.184 m): a 10 degree cone at survey altitude is a 12 m footprint, so a
-range bin is evidence about seabed *area* at that slant range, not about the
-depth under the vehicle. The multibeam's per-beam return is 0.40 m wide.
+The sensor changed because the singlebeam's soundings split into two tight
+populations 4.87 m apart and one beam gives no way to tell which is the seabed.
+A fan does, by letting each beam be checked against its neighbours. (The "a
+constant beats every bin-selection rule" figure that used to appear here was
+measured over a four-metre strip where the seabed barely varies, so a constant
+won by construction. It does not generalise.) The multibeam's per-beam return is
+0.40 m wide.
 
 Uses the ground-truth pose *and attitude* to place each sounding: every beam but
 nadir lands ``range * sin(bearing)`` from the vehicle, so a survey that records
@@ -111,11 +112,11 @@ def parse_args() -> argparse.Namespace:
     default=None,
     help=(
       "also write the raw sonar images, poses and attitudes to this .npz. "
-      "analyse_multibeam.py and fit_beam_geometry.py read it directly, so beam "
-      "geometry can be checked on survey data -- where the lawnmower's y sweep "
-      "means a patch of seabed is seen by different beams -- rather than on a "
-      "dedicated straight-line flight, where beam index and terrain are "
-      "confounded and no fit can separate them"
+      "analyse_multibeam.py and check_beam_validity.py read it directly, so the "
+      "sonar can be scored against the octree on survey data -- over the whole "
+      "box rather than one hover, which matters because the two disagree only "
+      "over particular patches of seabed and a single site cannot tell a sensor "
+      "defect from a feature of the ground"
     ),
   )
   parser.add_argument(

@@ -63,15 +63,29 @@ def track(start: list[float], sweep: float) -> list[list[float]]:
   ]
 
 
-def build_scenario(start: list[float], octree_min: float) -> dict:
+def build_scenario(
+  start: list[float],
+  octree_min: float,
+  use_approx: bool = False,
+  sonar: dict | None = None,
+  yaw: float = 0.0,
+  octree_max: float = 5.0,
+) -> dict:
   return ocean_scenario(
     "multibeam_check",
     start=start,
     octree_min=octree_min,
+    octree_max=octree_max,
+    rotation=[0.0, 0.0, yaw],
     sensors=[
       pose_sensor(),
       orientation_sensor(),
-      profiling_sonar("multibeam", hz=SONAR_HZ, **SONAR),
+      profiling_sonar(
+        "multibeam",
+        hz=SONAR_HZ,
+        use_approx=use_approx,
+        **(sonar if sonar is not None else SONAR),
+      ),
     ],
   )
 
@@ -101,6 +115,47 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument("--octree-min", type=float, default=0.02)
+  parser.add_argument(
+    "--octree-max",
+    type=float,
+    default=5.0,
+    help=(
+      "coarsest octree voxel, metres. The phantom returns sit 0-5 m above the "
+      "true surface against a default of 5.0, which is why this is a knob "
+      "worth turning: if the sonar is resolving against coarse nodes rather "
+      "than the leaves inside them, the error should scale with this"
+    ),
+  )
+  parser.add_argument(
+    "--yaw",
+    type=float,
+    default=0.0,
+    help=(
+      "starting heading in degrees, held for the run. Flying the same patch at "
+      "0 and 180 asks whether a sensor defect is fixed in the sensor's frame "
+      "or the world's: sensor-fixed keeps the same beam indices bad while they "
+      "point the opposite way, world-fixed moves which indices are bad"
+    ),
+  )
+  # Overrides for isolating the phantom-return boundary. Beams past ~106 return
+  # ranges shorter than the vehicle's altitude over flat ground, which no
+  # geometry can produce; varying the fan tells index-based from angle-based.
+  for key, value in SONAR.items():
+    parser.add_argument(
+      f"--{key.replace('_', '-')}",
+      type=type(value),
+      default=value,
+      help=f"sonar {key}, default {value}",
+    )
+  parser.add_argument(
+    "--use-approx",
+    action="store_true",
+    help=(
+      "restore holoocean's approximate atan2 for azimuth binning. Only for "
+      "measuring what it costs: flying the same track with and without is the "
+      "controlled comparison, since two captures over different ground are not"
+    ),
+  )
   parser.add_argument("--force", action="store_true")
   parser.add_argument("--headless", action="store_true")
   return parser.parse_args()
@@ -111,8 +166,21 @@ def main() -> None:
   refuse_overwrite(args.out, args.force)
   configure_sdl(args.headless)
 
+  sonar = {k: getattr(args, k) for k in SONAR}
+  if sonar != SONAR:
+    print(
+      f"sonar overrides: { {k: v for k, v in sonar.items() if v != SONAR[k]} }"
+    )
+
   env = holoocean.make(
-    scenario_cfg=build_scenario(args.start, args.octree_min),
+    scenario_cfg=build_scenario(
+      args.start,
+      args.octree_min,
+      args.use_approx,
+      sonar,
+      args.yaw,
+      args.octree_max,
+    ),
     show_viewport=not args.headless,
   )
 
@@ -159,7 +227,7 @@ def main() -> None:
     images=np.array(images),
     positions=np.array(positions),
     rotations=np.array(rotations),
-    **SONAR,
+    **sonar,
   )
   print(f"Wrote {len(images)} pings of {images[0].shape} to {args.out}")
 

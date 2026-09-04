@@ -29,6 +29,7 @@ __all__ = [
   "profiling_sonar",
   "sidescan_sonar",
   "singlebeam_sonar",
+  "viewport_capture",
 ]
 
 
@@ -121,17 +122,28 @@ def profiling_sonar(
   azimuth: float = 60.0,
   azimuth_bins: int = 240,
   elevation: float = 1.0,
+  use_approx: bool = False,
+  init_octree_range: float | None = 100.0,
 ) -> dict[str, Any]:
   """Downward-facing multibeam, for seabed mapping.
 
-  Replaces :func:`singlebeam_sonar` for surveying. **The singlebeam does not
-  measure the depth beneath the vehicle**: measured against the simulator's own
-  octree over 3986 pings, its strongest-return range is biased 4.17 m against
-  nadir truth, and predicting a constant beats every bin-selection rule (0.888 m
-  rms against 4.184 m). Its ``OpeningAngle`` of 10 degrees is a 12 m footprint at
-  survey altitude -- empirically wider still -- so a range bin is evidence about
-  the *area of seabed at that slant range within the cone*, not about the depth
-  under the vehicle. No picker recovers what the beam integrated away.
+  Replaces :func:`singlebeam_sonar` for surveying, because a fan of narrow beams
+  makes a defect in any one of them visible against its neighbours, which one
+  beam cannot do.
+
+  **The singlebeam's soundings are bimodal, not smeared.** Against the octree
+  they fall in two *tight* populations 4.87 m apart, the far one agreeing to a
+  0.059 m MAD-std -- below the sensor's own quantisation. The "a constant beats
+  every bin-selection rule" figure that used to justify this switch was measured
+  over a four-metre strip where the seabed barely varies, so a constant won by
+  construction; it does not generalise.
+
+  Where the two disagree, do not assume the sonar is at fault. Measured with
+  ``experiments/check_beam_validity.py``, the multibeam agrees with a ray-cast
+  through the octree to a 0.035 m MAD-std except over compact patches where it
+  reports 4-5 m shorter -- and those patches hold **fixed world positions and a
+  fixed ~10 m size across altitudes of 17, 40 and 69 m**, which is an object on
+  the seabed, not a property of the fan. The octree contains no geometry there.
 
   This fan is ~0.31 m across-track by ~1.2 m along-track at 70 m altitude, small
   enough that treating a beam as a point sounding is a fair approximation.
@@ -157,22 +169,74 @@ def profiling_sonar(
       fan never reaches the seabed.
   :param azimuth_bins: Beams across the swath.
   :param elevation: Along-track beam width, degrees.
+  :param use_approx: Let the simulator bin returns into azimuth columns with a
+      fast approximation of ``atan2``. **Off here, against holoocean's default
+      of on**, on the reasoning that an approximation whose error varies with
+      angle misplaces returns by an angle-dependent amount.
+
+      **It changes nothing measurable.** Same track, same 60 pings, the flag the
+      only difference: 1.879 vs 1.896 m MAD-std against the octree, with the
+      disagreement pattern identical. An earlier capture suggested otherwise and
+      was a confound -- two flights over different ground. The flag stays off
+      because exactness is cheap at 5 Hz, not because it buys anything measured.
+  :param init_octree_range: How far around the vehicle to build octree at
+      startup, metres. **Leaving this unset is expensive and the cost is
+      invisible.** The octree is generated once per (world, octree_min,
+      octree_max) and cached to disk; with no range given the Dam cache reached
+      **107 GB** at ``octree_min = 0.02``, and a second one at a different
+      ``octree_max`` added 80 GB more. holoocean's own scenarios set 70. The
+      default here covers a survey box with margin. Pass None to leave it to the
+      simulator, which is what produced those numbers.
+
+      Note this bounds what is built *at startup*, not the sonar's reach, and
+      the cache is shared between runs -- so a later run over new ground extends
+      it rather than replacing it.
   :return: A sensor configuration block.
   """
+  configuration: dict[str, Any] = {
+    "RangeMin": range_min,
+    "RangeMax": range_max,
+    "RangeBins": range_bins,
+    "Azimuth": azimuth,
+    "AzimuthBins": azimuth_bins,
+    "Elevation": elevation,
+    "UseApprox": use_approx,
+  }
+  if init_octree_range is not None:
+    configuration["InitOctreeRange"] = init_octree_range
+
   return {
     "sensor_name": name,
     "sensor_type": "ProfilingSonar",
     "socket": "IMUSocket",
     "rotation": [0, -90, 0],
     "Hz": hz,
-    "configuration": {
-      "RangeMin": range_min,
-      "RangeMax": range_max,
-      "RangeBins": range_bins,
-      "Azimuth": azimuth,
-      "AzimuthBins": azimuth_bins,
-      "Elevation": elevation,
-    },
+    "configuration": configuration,
+  }
+
+
+def viewport_capture(
+  name: str = "ViewportCapture", width: int = 1280, height: int = 720
+) -> dict[str, Any]:
+  """The viewport's own frame, for looking at the world rather than measuring it.
+
+  Faster than an ``RGBCamera`` and, more usefully here, it renders whatever
+  :meth:`~holoocean.environments.HoloOceanEnvironment.move_viewport` is pointed
+  at -- so the camera is not tied to the vehicle and a patch of seabed can be
+  viewed from any side.
+
+  :param name: Sensor name in the state dict. The default is what holoocean
+      calls it, and the key the frame arrives under.
+  :param width: Capture width in pixels. **Must equal the viewport width** or
+      the returned buffer does not match the frame.
+  :param height: Capture height in pixels; same constraint.
+  :return: A sensor configuration block.
+  """
+  return {
+    "sensor_name": name,
+    "sensor_type": "ViewportCapture",
+    "socket": "IMUSocket",
+    "configuration": {"CaptureWidth": width, "CaptureHeight": height},
   }
 
 
@@ -205,15 +269,25 @@ def blue_rov_agent(
   location: list[float],
   sensors: list[dict[str, Any]],
   name: str = "rov",
+  rotation: list[float] | None = None,
 ) -> dict[str, Any]:
-  """A BlueROV2 under control scheme 0 (direct thruster commands)."""
-  return {
+  """A BlueROV2 under control scheme 0 (direct thruster commands).
+
+  :param rotation: Starting ``[roll, pitch, yaw]`` in degrees. Nothing in the
+      guidance commands yaw, so whatever is set here is held for the whole run
+      -- which makes it the way to ask whether a sensor defect is fixed in the
+      sensor's own frame or in the world's.
+  """
+  agent: dict[str, Any] = {
     "agent_name": name,
     "agent_type": "BlueROV2",
     "location": location,
     "control_scheme": 0,
     "sensors": sensors,
   }
+  if rotation is not None:
+    agent["rotation"] = rotation
+  return agent
 
 
 def pose_sensor(
@@ -295,6 +369,7 @@ def ocean_scenario(
   world: str = "Dam",
   octree_min: float = 0.02,
   octree_max: float = 5.0,
+  rotation: list[float] | None = None,
 ) -> dict[str, Any]:
   """A single-BlueROV2 scenario in a world from the Ocean package.
 
@@ -311,6 +386,7 @@ def ocean_scenario(
       it, so changing it changes sonar returns and makes new surveys
       inconsistent with maps built at a different value.
   :param octree_max: Coarsest octree voxel, metres.
+  :param rotation: Starting attitude in degrees; see :func:`blue_rov_agent`.
   :return: A scenario dict for :func:`holoocean.make`.
   """
   return {
@@ -319,7 +395,9 @@ def ocean_scenario(
     "package_name": "Ocean",
     "octree_min": octree_min,
     "octree_max": octree_max,
-    "agents": [blue_rov_agent(location=start, sensors=sensors)],
+    "agents": [
+      blue_rov_agent(location=start, sensors=sensors, rotation=rotation)
+    ],
   }
 
 
