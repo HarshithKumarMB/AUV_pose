@@ -198,41 +198,75 @@ def test_saturation_preserves_the_commanded_direction():
   np.testing.assert_allclose(cos, 1.0, atol=1e-12)
 
 
-def test_body_frame_steering_at_yaw():
-  """A world-frame error must be rotated before it reaches body thrusters.
+# The attitude HoloOcean reports for this vehicle at zero yaw. It is a z-down
+# body frame, not a rolled vehicle -- and it is emphatically not the identity,
+# which is what made the first attempt at body-frame steering pass its tests
+# and stall a survey.
+LEVEL = np.diag([1.0, -1.0, -1.0])
 
-  Without this the two frames are silently assumed identical. Every run so far
-  held zero yaw, so it went unnoticed until a survey needed a second heading to
-  turn the sonar's fan across-track.
+
+def yawed(degrees):
+  """The same frame turned by `degrees` about world z."""
+  angle = np.radians(degrees)
+  turn = np.array(
+    [
+      [np.cos(angle), -np.sin(angle), 0.0],
+      [np.sin(angle), np.cos(angle), 0.0],
+      [0.0, 0.0, 1.0],
+    ]
+  )
+  return turn @ LEVEL
+
+
+def test_the_real_level_attitude_steers_exactly_as_before():
+  """The regression this guards: diag(1, -1, -1) must be a no-op.
+
+  Applying the whole rotation inverts e_y and e_z, which inverts depth control.
+  Measured, that drove a survey along the one axis it left alone and stalled it
+  16 m short of its first waypoint.
   """
-  follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
-
-  # Yawed 90 degrees: body +x points along world +y, so reaching a target that
-  # is 10 m away in world +x is a body -y manoeuvre, not a body +x one.
-  yawed = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-  command = follower.command(np.zeros(3), yawed)
-
-  # thruster_command mixes [e_x + e_y, e_x - e_y, e_y, -e_y]; a pure body -y
-  # error puts equal and opposite thrust on the angled pair.
-  np.testing.assert_allclose(command[4:], [-10.0, 10.0, -10.0, 10.0])
-
-
-def test_steering_is_unchanged_when_level_and_unyawed():
-  """Identity attitude must reproduce the world-frame behaviour exactly."""
   follower = WaypointFollower(SQUARE.copy(), arrival_radius=0.5)
   reference = WaypointFollower(SQUARE.copy(), arrival_radius=0.5)
 
   position = np.array([2.0, -3.0, 1.0])
   np.testing.assert_allclose(
-    follower.command(position, np.eye(3)), reference.command(position)
+    follower.command(position, LEVEL), reference.command(position)
   )
 
 
-def test_a_reversed_heading_does_not_drive_away():
-  """At 180 degrees the unrotated error is pure positive feedback."""
-  follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
-  flipped = np.array([[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]])
+def test_depth_control_is_never_inverted():
+  """Whatever the heading, a target above the vehicle thrusts the same way."""
+  for degrees in (0.0, 45.0, 90.0, 180.0, -90.0):
+    follower = WaypointFollower([[0.0, 0.0, 10.0]], arrival_radius=0.5)
+    command = follower.command(np.zeros(3), yawed(degrees))
+    np.testing.assert_allclose(command[:4], [10.0, 10.0, 10.0, 10.0])
 
-  command = follower.command(np.zeros(3), flipped)
+
+def test_a_yawed_vehicle_steers_in_its_own_frame():
+  """At yaw 90 the body x axis points along world +y."""
+  follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
+  command = follower.command(np.zeros(3), yawed(90.0))
+
+  # A world +x target is 10 m to starboard: pure body -y, no surge.
+  np.testing.assert_allclose(command[4:], [-10.0, 10.0, -10.0, 10.0])
+
+
+def test_a_reversed_heading_does_not_drive_away():
+  """At 180 degrees an unrotated error would be pure positive feedback."""
+  follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
+  command = follower.command(np.zeros(3), yawed(180.0))
+
   # Body-frame surge is negative: the target is behind the vehicle.
   assert command[4] < 0 and command[5] < 0
+
+
+def test_heading_is_taken_from_the_body_x_axis():
+  """Roll and pitch must not reach the mixing; only the heading may."""
+  follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
+  reference = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
+
+  # LEVEL and plain identity differ by a 180 degree roll, same heading.
+  np.testing.assert_allclose(
+    follower.command(np.zeros(3), LEVEL),
+    reference.command(np.zeros(3), np.eye(3)),
+  )

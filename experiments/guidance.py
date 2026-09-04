@@ -77,11 +77,16 @@ class WaypointFollower:
         rotation: Body-to-world rotation, ``(3, 3)``. **Required for any run
             that is not aligned with the world axes.** The waypoint error is a
             world vector and :func:`thruster_command` mixes body thrusters, so
-            without this the two frames are silently assumed identical. Every
-            run so far held zero yaw, which is why it went unnoticed; measured
-            at yaw 90 degrees a commanded world ``+x`` produces world ``+y``,
-            and at 180 degrees it produces ``-x`` -- positive feedback, and the
-            vehicle leaves.
+            without this the two frames are silently assumed identical --
+            measured at yaw 90 degrees a commanded world ``+x`` produces world
+            ``+y``, and at 180 degrees ``-x``, which is positive feedback.
+
+            Only the **heading** is taken from it. HoloOcean reports this
+            vehicle's attitude as ``diag(1, -1, -1)`` at zero yaw -- a
+            z-down body frame, not a rolled vehicle -- so applying the whole
+            matrix inverts ``e_y`` and ``e_z`` and inverts depth control with
+            them. That is not hypothetical: it stalled a survey 16 m short of
+            its first waypoint, having driven the one axis it left alone.
 
     Returns:
         None when the waypoint has just been reached -- advance and try again
@@ -97,6 +102,17 @@ class WaypointFollower:
       return None
 
     if rotation is not None:
-      error = np.asarray(rotation, dtype=float).T @ error
+      rotation = np.asarray(rotation, dtype=float)
+      # Heading of the body x axis in the world. At zero yaw this is a no-op,
+      # so every run flown before headings existed is reproduced exactly.
+      heading = np.arctan2(rotation[1, 0], rotation[0, 0])
+      cos, sin = np.cos(heading), np.sin(heading)
+      error = np.array(
+        [
+          cos * error[0] + sin * error[1],
+          -sin * error[0] + cos * error[1],
+          error[2],
+        ]
+      )
 
     return thruster_command(error)
