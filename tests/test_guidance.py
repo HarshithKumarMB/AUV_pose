@@ -196,3 +196,43 @@ def test_saturation_preserves_the_commanded_direction():
     capped @ unlimited / (np.linalg.norm(capped) * np.linalg.norm(unlimited))
   )
   np.testing.assert_allclose(cos, 1.0, atol=1e-12)
+
+
+def test_body_frame_steering_at_yaw():
+  """A world-frame error must be rotated before it reaches body thrusters.
+
+  Without this the two frames are silently assumed identical. Every run so far
+  held zero yaw, so it went unnoticed until a survey needed a second heading to
+  turn the sonar's fan across-track.
+  """
+  follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
+
+  # Yawed 90 degrees: body +x points along world +y, so reaching a target that
+  # is 10 m away in world +x is a body -y manoeuvre, not a body +x one.
+  yawed = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+  command = follower.command(np.zeros(3), yawed)
+
+  # thruster_command mixes [e_x + e_y, e_x - e_y, e_y, -e_y]; a pure body -y
+  # error puts equal and opposite thrust on the angled pair.
+  np.testing.assert_allclose(command[4:], [-10.0, 10.0, -10.0, 10.0])
+
+
+def test_steering_is_unchanged_when_level_and_unyawed():
+  """Identity attitude must reproduce the world-frame behaviour exactly."""
+  follower = WaypointFollower(SQUARE.copy(), arrival_radius=0.5)
+  reference = WaypointFollower(SQUARE.copy(), arrival_radius=0.5)
+
+  position = np.array([2.0, -3.0, 1.0])
+  np.testing.assert_allclose(
+    follower.command(position, np.eye(3)), reference.command(position)
+  )
+
+
+def test_a_reversed_heading_does_not_drive_away():
+  """At 180 degrees the unrotated error is pure positive feedback."""
+  follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
+  flipped = np.array([[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]])
+
+  command = follower.command(np.zeros(3), flipped)
+  # Body-frame surge is negative: the target is behind the vehicle.
+  assert command[4] < 0 and command[5] < 0

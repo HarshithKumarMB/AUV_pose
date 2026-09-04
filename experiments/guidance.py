@@ -67,12 +67,26 @@ class WaypointFollower:
   def target(self) -> NDArray[np.float64]:
     return self.waypoints[self.index]
 
-  def command(self, position: ArrayLike) -> NDArray[np.float64] | None:
+  def command(
+    self, position: ArrayLike, rotation: ArrayLike | None = None
+  ) -> NDArray[np.float64] | None:
     """Thruster command steering from ``position`` toward the current waypoint.
 
-    Returns None when the waypoint has just been reached -- advance and try
-    again on the next tick -- or when the course is complete. Check
-    :attr:`finished` to tell the two apart.
+    Args:
+        position: Current world position, ``(3,)``.
+        rotation: Body-to-world rotation, ``(3, 3)``. **Required for any run
+            that is not aligned with the world axes.** The waypoint error is a
+            world vector and :func:`thruster_command` mixes body thrusters, so
+            without this the two frames are silently assumed identical. Every
+            run so far held zero yaw, which is why it went unnoticed; measured
+            at yaw 90 degrees a commanded world ``+x`` produces world ``+y``,
+            and at 180 degrees it produces ``-x`` -- positive feedback, and the
+            vehicle leaves.
+
+    Returns:
+        None when the waypoint has just been reached -- advance and try again
+        on the next tick -- or when the course is complete. Check
+        :attr:`finished` to tell the two apart.
     """
     if self.finished:
       return None
@@ -81,5 +95,8 @@ class WaypointFollower:
     if np.linalg.norm(error) < self.arrival_radius:
       self.index += 1
       return None
+
+    if rotation is not None:
+      error = np.asarray(rotation, dtype=float).T @ error
 
     return thruster_command(error)
