@@ -86,10 +86,20 @@ def test_gyro_zero_rate_is_identity():
   np.testing.assert_array_equal(quat_from_gyro(np.zeros(3), 0.1), IDENTITY)
 
 
-def test_gyro_below_threshold_is_identity():
-  np.testing.assert_array_equal(
-    quat_from_gyro([1e-12, 0.0, 0.0], 1e-3), IDENTITY
-  )
+def test_gyro_below_threshold_is_the_small_rotation_not_the_identity():
+  """This used to truncate to the identity below ``1e-8`` radians.
+
+  It no longer does: ``quat_from_gyro`` delegates to ``quat_exp``, which takes
+  the half-angle sinc from its series instead of returning identity wholesale.
+  The truncation put a step in the derivative at the threshold, and a
+  sigma-point rule placing points either side of it reads that step as
+  curvature. The answer below is the correct one -- a 1e-15 rad rotation has
+  half-angle 5e-16 -- and it is continuous in the rate.
+  """
+  q = quat_from_gyro([1e-12, 0.0, 0.0], 1e-3)
+
+  np.testing.assert_allclose(q, IDENTITY, atol=1e-15)
+  assert q[1] == 5e-16
 
 
 def test_gyro_quarter_turn_about_z():
