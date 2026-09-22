@@ -17,3 +17,7 @@ result-*
 # Python
 __pycache__/
 *.pyc
+
+# Papers cited by the write-up. Kept locally for reference; publisher PDFs do
+# not belong in the repository.
+literature/
