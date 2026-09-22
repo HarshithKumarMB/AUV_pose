@@ -47,6 +47,7 @@ from auv_pose.mapping.ordering import maximin_order, ordered_neighbours
 
 __all__ = [
   "DEFAULT_JITTER",
+  "MeanBasis",
   "VecchiaHyperparameters",
   "VecchiaMap",
   "VecchiaStructure",
@@ -171,14 +172,236 @@ def build_structure(
   )
 
 
-def design_matrix(points: ArrayLike) -> np.ndarray:
-  """``phi(q) = (1, n, e)``, the linear mean's basis.
+@dataclass(frozen=True)
+class MeanBasis:
+  """The mean function's basis, and the survey extent it was built on.
+
+  §3.2 specifies ``phi(q) = (1, n, e)`` -- a plane through the survey, meant to
+  absorb regional depth and slope so the GP models only what is left. Measured
+  on this seabed, it absorbs **13%** of the held-out variance. The GP is then
+  asked to carry the other 87%, which it cannot do beyond its own correlation
+  length: inside a gap wider than the kernel's reach the posterior returns the
+  mean, and a plane that explains nothing is a bad answer. That is precisely
+  where the map lost to averaging four neighbours.
+
+  Held-out residual variance on the four-heading survey, 8 m blocked holdout,
+  total variance 105.19:
+
+  ==========================  ====  ==============
+  basis                       ``p``  held-out var
+  ==========================  ====  ==============
+  constant                       1  105.19
+  linear -- §3.2's              3   91.84
+  quadratic                      6   53.89
+  cubic                         10   26.02
+  tensor B-spline 8x8          100   11.16
+  **tensor B-spline 12x12**    196   **8.10**
+  tensor B-spline 16x16        324    8.58
+  tensor B-spline 24x24        676   15.07
+  ==========================  ====  ==============
+
+  The overfitting turn is visible and unambiguous, so 12 knots an axis is
+  measured rather than guessed. A spline basis is also the *right shape* for
+  the job: seabed depth is a smooth surface with no reason to be polynomial,
+  and a high-degree polynomial misbehaves exactly at the survey edges where the
+  map is least constrained.
+
+  :param kind: ``"polynomial"`` or ``"spline"``.
+  :param degree: Total degree for a polynomial, or the B-spline's degree.
+  :param knots: Knots per axis. Splines only.
+  :param lower: Per-axis minimum of the fitting extent. Splines only.
+  :param upper: Per-axis maximum of the fitting extent. Splines only.
+
+  Note:
+      **A spline basis is not a pure function of position**, which is why this
+      is an object rather than a function. Its knots are pinned to the survey's
+      extent, so prediction must use the ones the fit used; recomputing them
+      from a batch of query points would silently evaluate a different basis.
+      The fitted map therefore carries this, and prediction goes through it.
+
+  Note:
+      Queries outside the fitted extent are **clamped** to it, so the mean goes
+      flat rather than diverging. A polynomial mean has no such guard, which is
+      the other reason to prefer splines here: a quartic surface extrapolated a
+      few metres past the last sounding can return any depth at all.
+  """
+
+  kind: str = "polynomial"
+  degree: int = 1
+  knots: int = 12
+  lower: tuple[float, ...] | None = None
+  upper: tuple[float, ...] | None = None
+
+  @classmethod
+  def build(
+    cls,
+    points: ArrayLike,
+    kind: str = "linear",
+    degree: int | None = None,
+    knots: int = 12,
+  ) -> MeanBasis:
+    """Choose a basis and pin it to the extent of ``points``.
+
+    :param points: The survey the mean is fitted on, shape ``(N, 2)``.
+    :param kind: ``"linear"``, ``"quadratic"``, ``"cubic"``, ``"polynomial"``
+        or ``"spline"``.
+    :param degree: Overrides the degree implied by ``kind``.
+    :param knots: Knots per axis, for ``"spline"``.
+    """
+    points = np.asarray(points, dtype=float)
+    named = {"linear": 1, "quadratic": 2, "cubic": 3}
+
+    if kind in named:
+      return cls(kind="polynomial", degree=degree or named[kind])
+    if kind == "polynomial":
+      return cls(kind="polynomial", degree=degree or 1)
+    if kind != "spline":
+      raise ValueError(
+        f"kind must be one of {sorted(named) + ['polynomial', 'spline']}, "
+        f"got {kind!r}"
+      )
+
+    if knots < 2:
+      raise ValueError(f"expected at least 2 knots, got {knots}")
+
+    return cls(
+      kind="spline",
+      degree=3 if degree is None else degree,
+      knots=knots,
+      lower=tuple(points.min(axis=0)),
+      upper=tuple(points.max(axis=0)),
+    )
+
+  @property
+  def size(self) -> int:
+    """Number of basis functions, ``p``."""
+    if self.kind == "polynomial":
+      return (self.degree + 1) * (self.degree + 2) // 2
+    return (self.knots + self.degree - 1) ** 2
+
+  def _knot_vector(self, axis: int) -> np.ndarray:
+    assert self.lower is not None and self.upper is not None
+    low, high = self.lower[axis], self.upper[axis]
+    interior = np.linspace(low, high, self.knots)
+    pad = self.degree
+    return np.concatenate([np.full(pad, low), interior, np.full(pad, high)])
+
+  def __call__(self, points: ArrayLike) -> np.ndarray:
+    """Evaluate the basis.
+
+    :param points: Positions, shape ``(N, 2)``.
+    :return: Shape ``(N, p)``.
+    """
+    points = np.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 2:
+      raise ValueError(f"expected (N, 2) points, got {points.shape}")
+
+    if self.kind == "polynomial":
+      columns = [np.ones(len(points))]
+      for total in range(1, self.degree + 1):
+        for power in range(total + 1):
+          columns.append(
+            points[:, 0] ** (total - power) * points[:, 1] ** power
+          )
+      return np.column_stack(columns)
+
+    from scipy.interpolate import BSpline
+
+    assert self.lower is not None and self.upper is not None
+    axes = []
+    for axis in (0, 1):
+      clamped = np.clip(points[:, axis], self.lower[axis], self.upper[axis])
+      axes.append(
+        BSpline.design_matrix(
+          clamped, self._knot_vector(axis), self.degree
+        ).toarray()
+      )
+
+    north, east = axes
+    return (north[:, :, None] * east[:, None, :]).reshape(len(points), -1)
+
+  def gradient(self, points: ArrayLike) -> np.ndarray:
+    """Derivative of the basis with respect to position.
+
+    :param points: Positions, shape ``(N, 2)``.
+    :return: Shape ``(N, p, 2)``, basis value per metre.
+
+    Note:
+        Needed because the map's mean gradient is ``d(phi)/dq . beta``, and the
+        terrain update carries the sonar's range noise through it. For the
+        linear basis this is the constant ``(0, 1, 0), (0, 0, 1)`` and the
+        whole thing collapses to ``beta[1:]`` -- which is what the map used to
+        assume, and which is silently wrong for any richer mean.
+
+        Outside the fitted extent a spline basis is clamped, hence constant,
+        hence flat: the gradient is zero there rather than whatever the last
+        interior slope happened to be.
+    """
+    points = np.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 2:
+      raise ValueError(f"expected (N, 2) points, got {points.shape}")
+
+    if self.kind == "polynomial":
+      columns = [np.zeros((len(points), 2))]
+      for total in range(1, self.degree + 1):
+        for power in range(total + 1):
+          north_power, east_power = total - power, power
+          north = points[:, 0] ** north_power
+          east = points[:, 1] ** east_power
+          d_north = (
+            north_power * points[:, 0] ** (north_power - 1) * east
+            if north_power
+            else np.zeros(len(points))
+          )
+          d_east = (
+            east_power * points[:, 1] ** (east_power - 1) * north
+            if east_power
+            else np.zeros(len(points))
+          )
+          columns.append(np.column_stack([d_north, d_east]))
+      return np.stack(columns, axis=1)
+
+    from scipy.interpolate import BSpline
+
+    assert self.lower is not None and self.upper is not None
+    values, slopes, inside = [], [], []
+    for axis in (0, 1):
+      raw = points[:, axis]
+      clamped = np.clip(raw, self.lower[axis], self.upper[axis])
+      knots = self._knot_vector(axis)
+      width = self.knots + self.degree - 1
+
+      spline = BSpline(knots, np.eye(width), self.degree)
+      values.append(np.asarray(spline(clamped)))
+      slopes.append(np.asarray(spline.derivative()(clamped)))
+      inside.append(raw == clamped)
+
+    north, east = values
+    d_north, d_east = slopes
+
+    # A clamped axis contributes no slope along itself.
+    d_north = d_north * inside[0][:, None]
+    d_east = d_east * inside[1][:, None]
+
+    by_north = (d_north[:, :, None] * east[:, None, :]).reshape(len(points), -1)
+    by_east = (north[:, :, None] * d_east[:, None, :]).reshape(len(points), -1)
+    return np.stack([by_north, by_east], axis=-1)
+
+
+#: §3.2's mean, kept as the default so nothing changes without being asked for.
+LINEAR_MEAN = MeanBasis(kind="polynomial", degree=1)
+
+
+def design_matrix(
+  points: ArrayLike, basis: MeanBasis | None = None
+) -> np.ndarray:
+  """Evaluate a mean basis, defaulting to §3.2's ``phi(q) = (1, n, e)``.
 
   :param points: Positions, shape ``(N, 2)``.
-  :return: Shape ``(N, 3)``.
+  :param basis: The basis to use. Defaults to the linear one.
+  :return: Shape ``(N, p)``.
   """
-  points = np.asarray(points, dtype=float)
-  return np.column_stack([np.ones(len(points)), points])
+  return (basis or LINEAR_MEAN)(points)
 
 
 def _gather_block(values: Tensor, neighbours: Tensor, rows: Tensor) -> Tensor:
@@ -788,9 +1011,12 @@ class VecchiaMap:
   :param loglik_trace: Log likelihood at each optimiser step, so convergence is
       observable rather than assumed.
   :param fit_device: Where the fit actually ran.
-  :param information: ``H' K^-1 H``, shape ``(3, 3)``. Kept from the fit
+  :param information: ``H' K^-1 H``, shape ``(p, p)``. Kept from the fit
       because prediction needs it to propagate the uncertainty in ``beta``, and
       recomputing it would mean whitening the whole survey again.
+  :param basis: The mean's basis. Carried on the map because a spline basis is
+      pinned to the extent it was fitted on, so prediction must evaluate the
+      same one; see :class:`MeanBasis`.
   """
 
   structure: VecchiaStructure
@@ -799,6 +1025,7 @@ class VecchiaMap:
   hyper: VecchiaHyperparameters
   noise: np.ndarray
   loglik_trace: list[float]
+  basis: MeanBasis = LINEAR_MEAN
   fit_device: str = "cpu"
   information: np.ndarray | None = None
   _tree: object | None = field(default=None, repr=False, compare=False)
@@ -899,7 +1126,7 @@ class VecchiaMap:
     For a single query conditioning on its ``m`` nearest soundings the mean is
     ``phi(q)' beta + k(q, g) K_gg^-1 r_g``, so::
 
-        grad mu(q) = (beta_n, beta_e) + [dk(q, g)/dq]' K_gg^-1 r_g
+        grad mu(q) = [d phi(q)/dq]' beta + [dk(q, g)/dq]' K_gg^-1 r_g
 
     :param points: ``(n, 2)`` of ``(x, y)`` in metres.
     :param chunk_size: Points per batch, to bound memory.
@@ -962,7 +1189,8 @@ class VecchiaMap:
         query, local, log_amplitude, log_lengthscale
       ).squeeze(1)
 
-      gradients.append((slope * weights).sum(dim=1).numpy() + self.beta[1:])
+      mean_slope = np.einsum("npd,p->nd", self.basis.gradient(block), self.beta)
+      gradients.append((slope * weights).sum(dim=1).numpy() + mean_slope)
 
     return np.concatenate(gradients)
 
@@ -1071,6 +1299,8 @@ def fit_vecchia(
   jitter: float = DEFAULT_JITTER,
   chunk: int = 8192,
   near: int | None = None,
+  mean: str = "linear",
+  mean_knots: int = 12,
 ) -> VecchiaMap:
   """Fit the linear mean and the kernel hyperparameters to a survey.
 
@@ -1111,6 +1341,10 @@ def fit_vecchia(
       conditioning ladder on real soundings says by how much, because their
       result is measured on a different field with a different ordering, and
       this map's whole difficulty has been numbers that did not transfer.
+  :param mean: Mean basis -- ``"linear"`` (§3.2's), ``"quadratic"``,
+      ``"cubic"`` or ``"spline"``. See :class:`MeanBasis` for what each absorbs
+      on this seabed; the linear one absorbs 13%.
+  :param mean_knots: Knots per axis when ``mean="spline"``.
   :return: The fitted map.
 
   Note:
@@ -1140,7 +1374,8 @@ def fit_vecchia(
   if method not in ("reml", "ml"):
     raise ValueError(f'method must be "reml" or "ml", got {method!r}')
 
-  basis = design_matrix(ordered_points)
+  mean_basis = MeanBasis.build(ordered_points, kind=mean, knots=mean_knots)
+  basis = design_matrix(ordered_points, mean_basis)
   # Only ever a starting point under REML, where the objective refits it.
   beta = np.linalg.lstsq(basis, ordered_depth, rcond=None)[0]
   residual = ordered_depth - basis @ beta
@@ -1263,6 +1498,7 @@ def fit_vecchia(
     hyper=fitted,
     noise=fitted.noise + inflation,
     loglik_trace=trace,
+    basis=mean_basis,
     fit_device=str(resolved),
     information=information,
   )
@@ -1472,7 +1708,7 @@ def _predict_joint_array(
 
   residual = torch.as_tensor(fitted.residual, dtype=torch.float64)
   survey_basis = torch.as_tensor(
-    design_matrix(fitted.structure.points), dtype=torch.float64
+    design_matrix(fitted.structure.points, fitted.basis), dtype=torch.float64
   )
   gathered = torch.as_tensor(indices)
 
@@ -1490,7 +1726,8 @@ def _predict_joint_array(
     np.take_along_axis(queries, order[:, :, None], axis=1), dtype=torch.float64
   )
   query_basis = torch.as_tensor(
-    design_matrix(ordered_queries.reshape(-1, 2).numpy()), dtype=torch.float64
+    design_matrix(ordered_queries.reshape(-1, 2).numpy(), fitted.basis),
+    dtype=torch.float64,
   ).reshape(groups, beams, -1)
   beta = torch.as_tensor(fitted.beta, dtype=torch.float64)
 

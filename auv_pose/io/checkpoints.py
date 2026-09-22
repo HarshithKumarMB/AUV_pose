@@ -32,6 +32,8 @@ import torch
 
 from auv_pose.mapping.svgp import BathymetryMap, SVGPModel
 from auv_pose.mapping.vecchia import (
+  LINEAR_MEAN,
+  MeanBasis,
   VecchiaHyperparameters,
   VecchiaMap,
   VecchiaStructure,
@@ -41,7 +43,11 @@ __all__ = ["load_map", "save_map", "save_vecchia_map"]
 
 #: Bumped when a stored field changes meaning, so a stale checkpoint is
 #: refused with an explanation rather than mis-read.
-VECCHIA_VERSION = 1
+VECCHIA_VERSION = 2
+
+#: Versions this build can still read. Version 1 predates the mean basis being
+#: stored; every such map was fitted with the linear mean, so it loads as one.
+VECCHIA_READABLE = (1, 2)
 
 _REQUIRED_KEYS = frozenset(
   {
@@ -144,15 +150,45 @@ def save_vecchia_map(path: str | Path, bathymetry: VecchiaMap) -> None:
     ),
     "loglik_trace": [float(v) for v in bathymetry.loglik_trace],
     "fit_device": str(bathymetry.fit_device),
+    # A plain dict, not the dataclass: this format deliberately has no class
+    # of its own to unpickle, so it cannot be broken by a later rename.
+    "basis": {
+      "kind": bathymetry.basis.kind,
+      "degree": int(bathymetry.basis.degree),
+      "knots": int(bathymetry.basis.knots),
+      "lower": (
+        None
+        if bathymetry.basis.lower is None
+        else [float(v) for v in bathymetry.basis.lower]
+      ),
+      "upper": (
+        None
+        if bathymetry.basis.upper is None
+        else [float(v) for v in bathymetry.basis.upper]
+      ),
+    },
   }
   with open(path, "wb") as handle:
     pickle.dump(payload, handle)
 
 
+def _read_basis(stored: dict | None) -> MeanBasis:
+  """Rebuild the mean basis, defaulting to the linear one for version 1."""
+  if stored is None:
+    return LINEAR_MEAN
+  return MeanBasis(
+    kind=str(stored["kind"]),
+    degree=int(stored["degree"]),
+    knots=int(stored["knots"]),
+    lower=None if stored["lower"] is None else tuple(stored["lower"]),
+    upper=None if stored["upper"] is None else tuple(stored["upper"]),
+  )
+
+
 def _load_vecchia(path: Path, checkpoint: dict) -> VecchiaMap:
   """Rebuild a :class:`~auv_pose.mapping.vecchia.VecchiaMap` from a payload."""
   version = checkpoint.get("version")
-  if version != VECCHIA_VERSION:
+  if version not in VECCHIA_READABLE:
     raise ValueError(
       f"{path} is a version {version} Vecchia checkpoint; this build reads "
       f"version {VECCHIA_VERSION}. Refit with experiments/train_map.py."
@@ -182,6 +218,7 @@ def _load_vecchia(path: Path, checkpoint: dict) -> VecchiaMap:
     ),
     noise=np.asarray(checkpoint["noise"], dtype=np.float64),
     loglik_trace=list(checkpoint.get("loglik_trace", [])),
+    basis=_read_basis(checkpoint.get("basis")),
     fit_device=str(checkpoint.get("fit_device", "cpu")),
     information=(
       None

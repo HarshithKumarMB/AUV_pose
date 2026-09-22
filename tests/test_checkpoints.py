@@ -222,3 +222,40 @@ def test_a_pickle_that_is_not_even_a_mapping_is_refused(tmp_path):
 
   with pytest.raises(ValueError, match="not a bathymetry checkpoint"):
     load_map(path)
+
+
+def test_a_version_one_checkpoint_loads_as_a_linear_mean(tmp_path):
+  """Backward compatibility, and it is not merely cosmetic.
+
+  Version 1 predates the mean basis being stored. Every such map was fitted
+  with the linear mean, so defaulting to it is correct rather than merely
+  convenient -- and loading one as a spline would change every prediction it
+  makes without erroring.
+  """
+  from auv_pose.mapping.vecchia import LINEAR_MEAN
+
+  rng = np.random.default_rng(0)
+  points = rng.uniform(-10.0, 10.0, size=(40, 2))
+  fitted = fit_vecchia(
+    points,
+    -50.0 + 0.1 * points[:, 0],
+    m=6,
+    steps=5,
+    device="cpu",
+  )
+
+  path = tmp_path / "old.pkl"
+  save_vecchia_map(path, fitted)
+
+  with open(path, "rb") as handle:
+    payload = pickle.load(handle)
+  payload["version"] = 1
+  del payload["basis"]
+  with open(path, "wb") as handle:
+    pickle.dump(payload, handle)
+
+  loaded = load_map(path)
+  assert loaded.basis == LINEAR_MEAN
+  np.testing.assert_allclose(
+    loaded.predict(points[:5]), fitted.predict(points[:5])
+  )

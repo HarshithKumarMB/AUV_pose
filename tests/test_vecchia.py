@@ -30,6 +30,8 @@ from auv_pose.estimation.terrain import DepthMap
 from auv_pose.mapping.kernels import matern52, matern52_gradient
 from auv_pose.mapping.ordering import ordered_neighbours
 from auv_pose.mapping.vecchia import (
+  LINEAR_MEAN,
+  MeanBasis,
   VecchiaHyperparameters,
   VecchiaMap,
   VecchiaStructure,
@@ -1360,3 +1362,131 @@ def test_the_draw_count_shapes_the_output():
   many = draw(structure, LOG_AMPLITUDE, LOG_LENGTHSCALE, noise, count=5, seed=1)
   assert single.shape == (80,)
   assert many.shape == (80, 5)
+
+
+# -- the mean basis ----------------------------------------------------------
+
+
+def basis_points(n=400, seed=70, spread=50.0):
+  return np.random.default_rng(seed).uniform(-spread, spread, size=(n, 2))
+
+
+def test_the_default_basis_is_still_the_linear_one():
+  """Nothing may change for a map that did not ask for a richer mean."""
+  points = basis_points(20)
+  np.testing.assert_allclose(design_matrix(points), LINEAR_MEAN(points))
+  np.testing.assert_allclose(
+    design_matrix(points),
+    np.column_stack([np.ones(len(points)), points]),
+  )
+
+
+def test_each_basis_has_the_size_it_claims():
+  fitted = basis_points()
+  for kind, extra, expected in (
+    ("linear", {}, 3),
+    ("quadratic", {}, 6),
+    ("cubic", {}, 10),
+    ("spline", {"knots": 8}, 100),
+    ("spline", {"knots": 12}, 196),
+  ):
+    basis = MeanBasis.build(fitted, kind=kind, **extra)
+    assert basis.size == expected
+
+    # Comfortably more points than basis functions, or the rank check below
+    # is bounded by the sample rather than by the basis.
+    sample = max(2000, 8 * expected)
+    values = basis(basis_points(sample, seed=71, spread=49.0))
+    assert values.shape == (sample, expected)
+    assert np.linalg.matrix_rank(values) == expected
+
+
+def test_the_basis_gradient_matches_finite_differences():
+  """The pin on ``gradient``. A wrong spline derivative is otherwise silent.
+
+  It would not show up as an error -- only as a terrain update that pulls the
+  vehicle slightly the wrong way, which is the hardest kind of bug to find
+  downstream.
+  """
+  fitted = basis_points()
+  queries = basis_points(40, seed=72, spread=40.0)
+  step = 1e-5
+
+  for kind, extra in (
+    ("linear", {}),
+    ("quadratic", {}),
+    ("cubic", {}),
+    ("spline", {"knots": 8}),
+  ):
+    basis = MeanBasis.build(fitted, kind=kind, **extra)
+    analytic = basis.gradient(queries)
+
+    numeric = np.stack(
+      [
+        (basis(queries + step * axis) - basis(queries - step * axis))
+        / (2.0 * step)
+        for axis in np.eye(2)
+      ],
+      axis=-1,
+    )
+    np.testing.assert_allclose(analytic, numeric, atol=1e-6)
+
+
+def test_the_linear_gradient_reduces_to_the_slope_coefficients():
+  """The identity the map used to hardcode, now a consequence rather than an
+  assumption."""
+  basis = MeanBasis.build(basis_points(), kind="linear")
+  beta = np.array([3.0, -0.7, 0.4])
+
+  slope = np.einsum("npd,p->nd", basis.gradient(basis_points(6, seed=73)), beta)
+  np.testing.assert_allclose(slope, np.broadcast_to(beta[1:], (6, 2)))
+
+
+def test_a_spline_basis_goes_flat_outside_its_extent():
+  """A polynomial mean diverges where the survey stops; this must not."""
+  fitted = np.array([[0.0, 0.0], [100.0, 100.0]])
+  basis = MeanBasis.build(fitted, kind="spline", knots=8)
+
+  edge = basis(np.array([[100.0, 100.0]]))
+  beyond = basis(np.array([[5000.0, 5000.0]]))
+  np.testing.assert_allclose(beyond, edge)
+
+  assert np.all(basis.gradient(np.array([[5000.0, 5000.0]])) == 0.0)
+
+
+def test_a_spline_basis_is_a_partition_of_unity():
+  """B-splines sum to one, so the basis can represent a constant depth."""
+  basis = MeanBasis.build(basis_points(), kind="spline", knots=10)
+  values = basis(basis_points(80, seed=74, spread=40.0))
+  np.testing.assert_allclose(values.sum(axis=1), 1.0, atol=1e-10)
+
+
+def test_it_rejects_an_unknown_basis():
+  try:
+    MeanBasis.build(basis_points(10), kind="fourier")
+  except ValueError as error:
+    assert "fourier" in str(error)
+    return
+  raise AssertionError("expected a ValueError")
+
+
+def test_a_spline_mean_fits_and_predicts():
+  """End to end, because the basis has to survive the whole pipeline."""
+  rng = np.random.default_rng(75)
+  points = rng.uniform(-30.0, 30.0, size=(600, 2))
+  depth = -60.0 + 0.02 * points[:, 0] + 3.0 * np.sin(points[:, 1] / 9.0)
+
+  fitted = fit_vecchia(
+    points, depth, m=12, steps=25, mean="spline", mean_knots=5, device="cpu"
+  )
+  assert fitted.basis.kind == "spline"
+  assert fitted.beta.shape == (fitted.basis.size,)
+
+  queries = rng.uniform(-25.0, 25.0, size=(40, 2))
+  predicted = fitted.predict(queries)
+  assert predicted.shape == (40,)
+  assert np.all(np.isfinite(predicted))
+
+  gradient = fitted.mean_gradient(queries)
+  assert gradient.shape == (40, 2)
+  assert np.all(np.isfinite(gradient))

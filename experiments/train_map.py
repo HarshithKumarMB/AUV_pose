@@ -147,6 +147,21 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--mean",
+    default="linear",
+    choices=("linear", "quadratic", "cubic", "spline"),
+    help=(
+      "mean basis. The linear one is the paper's, and absorbs 13%% of the "
+      "held-out variance on this seabed; a 12x12 spline absorbs 92%%"
+    ),
+  )
+  parser.add_argument(
+    "--mean-knots",
+    type=int,
+    default=12,
+    help="knots per axis when --mean spline",
+  )
+  parser.add_argument(
     "--steps", type=int, default=300, help="Vecchia optimiser steps"
   )
   parser.add_argument("--batch-size", type=int, default=5000)
@@ -389,9 +404,14 @@ def main() -> None:
       if args.near is None
       else f"{args.near} nearest + {args.conditioning - args.near} spread"
     )
+    mean = (
+      f"{args.mean} mean, {args.mean_knots} knots/axis"
+      if args.mean == "spline"
+      else f"{args.mean} mean"
+    )
     print(
       f"Fitting Vecchia on {int(train.sum())} soundings: "
-      f"m={args.conditioning} ({split}), {args.steps} steps"
+      f"m={args.conditioning} ({split}), {mean}, {args.steps} steps"
     )
     vecchia = fit_vecchia(
       X[train].astype(np.float64),
@@ -400,6 +420,8 @@ def main() -> None:
       steps=args.steps,
       device=args.device,
       near=args.near,
+      mean=args.mean,
+      mean_knots=args.mean_knots,
     )
 
     print(f"  fitted on {vecchia.fit_device}")
