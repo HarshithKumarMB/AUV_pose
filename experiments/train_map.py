@@ -31,9 +31,10 @@ import torch
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
-from auv_pose.io.checkpoints import save_map
+from auv_pose.io.checkpoints import save_map, save_vecchia_map
 from auv_pose.io.soundings import load_soundings, soundings_to_arrays
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
+from auv_pose.mapping.vecchia import fit_vecchia
 from experiments.cli import refuse_overwrite
 
 
@@ -101,6 +102,40 @@ def parse_args() -> argparse.Namespace:
       "rather than resolution. Must stay well below --holdout-cell or "
       "decimation merges soundings across the split boundary. 0 disables it"
     ),
+  )
+  parser.add_argument(
+    "--max-elevation",
+    type=float,
+    default=None,
+    metavar="Z",
+    help=(
+      "drop soundings shallower than Z metres. The four-heading survey carries "
+      "about 5%% of returns tens of metres above the seabed -- the 99th "
+      "percentile is -14.5 m against a seabed near -68 -- which are water "
+      "column or surface echoes rather than bathymetry. Left in, they inflate "
+      "the fitted nugget and account for roughly 40%% of held-out squared "
+      "error while being 3%% of the soundings. -42 suits that survey"
+    ),
+  )
+  parser.add_argument(
+    "--method",
+    choices=("vecchia", "svgp", "both"),
+    default="vecchia",
+    help=(
+      "which map to fit. 'both' fits each and scores them side by side, which "
+      "is how the claim that local conditioning beats inducing points gets a "
+      "number on this seabed rather than only a citation"
+    ),
+  )
+  parser.add_argument(
+    "--conditioning",
+    type=int,
+    default=30,
+    metavar="M",
+    help="Vecchia conditioning-set size; the paper's m",
+  )
+  parser.add_argument(
+    "--steps", type=int, default=300, help="Vecchia optimiser steps"
   )
   parser.add_argument("--batch-size", type=int, default=5000)
   parser.add_argument(
@@ -183,8 +218,27 @@ def blocked_split(
   return ~test, test
 
 
-def score(bathymetry, X, y, train, test, neighbours: int = 4) -> None:
-  """Print held-out error beside a nearest-neighbour baseline."""
+def calibration(bathymetry, X, y, test) -> float:
+  """Fraction of held-out soundings inside the map's own 95% interval.
+
+  Accuracy alone cannot tell whether a map's uncertainty is worth propagating
+  into a filter. This can: the paper's claim is that ``cov_M`` is the survey's
+  posterior uncertainty rather than a tuning parameter, which makes it
+  falsifiable. A map reporting 60% coverage is overconfident by exactly the
+  amount that would make the smoother's update too sure of itself.
+  """
+  predicted, spread = bathymetry.predict(
+    X[test], with_std=True, observation_noise=True
+  )
+  return float((np.abs(predicted - y[test]) <= 1.96 * spread).mean())
+
+
+def score(bathymetry, X, y, train, test, neighbours: int = 4) -> float:
+  """Print held-out error beside a nearest-neighbour baseline.
+
+  :return: The map's held-out rmse, so callers comparing two maps need not
+      re-predict.
+  """
   predicted = bathymetry.predict(X[test])
   gp_rmse = float(np.sqrt(((predicted - y[test]) ** 2).mean()))
 
@@ -200,6 +254,9 @@ def score(bathymetry, X, y, train, test, neighbours: int = 4) -> None:
   print(
     f"  predicting the mean depth    {float(np.sqrt(((y[train].mean() - y[test]) ** 2).mean())):7.3f} m"
   )
+  print(
+    f"  inside its own 95% interval  {calibration(bathymetry, X, y, test):7.1%}"
+  )
   if gp_rmse > knn_rmse:
     print(
       "  *** worse than averaging its neighbours. Either the fit has not "
@@ -208,6 +265,7 @@ def score(bathymetry, X, y, train, test, neighbours: int = 4) -> None:
       "Fitting a known analytic surface at the same sounding positions tells "
       "the two apart ***"
     )
+  return gp_rmse
 
 
 def main() -> None:
@@ -239,6 +297,16 @@ def main() -> None:
       raise SystemExit("no soundings inside --bounds")
     X, y = X[inside], y[inside]
 
+  if args.max_elevation is not None:
+    deep = y <= args.max_elevation
+    print(
+      f"Kept {int(deep.sum())} soundings at or below {args.max_elevation} m "
+      f"({100 * deep.mean():.1f}%); dropped {int((~deep).sum())} shallow returns"
+    )
+    if not deep.any():
+      raise SystemExit("no soundings below --max-elevation")
+    X, y = X[deep], y[deep]
+
   if args.decimate_cell > 0:
     if args.decimate_cell >= args.holdout_cell:
       raise SystemExit(
@@ -259,48 +327,97 @@ def main() -> None:
     train = np.ones(len(X), dtype=bool)
     test = np.zeros(len(X), dtype=bool)
 
-  x_scaler = StandardScaler().fit(X[train])
-  y_mean, y_std = float(y[train].mean()), float(y[train].std())
+  fitted: dict[str, object] = {}
+  rmse: dict[str, float] = {}
 
-  train_x = torch.tensor(x_scaler.transform(X[train]), dtype=torch.float32)
-  train_y = torch.tensor((y[train] - y_mean) / y_std, dtype=torch.float32)
+  if args.method in ("svgp", "both"):
+    x_scaler = StandardScaler().fit(X[train])
+    y_mean, y_std = float(y[train].mean()), float(y[train].std())
 
-  print(
-    f"Fitting SVGP on {int(train.sum())} soundings: "
-    f"{args.inducing} inducing points, {args.epochs} epochs"
-  )
-  model, likelihood, inducing_points = fit_svgp(
-    train_x,
-    train_y,
-    n_inducing=args.inducing,
-    epochs=args.epochs,
-    batch_size=args.batch_size,
-    seed=args.seed,
-    device=args.device,
-  )
+    train_x = torch.tensor(x_scaler.transform(X[train]), dtype=torch.float32)
+    train_y = torch.tensor((y[train] - y_mean) / y_std, dtype=torch.float32)
 
-  print(f"  fitted on {model.fit_device}")
-  trace = model.elbo_trace
-  print(
-    f"  negative ELBO {trace[0]:.4f} -> {trace[-1]:.4f}; "
-    f"last tenth improved by {trace[-len(trace) // 10 - 1] - trace[-1]:.4f} "
-    "(near zero means converged)"
-  )
-  lengthscale = (
-    model.covar_module.base_kernel.lengthscale.detach().numpy().ravel()
-    * x_scaler.scale_
-  )
-  print(f"  lengthscales {np.round(lengthscale, 2)} m")
+    print(
+      f"Fitting SVGP on {int(train.sum())} soundings: "
+      f"{args.inducing} inducing points, {args.epochs} epochs"
+    )
+    model, likelihood, inducing_points = fit_svgp(
+      train_x,
+      train_y,
+      n_inducing=args.inducing,
+      epochs=args.epochs,
+      batch_size=args.batch_size,
+      seed=args.seed,
+      device=args.device,
+    )
 
-  bathymetry = BathymetryMap(
-    model, likelihood, x_scaler, y_mean, y_std, device=model.fit_device
-  )
-  if test.any():
-    score(bathymetry, X, y, train, test)
+    print(f"  fitted on {model.fit_device}")
+    trace = model.elbo_trace
+    print(
+      f"  negative ELBO {trace[0]:.4f} -> {trace[-1]:.4f}; "
+      f"last tenth improved by {trace[-len(trace) // 10 - 1] - trace[-1]:.4f} "
+      "(near zero means converged)"
+    )
+    lengthscale = (
+      model.covar_module.base_kernel.lengthscale.detach().numpy().ravel()
+      * x_scaler.scale_
+    )
+    print(f"  lengthscales {np.round(lengthscale, 2)} m")
 
-  save_map(
-    args.out, model, likelihood, inducing_points, x_scaler, y_mean, y_std
-  )
+    svgp = BathymetryMap(
+      model, likelihood, x_scaler, y_mean, y_std, device=model.fit_device
+    )
+    fitted["svgp"] = svgp
+    if test.any():
+      rmse["svgp"] = score(svgp, X, y, train, test)
+
+  if args.method in ("vecchia", "both"):
+    print(
+      f"Fitting Vecchia on {int(train.sum())} soundings: "
+      f"m={args.conditioning}, {args.steps} steps"
+    )
+    vecchia = fit_vecchia(
+      X[train].astype(np.float64),
+      y[train].astype(np.float64),
+      m=args.conditioning,
+      steps=args.steps,
+      device=args.device,
+    )
+
+    print(f"  fitted on {vecchia.fit_device}")
+    trace = vecchia.loglik_trace
+    print(
+      f"  restricted log likelihood {trace[0]:.1f} -> {trace[-1]:.1f}; "
+      f"last tenth improved by {trace[-1] - trace[-len(trace) // 10 - 1]:.3f} "
+      "(near zero means converged)"
+    )
+    print(f"  lengthscales {np.round(vecchia.lengthscale, 2)} m")
+    print(
+      f"  amplitude {vecchia.hyper.amplitude:.3f} m^2, "
+      f"nugget {vecchia.hyper.noise:.4f} m^2"
+    )
+    print(f"  linear mean {np.round(vecchia.beta, 4)}")
+    fitted["vecchia"] = vecchia
+    if test.any():
+      rmse["vecchia"] = score(vecchia, X, y, train, test)
+
+  if len(rmse) == 2:
+    better, worse = sorted(rmse, key=rmse.get)
+    margin = 100 * (1 - rmse[better] / rmse[worse])
+    print(
+      f"\n{better} wins by {margin:.1f}% on held-out rmse "
+      f"({rmse[better]:.3f} m against {rmse[worse]:.3f} m)"
+    )
+
+  primary = "vecchia" if "vecchia" in fitted else "svgp"
+  bathymetry = fitted[primary]
+
+  if primary == "vecchia":
+    save_vecchia_map(args.out, bathymetry)
+  else:
+    save_map(
+      args.out, model, likelihood, inducing_points, x_scaler, y_mean, y_std
+    )
   print(f"Wrote {args.out}")
 
   if args.no_plot:

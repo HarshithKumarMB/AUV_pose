@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 
-from experiments.train_map import blocked_split, decimate
+from experiments.train_map import (
+  blocked_split,
+  calibration,
+  decimate,
+  score,
+)
 
 
 def test_decimate_collapses_a_cell_to_one_point():
@@ -98,3 +103,67 @@ def test_decimation_finer_than_the_holdout_cell_keeps_the_split_shut():
   cells_train = {tuple(c) for c in np.floor(reduced_x[train] / 1.0)}
   cells_test = {tuple(c) for c in np.floor(reduced_x[test] / 1.0)}
   assert not (cells_train & cells_test)
+
+
+# -- scoring ----------------------------------------------------------------
+
+
+class _Calibrated:
+  """A stand-in map with a spread we control, to test the coverage measure."""
+
+  def __init__(self, bias, spread):
+    self.bias = bias
+    self.spread = spread
+
+  def predict(self, points, with_std=False, observation_noise=False):
+    elevation = np.full(len(points), self.bias)
+    if not with_std:
+      return elevation
+    return elevation, np.full(len(points), self.spread)
+
+
+def test_calibration_counts_what_lands_inside_the_interval():
+  points = np.zeros((1000, 2))
+  truth = np.random.default_rng(0).normal(size=1000)
+  test = np.ones(1000, dtype=bool)
+
+  # Spread matching the truth's own: about 95% should land inside 1.96 sigma.
+  honest = calibration(_Calibrated(0.0, 1.0), points, truth, test)
+  assert 0.93 < honest < 0.97, honest
+
+
+def test_calibration_exposes_an_overconfident_map():
+  """The failure the measure exists to catch.
+
+  A map that understates its spread scores well on rmse and badly here, which
+  is the combination that would make a filter trusting it too sure of itself.
+  """
+  points = np.zeros((1000, 2))
+  truth = np.random.default_rng(1).normal(size=1000)
+  test = np.ones(1000, dtype=bool)
+
+  assert calibration(_Calibrated(0.0, 0.25), points, truth, test) < 0.6
+
+
+def test_calibration_exposes_an_underconfident_map():
+  points = np.zeros((500, 2))
+  truth = np.random.default_rng(2).normal(size=500)
+  test = np.ones(500, dtype=bool)
+
+  assert calibration(_Calibrated(0.0, 8.0), points, truth, test) > 0.99
+
+
+def test_score_returns_the_rmse_it_printed(capsys):
+  """So a caller comparing two maps need not predict all over again."""
+  rng = np.random.default_rng(3)
+  points = rng.uniform(-10.0, 10.0, size=(200, 2))
+  truth = np.full(200, -60.0)
+
+  train = np.zeros(200, dtype=bool)
+  train[:150] = True
+  test = ~train
+
+  returned = score(_Calibrated(-60.0, 1.0), points, truth, train, test)
+
+  assert returned == pytest.approx(0.0, abs=1e-12)
+  assert "held out 50 soundings" in capsys.readouterr().out

@@ -14,6 +14,12 @@ dependencies = [
     "gpytorch",
     # BathymetryMap holds a StandardScaler, so loading a map needs sklearn.
     "scikit-learn",
+    # KDTree, for the octree's residuals and for the Vecchia map's ordering,
+    # neighbour sets and queries. It was already a runtime dependency through
+    # octree.py and merely absent from this list; the Vecchia map made that
+    # too load-bearing to leave undeclared. Imported lazily at the call sites,
+    # so the flake's pythonImportsCheck does not need it either way.
+    "scipy",
 ]
 
 [project.optional-dependencies]
