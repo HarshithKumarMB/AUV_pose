@@ -3,7 +3,9 @@
 Organised by causality:
 
 ``quaternion``
-    Rotation algebra.
+    Rotation algebra, including the exponential and logarithmic maps on SO(3).
+``manifold``
+    The navigation state, and the chart filters and smoothers work in.
 ``strapdown``
     Open-loop inertial propagation. No correction, no uncertainty.
 ``filters``
@@ -42,8 +44,17 @@ Quaternions
 from auv_pose.estimation.filters import (
   ConstantVelocityEKF,
   Filter,
+  gravity_trust,
   position,
   velocity,
+)
+from auv_pose.estimation.manifold import (
+  ManifoldGaussian,
+  NavState,
+  boxminus,
+  boxplus,
+  covariance_transport,
+  manifold_mean,
 )
 from auv_pose.estimation.quaternion import (
   GRAVITY,
@@ -51,16 +62,24 @@ from auv_pose.estimation.quaternion import (
   GRAVITY_NWU,
   quat_angle,
   quat_conjugate,
+  quat_exp,
   quat_from_gyro,
+  quat_log,
   quat_multiply,
   quat_normalize,
   quat_to_rotmat,
   rotmat_to_quat,
   skew,
+  so3_right_jacobian,
 )
-from auv_pose.estimation.smoothers import rts_smooth
+from auv_pose.estimation.smoothers import rts_smooth, unscented_rts_smooth
 from auv_pose.estimation.strapdown import StrapdownIntegrator
-from auv_pose.estimation.typing import GaussianState, Measurement, Step
+from auv_pose.estimation.typing import (
+  GaussianState,
+  Measurement,
+  SmootherStep,
+  Step,
+)
 
 __all__ = [
   "GRAVITY",
@@ -69,19 +88,30 @@ __all__ = [
   "ConstantVelocityEKF",
   "Filter",
   "GaussianState",
+  "ManifoldGaussian",
   "Measurement",
+  "NavState",
+  "SmootherStep",
   "Step",
   "StrapdownIntegrator",
+  "boxminus",
+  "boxplus",
+  "covariance_transport",
   "gravity_trust",
+  "manifold_mean",
   "position",
   "quat_angle",
   "quat_conjugate",
+  "quat_exp",
   "quat_from_gyro",
+  "quat_log",
   "quat_multiply",
   "quat_normalize",
   "quat_to_rotmat",
   "rotmat_to_quat",
   "rts_smooth",
   "skew",
+  "so3_right_jacobian",
+  "unscented_rts_smooth",
   "velocity",
 ]
