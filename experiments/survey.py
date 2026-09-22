@@ -164,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     default=0.0,
     help=(
       "track heading in degrees from world +x, held for the whole run. The "
-      "fan opens along body -y, so this rotates the swath with the track and "
+      "fan opens along body +y, so this rotates the swath with the track and "
       "keeps it across-track. Fly the same box at several headings -- 0 and 90 "
       "at least -- and fit the map on all of them: a pipeline shadows the "
       "seabed behind it from one direction and not from another"

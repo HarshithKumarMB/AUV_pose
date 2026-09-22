@@ -107,10 +107,36 @@ def singlebeam_sonar(
 #: reconstruction silently keeps using the old aim -- and a wrong swath sign
 #: mirrors the whole map across the track while still looking plausible.
 #:
-#: Measured against the octree: enumeration picked this pair, and a
-#: five-parameter fit moved it by 0.005 degrees.
+#: **The swath sign was wrong here until it was measured properly, and that is
+#: worth recording.** It read ``(0, -1, 0)``, justified as "enumeration picked
+#: this pair, and a five-parameter fit moved it by 0.005 degrees" -- a fit
+#: against the octree that optimised the *angle* to five decimal places while
+#: the sign was already reversed. A residual minimisation cannot find a mirror:
+#: over terrain that is roughly symmetric across the track, reflecting the fan
+#: barely changes the residual, so the optimiser has nothing to pull on.
+#:
+#: What finds it is sweeping the same patch on two **perpendicular** headings
+#: and asking whether the two reconstructions agree --
+#: ``experiments/check_beam_geometry.py``. Note perpendicular, not opposite: a
+#: 180 degree yaw maps the mirrored fan exactly onto the true one, so a half
+#: turn is blind to this by construction.
+#:
+#: Measured with that test, median disagreement between headings:
+#:
+#: =========  ==============  ==============
+#: altitude   ``(0, -1, 0)``  ``(0, +1, 0)``
+#: =========  ==============  ==============
+#: 24.7 m     1.803 m         0.058 m
+#: 44.7 m     1.233 m         0.060 m
+#: 69.3 m     1.227 m         0.074 m
+#: =========  ==============  ==============
+#:
+#: The flipped column sits below the sonar's own 0.0996 m range quantisation at
+#: every altitude. Every survey reconstructed before this was mirrored across
+#: its own track, which showed up as adjacent survey lines disagreeing by a
+#: median of 3.4 m while soundings within one line agreed to 0.000 m.
 PROFILER_NADIR_AXIS = (0.0, 0.0, 1.0)
-PROFILER_SWATH_AXIS = (0.0, -1.0, 0.0)
+PROFILER_SWATH_AXIS = (0.0, 1.0, 0.0)
 
 
 def profiling_sonar(
