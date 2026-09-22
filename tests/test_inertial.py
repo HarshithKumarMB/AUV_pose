@@ -1,0 +1,521 @@
+"""The IMU motion model and the uncertainty it injects.
+
+The Monte-Carlo test at the bottom is the one that matters. Every structural
+check above it -- symmetry, positive-definiteness, growth with sample count --
+passes just as happily with a transposed Jacobian or a sign wrong in the
+rotation-to-velocity coupling. Sampling the actual noisy propagation and
+comparing the empirical covariance to the analytic one does not.
+"""
+
+from itertools import pairwise
+
+import numpy as np
+
+from auv_pose.estimation.inertial import (
+  ImuNoise,
+  ImuSamples,
+  imu_noise_covariance,
+  propagate,
+)
+from auv_pose.estimation.manifold import (
+  ACCEL_BIAS,
+  DOF,
+  GYRO_BIAS,
+  POSITION,
+  ROTATION,
+  VELOCITY,
+  NavState,
+)
+from auv_pose.estimation.quaternion import (
+  GRAVITY_NWU,
+  quat_angle,
+  quat_exp,
+  quat_normalize,
+  quat_to_rotmat,
+)
+from auv_pose.estimation.strapdown import StrapdownIntegrator
+
+RATE = 30.0
+DT = 1.0 / RATE
+
+
+def resting_samples(state, k=6, gravity=GRAVITY_NWU):
+  """What a motionless vehicle's IMU reports: no rotation, gravity only.
+
+  An accelerometer measures specific force ``f = a - g``, so at rest it reads
+  ``-g`` rotated into the body frame.
+  """
+  specific_force = -quat_to_rotmat(state.attitude).T @ np.asarray(gravity)
+  return ImuSamples.uniform(
+    gyro=np.zeros((k, 3)), accel=np.tile(specific_force, (k, 1)), dt=DT
+  )
+
+
+# -- propagation ------------------------------------------------------------
+
+
+def test_a_resting_vehicle_stays_at_rest():
+  """The single test that catches a gravity sign slip.
+
+  ``estimation/__init__.py`` documents that choosing the wrong gravity vector
+  does not announce itself -- a z-down body reading cancels a z-down gravity
+  vector exactly. Here the world is z-up, so the reading and the gravity must
+  disagree in sign for the vehicle to stay put.
+  """
+  start = NavState.at_rest(position=np.array([10.0, -5.0, -65.0]))
+  moved = propagate(start, resting_samples(start, k=30))
+
+  np.testing.assert_allclose(moved.position, start.position, atol=1e-12)
+  np.testing.assert_allclose(moved.velocity, np.zeros(3), atol=1e-12)
+  assert quat_angle(moved.attitude, start.attitude) < 1e-15
+
+
+def test_a_resting_tilted_vehicle_also_stays_at_rest():
+  """Same, with the gravity vector no longer along a body axis."""
+  start = NavState.at_rest(attitude=quat_exp(np.array([0.3, -0.2, 1.1])))
+  moved = propagate(start, resting_samples(start, k=30))
+
+  np.testing.assert_allclose(moved.velocity, np.zeros(3), atol=1e-12)
+  np.testing.assert_allclose(moved.position, start.position, atol=1e-12)
+
+
+def test_free_fall_accelerates_at_gravity():
+  """A zero accelerometer reading is free fall, not rest."""
+  start = NavState.at_rest()
+  samples = ImuSamples.uniform(
+    gyro=np.zeros((30, 3)), accel=np.zeros((30, 3)), dt=DT
+  )
+  moved = propagate(start, samples)
+
+  np.testing.assert_allclose(moved.velocity, GRAVITY_NWU * 1.0, atol=1e-12)
+
+
+def test_a_constant_body_rate_integrates_to_the_closed_form_angle():
+  rate = np.array([0.0, 0.0, 0.7])
+  start = NavState.at_rest()
+  samples = ImuSamples.uniform(
+    gyro=np.tile(rate, (30, 1)), accel=np.zeros((30, 3)), dt=DT
+  )
+
+  moved = propagate(start, samples)
+  assert quat_angle(moved.attitude, quat_exp(rate * 1.0)) < 1e-12
+
+
+def test_the_gyro_bias_is_subtracted_from_the_rate():
+  bias = np.array([0.0, 0.0, 0.2])
+  start = NavState.at_rest()._replace(gyro_bias=bias)
+  samples = ImuSamples.uniform(
+    gyro=np.tile(bias, (30, 1)), accel=np.zeros((30, 3)), dt=DT
+  )
+
+  # The gyro reads exactly the bias, so the true rate is zero.
+  moved = propagate(start, samples)
+  assert quat_angle(moved.attitude, start.attitude) < 1e-14
+
+
+def test_the_accel_bias_is_subtracted_from_the_specific_force():
+  bias = np.array([0.1, -0.2, 0.3])
+  start = NavState.at_rest()._replace(accel_bias=bias)
+  reading = -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU + bias
+
+  samples = ImuSamples.uniform(
+    gyro=np.zeros((30, 3)), accel=np.tile(reading, (30, 1)), dt=DT
+  )
+  moved = propagate(start, samples)
+  np.testing.assert_allclose(moved.velocity, np.zeros(3), atol=1e-12)
+
+
+def test_the_biases_are_held_through_propagation():
+  """Their random walk has no mean, so it belongs in the covariance."""
+  start = NavState.at_rest()._replace(
+    gyro_bias=np.array([1.0, 2.0, 3.0]), accel_bias=np.array([4.0, 5.0, 6.0])
+  )
+  moved = propagate(start, resting_samples(start))
+
+  np.testing.assert_array_equal(moved.gyro_bias, start.gyro_bias)
+  np.testing.assert_array_equal(moved.accel_bias, start.accel_bias)
+
+
+def test_propagating_together_matches_propagating_one_at_a_time():
+  rng = np.random.default_rng(0)
+  start = NavState.at_rest(velocity=np.array([1.0, 0.5, -0.2]))
+  samples = ImuSamples.uniform(
+    gyro=rng.normal(size=(8, 3)) * 0.2,
+    accel=rng.normal(size=(8, 3)) * 0.5 + np.array([0.0, 0.0, 9.81]),
+    dt=DT,
+  )
+
+  together = propagate(start, samples)
+
+  apart = start
+  for i in range(len(samples)):
+    apart = propagate(
+      apart,
+      ImuSamples.uniform(samples.gyro[i], samples.accel[i], DT),
+    )
+
+  np.testing.assert_allclose(apart.position, together.position, atol=1e-12)
+  np.testing.assert_allclose(apart.velocity, together.velocity, atol=1e-12)
+  assert quat_angle(apart.attitude, together.attitude) < 1e-14
+
+
+def test_without_rotation_it_differs_from_strapdown_only_by_the_integrator():
+  """Strapdown is semi-implicit Euler; this is second order.
+
+  With the gyro silent the *only* difference is that strapdown does
+  ``p += v' dt`` where this does ``p += v dt + a dt^2 / 2``, so the gap is
+  exactly ``dt^2 a / 2`` per sample. Pinning it keeps the two from drifting
+  apart for any other reason.
+  """
+  rng = np.random.default_rng(1)
+  accel = rng.normal(size=(20, 3)) * 0.3 + np.array([0.0, 0.0, 9.81])
+  gyro = np.zeros((20, 3))
+
+  start = NavState.at_rest(velocity=np.array([0.7, -0.3, 0.1]))
+  mine = propagate(start, ImuSamples.uniform(gyro, accel, DT))
+
+  integrator = StrapdownIntegrator(
+    position=start.position,
+    attitude=start.attitude,
+    velocity=start.velocity,
+    gravity=GRAVITY_NWU,
+  )
+  offset = np.zeros(3)
+  for sample_gyro, sample_accel in zip(gyro, accel):
+    world_accel = integrator.step(sample_gyro, sample_accel, DT)
+    offset += 0.5 * DT**2 * world_accel
+
+  np.testing.assert_allclose(integrator.velocity, mine.velocity, atol=1e-12)
+  np.testing.assert_allclose(
+    integrator.position - offset, mine.position, atol=1e-12
+  )
+
+
+def test_under_rotation_it_also_differs_from_strapdown_in_attitude_timing():
+  """A second, separate difference, worth knowing about before comparing runs.
+
+  ``StrapdownIntegrator.step`` advances the attitude *first* and then rotates
+  the accelerometer reading with the new one. The paper's equations use the
+  rotation at the start of the interval, ``v' = v + dt (R (a - b_a) + g)``, so
+  the two disagree at first order in ``dt * omega`` whenever the vehicle is
+  turning -- on top of the position-integrator offset above.
+
+  This is not a bug in either. It does mean the smoother and the dead-reckoning
+  baseline are not bit-comparable under rotation, and a discrepancy between
+  them of this size is expected rather than a symptom.
+  """
+  rate = np.array([0.0, 0.0, 0.8])
+  # The lateral component matters: a specific force parallel to the rotation
+  # axis is unmoved by the rotation, and the two integrators would agree by
+  # construction rather than by being equivalent.
+  accel = np.tile([0.5, -0.3, 9.81], (20, 1))
+
+  start = NavState.at_rest(velocity=np.array([1.0, 0.0, 0.0]))
+  mine = propagate(start, ImuSamples.uniform(np.tile(rate, (20, 1)), accel, DT))
+
+  integrator = StrapdownIntegrator(
+    position=start.position,
+    attitude=start.attitude,
+    velocity=start.velocity,
+    gravity=GRAVITY_NWU,
+  )
+  for sample_accel in accel:
+    integrator.step(rate, sample_accel, DT)
+
+  # Same attitude -- that part of the model is shared.
+  assert quat_angle(integrator.attitude, mine.attitude) < 1e-12
+  # But the velocities differ, and by more than the position integrator could
+  # ever explain, because that one does not touch velocity at all.
+  assert np.linalg.norm(integrator.velocity - mine.velocity) > 1e-3
+
+
+# -- the noise covariance, structurally -------------------------------------
+
+
+def test_the_covariance_is_symmetric_and_positive_semidefinite():
+  start = NavState.at_rest()
+  cov = imu_noise_covariance(start, resting_samples(start, k=30))
+
+  np.testing.assert_allclose(cov, cov.T, atol=1e-18)
+  assert np.min(np.linalg.eigvalsh(cov)) > -1e-18
+
+
+def test_a_noiseless_imu_adds_nothing():
+  start = NavState.at_rest()
+  cov = imu_noise_covariance(
+    start,
+    resting_samples(start, k=30),
+    ImuNoise(gyro=0.0, accel=0.0, gyro_bias=0.0, accel_bias=0.0),
+  )
+  np.testing.assert_array_equal(cov, np.zeros((DOF, DOF)))
+
+
+def test_the_covariance_grows_with_every_sample():
+  start = NavState.at_rest()
+  traces = [
+    np.trace(imu_noise_covariance(start, resting_samples(start, k=k)))
+    for k in (1, 5, 10, 30)
+  ]
+  assert all(a < b for a, b in pairwise(traces))
+
+
+def test_the_bias_blocks_are_exactly_the_random_walk():
+  """Nothing feeds back into a bias, so its variance is ``sigma^2 k``."""
+  noise = ImuNoise()
+  start = NavState.at_rest()
+  k = 17
+  cov = imu_noise_covariance(start, resting_samples(start, k=k), noise)
+
+  np.testing.assert_allclose(
+    cov[GYRO_BIAS, GYRO_BIAS], noise.gyro_bias**2 * k * np.eye(3), atol=1e-20
+  )
+  np.testing.assert_allclose(
+    cov[ACCEL_BIAS, ACCEL_BIAS],
+    noise.accel_bias**2 * k * np.eye(3),
+    atol=1e-20,
+  )
+
+
+def test_the_position_block_scales_as_dt_to_the_fourth():
+  """The check that the second-order position update reached the Jacobians.
+
+  Position picks up the accelerometer noise through a ``dt^2 / 2`` term, so its
+  variance goes as ``dt^4``. Leaving those Jacobian entries at zero -- the easy
+  mistake -- still runs, and merely reports a position it is too sure of.
+  """
+  start = NavState.at_rest()
+  noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
+
+  def position_variance(dt):
+    force = -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU
+    samples = ImuSamples.uniform(np.zeros(3), force, dt)
+    return np.trace(
+      imu_noise_covariance(start, samples, noise)[POSITION, POSITION]
+    )
+
+  base = position_variance(1e-3)
+  doubled = position_variance(2e-3)
+
+  assert base > 0.0
+  np.testing.assert_allclose(doubled / base, 16.0, rtol=1e-9)
+
+
+def test_the_velocity_block_scales_as_dt_squared():
+  start = NavState.at_rest()
+  noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
+
+  def velocity_variance(dt):
+    force = -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU
+    samples = ImuSamples.uniform(np.zeros(3), force, dt)
+    return np.trace(
+      imu_noise_covariance(start, samples, noise)[VELOCITY, VELOCITY]
+    )
+
+  np.testing.assert_allclose(
+    velocity_variance(2e-3) / velocity_variance(1e-3), 4.0, rtol=1e-9
+  )
+
+
+def test_gyro_noise_leaks_into_velocity_through_gravity():
+  """An attitude error tilts the gravity vector, which is a false acceleration.
+
+  This is the ``g sin(theta)`` leak, and it only exists if the
+  rotation-to-velocity Jacobian is wired up. Gyro noise alone, with a perfect
+  accelerometer, must still put variance in velocity.
+  """
+  start = NavState.at_rest()
+  cov = imu_noise_covariance(
+    start,
+    resting_samples(start, k=30),
+    ImuNoise(gyro=0.01, accel=0.0, gyro_bias=0.0, accel_bias=0.0),
+  )
+  assert np.trace(cov[VELOCITY, VELOCITY]) > 0.0
+  assert np.trace(cov[POSITION, POSITION]) > 0.0
+
+
+# -- the noise covariance, against sampling ---------------------------------
+#
+# These sample the noisy propagation directly and compare the empirical
+# covariance to the analytic recursion. Two deliberate choices:
+#
+# The model is written out again here rather than calling ``propagate``, so
+# this stays an independent statement of the paper's equations rather than a
+# rearrangement of the code it is checking.
+#
+# It is written with **rotation matrices**, not quaternions, and vectorised
+# across trials. Being a different representation from the one under test, a
+# convention error in the quaternion algebra cannot cancel itself out; being
+# vectorised, 20k trials cost a second rather than the thirty-five a per-trial
+# Python loop took.
+
+
+def batch_exp(rotvec):
+  """Rodrigues, batched over the leading axis. ``(n, 3) -> (n, 3, 3)``."""
+  theta = np.linalg.norm(rotvec, axis=-1)[:, None]
+  # The rotations here are noise-sized, so guard the axis rather than branch.
+  axis = rotvec / np.where(theta > 0.0, theta, 1.0)
+
+  K = np.zeros((len(rotvec), 3, 3))
+  K[:, 0, 1], K[:, 0, 2] = -axis[:, 2], axis[:, 1]
+  K[:, 1, 0], K[:, 1, 2] = axis[:, 2], -axis[:, 0]
+  K[:, 2, 0], K[:, 2, 1] = -axis[:, 1], axis[:, 0]
+
+  theta = theta[:, :, None]
+  return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+
+
+def batch_log(rotations):
+  """Inverse of :func:`batch_exp` for small rotations. ``(n,3,3) -> (n,3)``."""
+  vee = (
+    np.stack(
+      [
+        rotations[:, 2, 1] - rotations[:, 1, 2],
+        rotations[:, 0, 2] - rotations[:, 2, 0],
+        rotations[:, 1, 0] - rotations[:, 0, 1],
+      ],
+      axis=-1,
+    )
+    / 2.0
+  )
+  # |vee| is sin(theta); these are noise-sized rotations, far from pi/2.
+  norm = np.linalg.norm(vee, axis=-1)
+  scale = np.where(norm > 1e-12, np.arcsin(np.clip(norm, 0.0, 1.0)), norm)
+  return vee * (scale / np.where(norm > 0.0, norm, 1.0))[:, None]
+
+
+def sample_errors(state, samples, noise, rng, trials, gravity=GRAVITY_NWU):
+  """Error states of ``trials`` noisy propagations, against the noise-free one.
+
+  The paper's equations with the noise terms left in::
+
+      R' = R exp(dt (w - b_g - eta_g))
+      v' = v + dt (R (a - b_a - eta_a) + g)
+      p' = p + dt v + (dt^2 / 2) (R (a - b_a - eta_a) + g)
+      b'  = b + eta_b
+
+  :return: ``(trials, 15)`` error states, in the chart of
+      :mod:`auv_pose.estimation.manifold`.
+  """
+  position = np.tile(state.position, (trials, 1))
+  velocity = np.tile(state.velocity, (trials, 1))
+  rotation = np.tile(quat_to_rotmat(state.attitude), (trials, 1, 1))
+  gyro_bias = np.tile(state.gyro_bias, (trials, 1))
+  accel_bias = np.tile(state.accel_bias, (trials, 1))
+
+  for gyro, accel, dt in zip(samples.gyro, samples.accel, samples.dt):
+    eta_gyro = rng.normal(scale=noise.gyro, size=(trials, 3))
+    eta_accel = rng.normal(scale=noise.accel, size=(trials, 3))
+
+    force = accel - accel_bias - eta_accel
+    acceleration = np.einsum("nij,nj->ni", rotation, force) + gravity
+
+    position = position + dt * velocity + 0.5 * dt**2 * acceleration
+    velocity = velocity + dt * acceleration
+    rotation = rotation @ batch_exp((gyro - gyro_bias - eta_gyro) * dt)
+
+    gyro_bias = gyro_bias + rng.normal(scale=noise.gyro_bias, size=(trials, 3))
+    accel_bias = accel_bias + rng.normal(
+      scale=noise.accel_bias, size=(trials, 3)
+    )
+
+  nominal = propagate(state, samples, gravity)
+  nominal_rotation = quat_to_rotmat(nominal.attitude)
+
+  return np.concatenate(
+    [
+      position - nominal.position,
+      batch_log(nominal_rotation.T @ rotation),
+      velocity - nominal.velocity,
+      gyro_bias - nominal.gyro_bias,
+      accel_bias - nominal.accel_bias,
+    ],
+    axis=-1,
+  )
+
+
+def turning_case():
+  """A turning, accelerating second, so no Jacobian block is only at zero."""
+  start = NavState.at_rest(
+    attitude=quat_normalize(np.array([0.9, 0.1, -0.2, 0.3])),
+    velocity=np.array([0.6, -0.2, 0.05]),
+  )
+  k = 30
+  samples = ImuSamples.uniform(
+    gyro=np.tile([0.15, -0.1, 0.25], (k, 1)),
+    accel=np.tile(
+      -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU + [0.4, -0.3, 0.2],
+      (k, 1),
+    ),
+    dt=DT,
+  )
+  return start, samples
+
+
+def normalised(cov, reference):
+  """``cov`` in units of ``reference``'s standard deviations.
+
+  The blocks span metres and microradians, so an elementwise relative
+  tolerance on the raw matrices would be measuring the Monte-Carlo sampling
+  error on the near-zero off-diagonals and nothing else.
+  """
+  scale = np.sqrt(np.outer(np.diag(reference), np.diag(reference)))
+  return cov / scale
+
+
+def test_the_covariance_matches_the_noise_it_claims_to_model():
+  """Monte Carlo against the analytic recursion, over all fifteen states.
+
+  This is the test that validates the Jacobians. A transposed block or a sign
+  wrong in the rotation-to-velocity coupling leaves every structural check
+  above it passing and fails here.
+  """
+  rng = np.random.default_rng(7)
+  noise = ImuNoise(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
+  start, samples = turning_case()
+
+  errors = sample_errors(start, samples, noise, rng, trials=20000)
+  analytic = imu_noise_covariance(start, samples, noise)
+
+  np.testing.assert_allclose(
+    normalised(np.cov(errors, rowvar=False), analytic),
+    normalised(analytic, analytic),
+    atol=0.06,
+  )
+
+
+def test_the_sampled_error_is_centred():
+  """A biased propagation would make the covariance above meaningless."""
+  rng = np.random.default_rng(8)
+  noise = ImuNoise(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
+  start, samples = turning_case()
+
+  errors = sample_errors(start, samples, noise, rng, trials=20000)
+
+  mean = errors.mean(axis=0)
+  standard_error = errors.std(axis=0) / np.sqrt(len(errors))
+  assert np.all(np.abs(mean) < 4.0 * standard_error + 1e-12)
+
+
+def test_the_rotation_block_alone_matches_sampling():
+  """Isolated, because it is the block a right-versus-left mix-up breaks.
+
+  With the accelerometer silent, nothing but the gyro and its bias can put
+  variance here, so the comparison is against the attitude Jacobians alone.
+  """
+  rng = np.random.default_rng(9)
+  noise = ImuNoise(gyro=0.05, accel=0.0, gyro_bias=5e-3, accel_bias=0.0)
+
+  start = NavState.at_rest(attitude=quat_exp(np.array([0.2, -0.4, 0.9])))
+  k = 30
+  samples = ImuSamples.uniform(
+    gyro=np.tile([0.3, 0.2, -0.4], (k, 1)), accel=np.zeros((k, 3)), dt=DT
+  )
+
+  errors = sample_errors(start, samples, noise, rng, trials=20000)[:, ROTATION]
+  analytic = imu_noise_covariance(start, samples, noise)[ROTATION, ROTATION]
+
+  np.testing.assert_allclose(
+    normalised(np.cov(errors, rowvar=False), analytic),
+    normalised(analytic, analytic),
+    atol=0.04,
+  )
