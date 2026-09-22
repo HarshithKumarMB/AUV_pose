@@ -35,8 +35,10 @@ from auv_pose.mapping.vecchia import (
   VecchiaStructure,
   build_structure,
   design_matrix,
+  draw,
   fit_vecchia,
   initial_hyperparameters,
+  sparse_factor,
   vecchia_loglik,
   vecchia_reml,
   whiten,
@@ -1222,3 +1224,139 @@ def test_the_survey_tree_is_built_once_and_kept():
   fitted.predict([[0.0, 0.0]])
   fitted.mean_gradient([[0.0, 0.0]])
   assert fitted.tree is first
+
+
+# -- the explicit sparse factor, and drawing from it -------------------------
+
+
+def test_the_factor_applies_like_whiten():
+  """The pin on ``sparse_factor``.
+
+  ``whiten`` applies ``U^T`` without ever forming ``U``, by a different route
+  -- a triangular solve against each block. If the assembled matrix is right,
+  multiplying by it must give the same answer. Two independent derivations of
+  the same operator, which is the only reason either is trustworthy.
+  """
+  points, residual = survey(400, 60)
+  structure = build_structure(points, m=12, n0=20)
+
+  noise = torch.tensor(0.3, dtype=torch.float64)
+  values = torch.tensor(residual[structure.order], dtype=torch.float64)
+
+  expected, _ = whiten(structure, values, LOG_AMPLITUDE, LOG_LENGTHSCALE, noise)
+  factor = sparse_factor(structure, LOG_AMPLITUDE, LOG_LENGTHSCALE, noise)
+
+  np.testing.assert_allclose(
+    factor.T @ values.numpy(), expected.numpy(), rtol=1e-9, atol=1e-9
+  )
+
+
+def test_the_factor_is_upper_triangular():
+  """The Vecchia condition, read off the matrix itself."""
+  points, _ = survey(300, 61)
+  structure = build_structure(points, m=10, n0=16)
+
+  factor = sparse_factor(
+    structure, LOG_AMPLITUDE, LOG_LENGTHSCALE, torch.tensor(0.2)
+  ).tocoo()
+
+  assert np.all(factor.row <= factor.col)
+  assert np.all(np.asarray(factor.tocsc().diagonal()) > 0.0)
+
+
+def test_the_factor_inverts_the_kernel_when_it_conditions_on_everything():
+  """``U U^T = K^-1`` exactly, once nothing is approximated away."""
+  n = 45
+  points, _ = survey(n, 62, spread=12.0)
+  structure = build_structure(points, m=n - 1, n0=n - 1)
+
+  noise = 0.4
+  factor = sparse_factor(
+    structure,
+    LOG_AMPLITUDE,
+    LOG_LENGTHSCALE,
+    torch.tensor(noise, dtype=torch.float64),
+    jitter=0.0,
+  )
+
+  ordered = torch.tensor(structure.points, dtype=torch.float64)
+  kernel = matern52(ordered, ordered, LOG_AMPLITUDE, LOG_LENGTHSCALE).numpy()
+  kernel = kernel + noise * np.eye(n)
+
+  dense = factor.toarray()
+  np.testing.assert_allclose(
+    dense @ dense.T, np.linalg.inv(kernel), rtol=1e-7, atol=1e-9
+  )
+
+
+def test_draws_have_the_covariance_they_should():
+  """Monte Carlo against the kernel the draw was asked for.
+
+  This is what makes the generator usable as a reference: it validates the
+  covariance of what comes out, not merely that something came out.
+  """
+  n = 60
+  points, _ = survey(n, 63, spread=15.0)
+  structure = build_structure(points, m=n - 1, n0=n - 1)
+
+  noise = 0.25
+  samples = draw(
+    structure,
+    LOG_AMPLITUDE,
+    LOG_LENGTHSCALE,
+    torch.tensor(noise, dtype=torch.float64),
+    count=40000,
+    seed=7,
+    jitter=0.0,
+  )
+
+  ordered = torch.tensor(structure.points, dtype=torch.float64)
+  expected = matern52(
+    ordered, ordered, LOG_AMPLITUDE, LOG_LENGTHSCALE
+  ).numpy() + noise * np.eye(n)
+
+  # Back into the structure's order to compare against its own kernel.
+  empirical = np.cov(samples[structure.order])
+
+  # Monte Carlo error on a covariance entry is ~ sigma_ii sigma_jj / sqrt(S).
+  scale = np.sqrt(np.outer(np.diag(expected), np.diag(expected)))
+  np.testing.assert_allclose(empirical / scale, expected / scale, atol=0.05)
+
+
+def test_a_draw_comes_back_in_the_callers_order():
+  """The permutation, which is silent and wrong-looking when inverted."""
+  points, _ = survey(200, 64)
+  structure = build_structure(points, m=10, n0=16)
+
+  values = draw(
+    structure,
+    LOG_AMPLITUDE,
+    LOG_LENGTHSCALE,
+    torch.tensor(0.2, dtype=torch.float64),
+    count=1,
+    seed=3,
+  )
+  assert values.shape == (200,)
+
+  # Nearby points must have similar values; that is only true in the right
+  # order. Compare the spread of differences between neighbours in the
+  # caller's frame against the spread over arbitrary pairs.
+  from scipy.spatial import KDTree
+
+  _, partner = KDTree(points).query(points, k=2)
+  close = np.abs(values - values[partner[:, 1]]).mean()
+  rng = np.random.default_rng(0)
+  far = np.abs(values - values[rng.permutation(len(values))]).mean()
+
+  assert close < 0.5 * far
+
+
+def test_the_draw_count_shapes_the_output():
+  points, _ = survey(80, 65)
+  structure = build_structure(points, m=8, n0=12)
+  noise = torch.tensor(0.2, dtype=torch.float64)
+
+  single = draw(structure, LOG_AMPLITUDE, LOG_LENGTHSCALE, noise, seed=1)
+  many = draw(structure, LOG_AMPLITUDE, LOG_LENGTHSCALE, noise, count=5, seed=1)
+  assert single.shape == (80,)
+  assert many.shape == (80, 5)

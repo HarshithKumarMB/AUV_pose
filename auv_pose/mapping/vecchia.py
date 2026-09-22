@@ -52,8 +52,10 @@ __all__ = [
   "VecchiaStructure",
   "build_structure",
   "design_matrix",
+  "draw",
   "fit_vecchia",
   "initial_hyperparameters",
+  "sparse_factor",
   "vecchia_loglik",
   "vecchia_reml",
   "whiten",
@@ -416,6 +418,185 @@ def whiten(
   # U_ii is the reciprocal of the conditional standard deviation, so the sum of
   # its logs is the negation of what the factors carry.
   return (whitened[:, 0] if flat else whitened), -log_diagonal
+
+
+def sparse_factor(
+  structure: VecchiaStructure,
+  log_amplitude: Tensor,
+  log_lengthscale: Tensor,
+  noise: Tensor,
+  jitter: float = DEFAULT_JITTER,
+  chunk: int = 8192,
+):
+  """Assemble ``U`` explicitly, the sparse factor with ``K^-1 = U U^T``.
+
+  The likelihood never needs this -- :func:`whiten` applies ``U^T`` without
+  forming it, which is the whole reason the fit is cheap. Drawing from the
+  model needs the opposite operation, ``solve(U^T, z)``, and a triangular solve
+  does need the entries.
+
+  :param structure: Ordering and conditioning sets.
+  :param log_amplitude: ``log(sigma_f^2)``, scalar.
+  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
+  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
+  :param jitter: Diagonal regulariser, relative to the amplitude.
+  :param chunk: Blocks factorised at once. Memory only.
+  :return: ``U`` as a ``scipy.sparse`` CSC matrix, shape ``(N, N)``, upper
+      triangular, in the **structure's** order.
+
+  Note:
+      Column ``i`` holds the coefficients of the ``i``-th conditional. Writing
+      ``w`` for the regression of sounding ``i`` on its conditioning set and
+      ``d`` for the conditional standard deviation, ``U[i, i] = 1/d`` and
+      ``U[g(i), i] = -w/d``, because the whitened residual is
+      ``(x_i - w' x_g) / d``. Both fall out of the block Cholesky that
+      :func:`whiten` already computes: with ``L`` over ``(g(i), i)``,
+      ``w = solve(L_gg^T, L[m, :m])`` and ``d = L[m, m]``.
+
+      The head block is the same statement for a dense exact factorisation:
+      ``K = L L^T`` gives ``K^-1 = L^-T L^-1``, so its corner of ``U`` is
+      ``L^-T``.
+  """
+  from scipy.sparse import csc_matrix
+
+  device, dtype = log_amplitude.device, log_amplitude.dtype
+  points = torch.as_tensor(structure.points, dtype=dtype, device=device)
+  noise = torch.as_tensor(noise, dtype=dtype, device=device).expand(
+    structure.size
+  )
+  floor = jitter * torch.exp(log_amplitude)
+
+  size, n0 = structure.size, structure.n0
+  rows: list[np.ndarray] = []
+  columns: list[np.ndarray] = []
+  values: list[np.ndarray] = []
+
+  head_points = points[:n0]
+  head = matern52(head_points, head_points, log_amplitude, log_lengthscale)
+  head = head + torch.diag(noise[:n0] + floor)
+  factor = _cholesky(head[None], "head block")[0]
+
+  # L^-T, by solving L^T X = I.
+  corner = torch.linalg.solve_triangular(
+    factor.T, torch.eye(n0, dtype=dtype, device=device), upper=True
+  )
+  corner = torch.triu(corner).cpu().numpy()
+
+  nonzero = np.nonzero(corner)
+  rows.append(nonzero[0])
+  columns.append(nonzero[1])
+  values.append(corner[nonzero])
+
+  if n0 < size:
+    neighbours = torch.as_tensor(
+      structure.neighbours[n0:], dtype=torch.long, device=device
+    )
+    tail = torch.arange(n0, size, device=device)
+    width = structure.conditioning
+
+    for start in range(0, len(tail), chunk):
+      block_rows = tail[start : start + chunk]
+      conditioning = neighbours[start : start + chunk]
+
+      block_points = _gather_block(points, conditioning, block_rows)
+      block_noise = _gather_block(noise, conditioning, block_rows)
+
+      kernel = matern52(
+        block_points, block_points, log_amplitude, log_lengthscale
+      )
+      kernel = kernel + torch.diag_embed(block_noise + floor)
+      factor = _cholesky(kernel, "conditioning block")
+
+      lower = factor[:, :width, :width]
+      cross = factor[:, width, :width].unsqueeze(-1)
+      deviation = factor[:, width, width]
+
+      weights = torch.linalg.solve_triangular(
+        lower.transpose(-1, -2), cross, upper=True
+      ).squeeze(-1)
+
+      reciprocal = 1.0 / deviation
+      off = (-weights * reciprocal[:, None]).cpu().numpy()
+
+      index = conditioning.cpu().numpy()
+      here = block_rows.cpu().numpy()
+
+      rows.append(index.ravel())
+      columns.append(np.repeat(here, width))
+      values.append(off.ravel())
+
+      rows.append(here)
+      columns.append(here)
+      values.append(reciprocal.cpu().numpy())
+
+  row = np.concatenate(rows)
+  column = np.concatenate(columns)
+  value = np.concatenate(values)
+
+  # Rows below n0 carry -1 padding in `neighbours`; those entries are not part
+  # of any conditioning set and must not reach the matrix.
+  keep = row >= 0
+  return csc_matrix(
+    (value[keep], (row[keep], column[keep])), shape=(size, size)
+  )
+
+
+def draw(
+  structure: VecchiaStructure,
+  log_amplitude: Tensor,
+  log_lengthscale: Tensor,
+  noise: Tensor,
+  count: int = 1,
+  seed: int | None = None,
+  jitter: float = DEFAULT_JITTER,
+  chunk: int = 8192,
+) -> np.ndarray:
+  """Draw realisations of the field at the structure's points.
+
+  :param structure: Ordering and conditioning sets.
+  :param log_amplitude: ``log(sigma_f^2)``, scalar.
+  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
+  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
+  :param count: How many independent realisations.
+  :param seed: Seed for the white noise.
+  :param jitter: Diagonal regulariser, relative to the amplitude.
+  :param chunk: Blocks factorised at once. Memory only.
+  :return: Shape ``(N,)`` when ``count`` is 1, else ``(N, count)``, in the
+      **caller's** order -- the inverse of ``structure.order``, so it lines up
+      with whatever positions were handed to :func:`build_structure`.
+
+  Note:
+      ``x = U^-T z`` for white ``z`` has covariance ``U^-T U^-1 = K``, so one
+      sparse triangular solve is the whole draw.
+
+  Note:
+      **What this is for, and the trap in it.** A draw from a field whose
+      hyperparameters are known is the only way to ask whether a fit *recovers*
+      them, as opposed to merely converging. But generating and fitting with
+      the same conditioning set is circular -- the data is then an exact sample
+      from the model being fitted, and recovery tests the optimiser rather than
+      the approximation. Generate with a conditioning set several times larger
+      than the one being tested.
+  """
+  from scipy.sparse.linalg import spsolve_triangular
+
+  factor = sparse_factor(
+    structure,
+    log_amplitude,
+    log_lengthscale,
+    noise,
+    jitter=jitter,
+    chunk=chunk,
+  )
+
+  generator = np.random.default_rng(seed)
+  white = generator.standard_normal((structure.size, count))
+
+  ordered = spsolve_triangular(factor.T.tocsr(), white, lower=True)
+
+  result = np.empty_like(ordered)
+  result[structure.order] = ordered
+  return result[:, 0] if count == 1 else result
 
 
 def vecchia_loglik(
