@@ -206,3 +206,105 @@ def test_it_rejects_a_nonsense_conditioning_size():
     except ValueError:
       continue
     raise AssertionError(f"expected a ValueError for m={m}")
+
+
+# -- mixed near/far conditioning --------------------------------------------
+
+
+def test_all_nearest_is_the_default():
+  """`near=m` must reproduce the plain nearest-neighbour sets exactly."""
+  points = scatter(400, 20)
+  np.testing.assert_array_equal(
+    ordered_neighbours(points, m=10),
+    ordered_neighbours(points, m=10, near=10),
+  )
+
+
+def test_the_nearest_part_is_still_exactly_nearest():
+  """Splitting the set must not disturb the neighbours it does keep."""
+  points = scatter(500, 21)
+  reference = brute_force_neighbours(points, m=6)
+  mixed = ordered_neighbours(points, m=10, near=6)
+
+  # The first `near` columns are the nearest, in the same order.
+  np.testing.assert_array_equal(mixed[:, :6], reference)
+
+
+def test_the_far_points_are_predecessors_and_distinct():
+  """The Vecchia condition still has to hold for the spread members."""
+  points = scatter(600, 22)
+  neighbours = ordered_neighbours(points, m=12, near=8)
+
+  for i, row in enumerate(neighbours):
+    present = row[row >= 0]
+    assert np.all(present < i)
+    assert len(np.unique(present)) == len(present)
+
+
+def test_the_far_points_really_are_further_away():
+  """The property the design exists for.
+
+  Averaged over rows with a full conditioning set, the spread members must sit
+  substantially further from the point than the nearest members do. Without
+  this the change is cosmetic.
+  """
+  points = scatter(800, 23)
+  near, m = 8, 12
+  neighbours = ordered_neighbours(points, m=m, near=near)
+
+  close, distant = [], []
+  for i in range(200, len(points)):
+    row = neighbours[i]
+    close.append(np.linalg.norm(points[row[:near]] - points[i], axis=1).mean())
+    spread = row[near:]
+    spread = spread[spread >= 0]
+    distant.append(np.linalg.norm(points[spread] - points[i], axis=1).mean())
+
+  assert np.mean(distant) > 5.0 * np.mean(close)
+
+
+def test_the_conditioning_set_stays_full():
+  """A collision with the nearest set must not silently shrink the row."""
+  points = scatter(700, 24)
+  neighbours = ordered_neighbours(points, m=15, near=10)
+
+  for i in range(15, len(points)):
+    assert (neighbours[i] >= 0).sum() == 15
+
+
+def test_it_is_deterministic():
+  points = scatter(300, 25)
+  first = ordered_neighbours(points, m=10, near=7)
+  second = ordered_neighbours(points.copy(), m=10, near=7)
+  np.testing.assert_array_equal(first, second)
+
+
+def test_the_block_size_still_does_not_change_the_answer():
+  points = scatter(400, 26)
+  reference = ordered_neighbours(points, m=10, near=7, block=4096)
+
+  for block in (1, 7, 64, 333):
+    np.testing.assert_array_equal(
+      ordered_neighbours(points, m=10, near=7, block=block), reference
+    )
+
+
+def test_it_rejects_a_nonsense_split():
+  points = scatter(50, 27)
+  for near in (0, -1, 11):
+    try:
+      ordered_neighbours(points, m=10, near=near)
+    except ValueError:
+      continue
+    raise AssertionError(f"expected a ValueError for near={near}")
+
+
+def test_the_head_still_takes_everything_it_can():
+  """Early rows have too few predecessors to split; they take all of them."""
+  points = scatter(60, 28)
+  neighbours = ordered_neighbours(points, m=12, near=8)
+
+  for i in range(1, 12):
+    present = neighbours[i][neighbours[i] >= 0]
+    assert len(present) == i
+    np.testing.assert_array_equal(np.sort(present), np.arange(i))

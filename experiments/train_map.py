@@ -135,6 +135,18 @@ def parse_args() -> argparse.Namespace:
     help="Vecchia conditioning-set size; the paper's m",
   )
   parser.add_argument(
+    "--near",
+    type=int,
+    default=None,
+    metavar="M_NEAR",
+    help=(
+      "how many of --conditioning are nearest neighbours; the rest are "
+      "spread across the ordering. Default is all nearest. Stein, Chi and "
+      "Welty (2004) find all-nearest the worst design for estimating a "
+      "range parameter under a linear mean, and this map has one"
+    ),
+  )
+  parser.add_argument(
     "--steps", type=int, default=300, help="Vecchia optimiser steps"
   )
   parser.add_argument("--batch-size", type=int, default=5000)
@@ -372,9 +384,14 @@ def main() -> None:
       rmse["svgp"] = score(svgp, X, y, train, test)
 
   if args.method in ("vecchia", "both"):
+    split = (
+      "all nearest"
+      if args.near is None
+      else f"{args.near} nearest + {args.conditioning - args.near} spread"
+    )
     print(
       f"Fitting Vecchia on {int(train.sum())} soundings: "
-      f"m={args.conditioning}, {args.steps} steps"
+      f"m={args.conditioning} ({split}), {args.steps} steps"
     )
     vecchia = fit_vecchia(
       X[train].astype(np.float64),
@@ -382,6 +399,7 @@ def main() -> None:
       m=args.conditioning,
       steps=args.steps,
       device=args.device,
+      near=args.near,
     )
 
     print(f"  fitted on {vecchia.fit_device}")

@@ -123,6 +123,7 @@ def build_structure(
   m: int = 30,
   n0: int | None = None,
   first: int | None = None,
+  near: int | None = None,
 ) -> VecchiaStructure:
   """Order the soundings and find each one's conditioning set.
 
@@ -131,6 +132,10 @@ def build_structure(
   :param n0: Size of the dense head block. Defaults to ``max(m, 64)``, capped
       at ``N``.
   :param first: Passed to :func:`~auv_pose.mapping.ordering.maximin_order`.
+  :param near: How many of the ``m`` are nearest neighbours; the rest are
+      spread across the ordering. See
+      :func:`~auv_pose.mapping.ordering.ordered_neighbours`. Defaults to all
+      nearest, which is right for prediction and wrong for fitting.
   :return: The structure, with ``points`` permuted into maximin order.
 
   Note:
@@ -158,7 +163,7 @@ def build_structure(
 
   return VecchiaStructure(
     points=ordered,
-    neighbours=ordered_neighbours(ordered, m=m),
+    neighbours=ordered_neighbours(ordered, m=m, near=near),
     order=order,
     n0=n0,
   )
@@ -884,12 +889,16 @@ def fit_vecchia(
   device: str | torch.device | None = None,
   jitter: float = DEFAULT_JITTER,
   chunk: int = 8192,
+  near: int | None = None,
 ) -> VecchiaMap:
   """Fit the linear mean and the kernel hyperparameters to a survey.
 
-  The mean goes first and stays: ``beta`` by ordinary least squares, then the
-  GP models what is left. That is what §3.2 describes, and it keeps the two
-  halves separable.
+  Under the default ``method="reml"`` the mean is *profiled out* rather than
+  fitted once up front: ``beta`` is the generalised-least-squares estimate
+  recomputed at every hyperparameter value, and what is scored is the error
+  contrasts orthogonal to the design. §3.2's two-stage description -- ``beta``
+  by least squares, then hyperparameters by marginal likelihood -- is
+  ``method="ml"``, kept for the comparison that motivated the change.
 
   :param points: Sounding positions, shape ``(N, 2)``, metres, any order.
   :param depth: Seabed elevation at each, shape ``(N,)``. **z-up**, so a seabed
@@ -910,6 +919,17 @@ def fit_vecchia(
       one batched Cholesky per step, which is where the GPU pays.
   :param jitter: Diagonal regulariser, relative to the amplitude.
   :param chunk: Blocks factorised at once.
+  :param near: How many of the ``m`` conditioning points are nearest
+      neighbours; the remainder are spread across the ordering. ``None``, the
+      default, is all-nearest.
+
+      Stein, Chi and Welty (2004) find all-nearest to be the *worst* design
+      for estimating a range parameter under a linear mean -- see
+      :func:`~auv_pose.mapping.ordering.ordered_neighbours` for their numbers
+      -- so the default is expected to be the wrong one here. It stays until a
+      conditioning ladder on real soundings says by how much, because their
+      result is measured on a different field with a different ordering, and
+      this map's whole difficulty has been numbers that did not transfer.
   :return: The fitted map.
 
   Note:
@@ -932,7 +952,7 @@ def fit_vecchia(
   if len(points) != len(depth):
     raise ValueError(f"{len(points)} positions against {len(depth)} depths")
 
-  structure = build_structure(points, m=m, n0=n0)
+  structure = build_structure(points, m=m, n0=n0, near=near)
   ordered_points = structure.points
   ordered_depth = depth[structure.order]
 

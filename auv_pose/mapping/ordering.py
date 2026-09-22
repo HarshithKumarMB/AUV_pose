@@ -120,24 +120,109 @@ def maximin_order(
   return order
 
 
+def _spread_predecessors(
+  row: int, taken: NDArray[np.int64], count: int
+) -> list[int]:
+  """``count`` predecessors of ``row`` spread across the whole ordering.
+
+  :param row: The point being conditioned, so its predecessors are
+      ``0..row-1``.
+  :param taken: Indices already chosen as nearest neighbours, to avoid.
+  :param count: How many to return.
+  :return: Up to ``count`` distinct indices below ``row``.
+
+  Note:
+      Targets are placed at evenly spaced *ordering positions*. Collisions with
+      the nearest set are resolved by walking forward, then backward, which
+      keeps the result deterministic -- the same requirement that makes
+      :func:`maximin_order` break ties by index.
+  """
+  if count <= 0 or row <= len(taken):
+    return []
+
+  used = {int(index) for index in taken}
+  chosen: list[int] = []
+
+  for step in range(1, count + 1):
+    target = (step * row) // (count + 1)
+
+    probe = target
+    while probe < row and probe in used:
+      probe += 1
+    if probe >= row:
+      probe = target
+      while probe >= 0 and probe in used:
+        probe -= 1
+    if 0 <= probe < row:
+      used.add(probe)
+      chosen.append(probe)
+
+  return chosen
+
+
 def ordered_neighbours(
-  points: ArrayLike, m: int, block: int = 2048
+  points: ArrayLike, m: int, block: int = 2048, near: int | None = None
 ) -> NDArray[np.int64]:
-  """The ``m`` nearest *predecessors* of each point.
+  """Each point's conditioning set, drawn from its predecessors.
 
   :param points: Positions **already in the intended order**, shape ``(n, d)``.
   :param m: Conditioning-set size.
   :param block: Points handled per tree build. An optimisation only -- the
       result does not depend on it, and there is a test saying so.
+  :param near: How many of the ``m`` are nearest predecessors. The remaining
+      ``m - near`` are spread across the ordering. Defaults to ``m``, i.e. all
+      nearest, which is the right choice for *prediction*.
   :return: Indices into the same ordering, shape ``(n, m)``, padded with ``-1``
       where a point has fewer than ``m`` predecessors.
+
+  Note:
+      **Why anything but nearest neighbours.** Stein, Chi and Welty (2004)
+      show that conditioning only on nearest neighbours is a poor design for
+      *estimating* covariance parameters, even though it is the best design for
+      predicting. Their table 2 measures the damage where it applies to this
+      map exactly -- a linear mean, profiled out by a restricted likelihood.
+      Relative efficiency for the range parameter at ``m = 32``:
+
+      ==========  =============  ===========
+      ``near/m``  constant mean  linear mean
+      ==========  =============  ===========
+      1.0         96.3%          **77.1%**
+      0.75        96.6%          **93.8%**
+      0.5         95.3%          92.8%
+      ==========  =============  ===========
+
+      With a constant mean the choice barely matters; with a linear mean,
+      replacing a quarter of the nearest neighbours by distant points recovers
+      most of what was lost. Their section 4.2 gives the mechanism: when the
+      correlation range is an appreciable fraction of the survey, the
+      information about it "is contained in the dependences at longer
+      distances", which a purely local conditioning set never sees.
+
+  Note:
+      **This is not their construction, and the difference is worth stating.**
+      Stein et al. select the distant members by *distance rank* among all
+      ``j - 1`` predecessors, which needs every pairwise distance -- ``O(n^2)``,
+      affordable at their ``n = 1000`` and not at a survey's several hundred
+      thousand. Here the distant members are taken at evenly spaced *ordering
+      positions* instead.
+
+      Under maximin ordering that is a reasonable substitute rather than a
+      coincidence: the first ``k`` points of a maximin ordering are spread over
+      the whole survey by construction, so an index drawn from early in the
+      ordering is a spatially spread sample, and one drawn from anywhere in it
+      is at a typical survey-scale distance from the point being conditioned.
+      What it supplies is long-range information, which is what the range
+      parameter is starved of. It does **not** reproduce their graded ladder of
+      intermediate distances, so the gains above are an upper bound on what to
+      expect, and :func:`~auv_pose.mapping.vecchia.fit_vecchia` is the place
+      that has to earn them on real soundings.
 
   Note:
       The obvious implementation -- a fresh tree over each prefix -- is ``n``
       tree builds, ``O(n^2 log n)``. Instead each block of points gets **one**
       tree over everything before the block, plus a brute-force scan within the
       block masked to strictly-earlier entries. Every candidate is covered by
-      exactly one of those two, so the result is exact.
+      exactly one of those two, so the nearest part is exact.
 
       Cost is ``(n/c) O(n log n) + n c``, minimised near ``c = sqrt(n log n)``,
       which at the ~144k soundings of a decimated survey is about 1560. Hence
@@ -151,6 +236,11 @@ def ordered_neighbours(
   if m < 1:
     raise ValueError(f"expected m >= 1, got {m}")
 
+  near = m if near is None else near
+  if not 1 <= near <= m:
+    raise ValueError(f"expected 1 <= near <= m = {m}, got {near}")
+  far = m - near
+
   n = len(points)
   neighbours = np.full((n, m), -1, dtype=np.int64)
 
@@ -159,7 +249,7 @@ def ordered_neighbours(
     rows = np.arange(start, stop)
 
     # Candidates from before the block, via one tree.
-    take = min(m, start)
+    take = min(near, start)
     tree = KDTree(points[:start])
     outside_distance, outside_index = tree.query(points[rows], k=take)
     outside_distance = np.atleast_2d(outside_distance.reshape(len(rows), take))
@@ -179,7 +269,11 @@ def ordered_neighbours(
       finite = np.isfinite(distances)
       candidates, distances = candidates[finite], distances[finite]
 
-      keep = np.argsort(distances, kind="stable")[:m]
-      neighbours[row, : len(keep)] = candidates[keep]
+      keep = np.argsort(distances, kind="stable")[:near]
+      chosen = candidates[keep]
+      neighbours[row, : len(chosen)] = chosen
+
+      spread = _spread_predecessors(int(row), chosen, far)
+      neighbours[row, len(chosen) : len(chosen) + len(spread)] = spread
 
   return neighbours
