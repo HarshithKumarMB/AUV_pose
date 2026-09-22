@@ -8,6 +8,7 @@ import pytest
 import torch
 from sklearn.preprocessing import StandardScaler
 
+from auv_pose.estimation.terrain import DepthMap
 from auv_pose.io.checkpoints import load_map, save_map
 from auv_pose.mapping.svgp import BathymetryMap, SVGPModel, fit_svgp
 
@@ -265,3 +266,179 @@ def test_fit_records_its_elbo_trace(synthetic):
   )
   assert len(model.elbo_trace) == 8
   assert model.elbo_trace[-1] < model.elbo_trace[0]
+
+
+# -- the DepthMap contract --------------------------------------------------
+#
+# These cover what the smoother's update step needs, which ``predict`` alone
+# does not provide: a joint covariance over a whole ping's soundings, and the
+# slope of the map's mean.
+
+
+def test_it_satisfies_the_depth_map_contract(synthetic):
+  """Structural, not nominal -- nothing declares the Protocol as a base."""
+  assert isinstance(_fitted_map(synthetic, epochs=2), DepthMap)
+
+
+def test_the_joint_diagonal_is_the_marginal_variance(synthetic):
+  """The two paths through gpytorch must not disagree about one point."""
+  bathymetry = _fitted_map(synthetic, epochs=5)
+  points = np.array([[0.0, 0.0], [5.0, -5.0], [-8.0, 3.0], [12.0, 9.0]])
+
+  _, stds = bathymetry.predict(points, with_std=True, observation_noise=True)
+  _, cov = bathymetry.predict_joint(points)
+
+  np.testing.assert_allclose(np.diag(cov), stds**2, rtol=1e-4)
+
+
+def test_the_joint_mean_matches_predict(synthetic):
+  bathymetry = _fitted_map(synthetic, epochs=5)
+  points = np.array([[0.0, 0.0], [5.0, -5.0], [-8.0, 3.0]])
+
+  mean, _ = bathymetry.predict_joint(points)
+  np.testing.assert_allclose(mean, bathymetry.predict(points), rtol=1e-4)
+
+
+def test_the_joint_covariance_is_symmetric_and_positive_definite(synthetic):
+  bathymetry = _fitted_map(synthetic, epochs=5)
+  points = np.random.default_rng(0).uniform(-15, 15, size=(12, 2))
+
+  _, cov = bathymetry.predict_joint(points)
+  np.testing.assert_allclose(cov, cov.T, atol=1e-12)
+  assert np.min(np.linalg.eigvalsh(cov)) > 0.0
+
+
+def test_nearby_soundings_covary_and_distant_ones_do_not(synthetic):
+  """The off-diagonals are the whole reason this method exists.
+
+  Without them the update counts a fan of adjacent beams as that many
+  independent constraints on the pose. The kernel is RBF, so covariance must
+  fall away with separation.
+  """
+  bathymetry = _fitted_map(synthetic, epochs=20)
+  points = np.array([[0.0, 0.0], [0.5, 0.0], [18.0, 18.0]])
+
+  _, cov = bathymetry.predict_joint(points, observation_noise=False)
+
+  assert cov[0, 1] > 0.0
+  assert abs(cov[0, 2]) < abs(cov[0, 1])
+
+
+def test_the_joint_takes_a_whole_sigma_cloud_in_one_call(synthetic):
+  """``(31, 32, 2)`` in, ``(31, 32)`` and ``(31, 32, 32)`` out.
+
+  One forward pass per ping rather than one per sigma point is the difference
+  between the update costing milliseconds and costing a second.
+  """
+  bathymetry = _fitted_map(synthetic, epochs=2)
+  cloud = np.random.default_rng(1).uniform(-10, 10, size=(7, 5, 2))
+
+  mean, cov = bathymetry.predict_joint(cloud)
+  assert mean.shape == (7, 5)
+  assert cov.shape == (7, 5, 5)
+
+
+def test_batched_and_separate_calls_agree(synthetic):
+  bathymetry = _fitted_map(synthetic, epochs=5)
+  cloud = np.random.default_rng(2).uniform(-10, 10, size=(3, 4, 2))
+
+  mean, cov = bathymetry.predict_joint(cloud)
+  for i in range(3):
+    one_mean, one_cov = bathymetry.predict_joint(cloud[i])
+    np.testing.assert_allclose(mean[i], one_mean, rtol=1e-5)
+    np.testing.assert_allclose(cov[i], one_cov, rtol=1e-4, atol=1e-8)
+
+
+def test_observation_noise_only_ever_widens_the_covariance(synthetic):
+  bathymetry = _fitted_map(synthetic, epochs=5)
+  points = np.random.default_rng(3).uniform(-15, 15, size=(6, 2))
+
+  _, latent = bathymetry.predict_joint(points, observation_noise=False)
+  _, with_noise = bathymetry.predict_joint(points, observation_noise=True)
+
+  assert np.all(np.diag(with_noise) > np.diag(latent))
+  # The likelihood's noise is independent per sounding, so it lands on the
+  # diagonal and leaves the correlations alone.
+  off = ~np.eye(len(points), dtype=bool)
+  np.testing.assert_allclose(with_noise[off], latent[off], atol=1e-6)
+
+
+def test_the_joint_rejects_points_of_the_wrong_width(synthetic):
+  bathymetry = _fitted_map(synthetic, epochs=2)
+  with pytest.raises(ValueError, match=r"\(\.\.\., b, 2\)"):
+    bathymetry.predict_joint(np.zeros((4, 3)))
+
+
+# -- the mean's gradient ----------------------------------------------------
+
+
+def test_the_gradient_recovers_the_synthetic_slope(synthetic):
+  """The fixture is ``-60 + 0.1 x - 0.05 y``, so the slope is known exactly."""
+  bathymetry = _fitted_map(synthetic, epochs=300)
+  points = np.array([[0.0, 0.0], [4.0, -4.0], [-6.0, 2.0]])
+
+  gradient = bathymetry.mean_gradient(points)
+  assert gradient.shape == (3, 2)
+  np.testing.assert_allclose(gradient, np.tile([0.1, -0.05], (3, 1)), atol=0.02)
+
+
+def test_the_gradient_matches_central_differences(synthetic):
+  """Against the map itself, so it holds whatever the fit came out as."""
+  bathymetry = _fitted_map(synthetic, epochs=20)
+  points = np.array([[1.0, 2.0], [-7.0, 5.0], [11.0, -3.0]])
+  step = 1e-2
+
+  analytic = bathymetry.mean_gradient(points)
+  numeric = np.empty_like(analytic)
+  for axis in range(2):
+    offset = np.zeros(2)
+    offset[axis] = step
+    numeric[:, axis] = (
+      bathymetry.predict(points + offset) - bathymetry.predict(points - offset)
+    ) / (2 * step)
+
+  np.testing.assert_allclose(analytic, numeric, atol=2e-3)
+
+
+def test_the_gradient_can_be_taken_twice(synthetic):
+  """Regression: gpytorch memoises the variational strategy across calls.
+
+  Without clearing that cache the second call raises *"Trying to backward
+  through the graph a second time"*, from a traceback that points into torch's
+  autograd engine and never mentions gpytorch. The smoother calls this once per
+  ping, so it would have failed on the second ping of every run.
+  """
+  bathymetry = _fitted_map(synthetic, epochs=2)
+  points = np.array([[0.0, 0.0], [3.0, 3.0]])
+
+  first = bathymetry.mean_gradient(points)
+  second = bathymetry.mean_gradient(points)
+  np.testing.assert_allclose(first, second, rtol=1e-6)
+
+
+def test_the_gradient_is_in_metres_per_metre_not_standardised_units():
+  """Stretch the surface by two and the slope must halve.
+
+  This is what catches a missing ``x_scaler.scale_``. Omitting it leaves a
+  silent constant factor on every gradient -- and so on every range-noise
+  variance the update computes -- that no shape or finiteness check would see.
+  """
+  narrow, _, _, _ = _fit_surface(
+    lambda X: -60.0 + 0.2 * X[:, 0], n=800, epochs=200, n_inducing=60
+  )
+  wide, _, _, _ = _fit_surface(
+    lambda X: -60.0 + 0.1 * X[:, 0], n=800, epochs=200, n_inducing=60
+  )
+
+  probe = np.array([[0.0, 0.0], [5.0, 5.0], [-5.0, -5.0]])
+  ratio = (
+    narrow.mean_gradient(probe)[:, 0].mean()
+    / wide.mean_gradient(probe)[:, 0].mean()
+  )
+  np.testing.assert_allclose(ratio, 2.0, rtol=0.1)
+
+
+def test_the_gradient_rejects_points_of_the_wrong_width(synthetic):
+  bathymetry = _fitted_map(synthetic, epochs=2)
+  with pytest.raises(ValueError, match=r"\(n, 2\)"):
+    bathymetry.mean_gradient(np.zeros((4, 3)))

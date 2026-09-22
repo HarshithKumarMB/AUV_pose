@@ -12,6 +12,7 @@ from collections.abc import Iterator
 import gpytorch
 import numpy as np
 import torch
+from gpytorch.utils.memoize import clear_cache_hook
 from numpy.typing import ArrayLike, NDArray
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -260,3 +261,94 @@ class BathymetryMap:
       return depth
     # Scaling is affine, so the standard deviation only picks up the scale.
     return depth, np.concatenate(stds) * self.y_std
+
+  def predict_joint(
+    self, points: ArrayLike, observation_noise: bool = True
+  ) -> tuple[NDArray, NDArray]:
+    """Joint Gaussian over the seabed at a set of horizontal positions.
+
+    Implements :class:`~auv_pose.estimation.terrain.DepthMap`, which is what
+    the smoother's update step consumes.
+
+    Args:
+        points: ``(..., b, 2)`` of ``(x, y)`` in metres. Leading axes are batch
+            dimensions -- a ``(31, 32, 2)`` sigma-point cloud comes back as
+            ``(31, 32)`` and ``(31, 32, 32)`` from one forward pass.
+        observation_noise: Include the likelihood's noise, giving the spread of
+            a *sounding* rather than of the seabed.
+
+    Returns:
+        ``(mean, cov)`` of shapes ``(..., b)`` and ``(..., b, b)``, in metres
+        and metres squared.
+
+    Note:
+        ``observation_noise`` defaults to **True** here, against
+        :meth:`predict`'s False, and the difference is deliberate.
+        :meth:`predict`'s note argues that a caller asking how well the seabed
+        is *known* wants the latent variance -- right for a map-quality
+        question. The update step is asking something else: how far a sounding
+        of this seabed may legitimately fall from the map's mean. Seabed
+        roughness and the GP's own misfit both belong in that number, and on
+        this map they are most of it.
+
+    Note:
+        No ``fast_pred_var``, unlike :meth:`predict`. LOVE returns a low-rank
+        approximation of the covariance, which is fine for the marginal
+        variances that method wants and wrong for the off-diagonals this one
+        exists to provide.
+    """
+    points = np.asarray(points, dtype=np.float32)
+    if points.shape[-1] != 2:
+      raise ValueError(f"expected (..., b, 2) points, got {points.shape}")
+
+    batch = points.shape[:-1]
+    scaled = self.x_scaler.transform(points.reshape(-1, 2)).reshape(*batch, 2)
+    tensor = torch.as_tensor(scaled, dtype=torch.float32, device=self.device)
+
+    with torch.no_grad():
+      latent = self.model(tensor)
+      predicted = self.likelihood(latent) if observation_noise else latent
+      mean = predicted.mean.cpu().numpy()
+      cov = predicted.covariance_matrix.cpu().numpy()
+
+    cov = 0.5 * (cov + np.swapaxes(cov, -1, -2))
+    return mean * self.y_std + self.y_mean, cov * self.y_std**2
+
+  def mean_gradient(self, points: ArrayLike) -> NDArray:
+    """Slope of the map's mean, in metres per metre.
+
+    Args:
+        points: ``(n, 2)`` of ``(x, y)`` in metres.
+
+    Returns:
+        ``(n, 2)`` of ``d(depth)/dx, d(depth)/dy``.
+
+    Note:
+        Summing the means before differentiating is exact, not an
+        approximation: each ``mean[i]`` depends only on ``points[i]``, so the
+        gradient of the sum is the stack of the individual gradients and one
+        backward pass does the work of ``n``.
+
+    Note:
+        The cache clearing is load-bearing. ``VariationalStrategy`` memoises
+        across calls, so a second ``autograd.grad`` through it raises *"Trying
+        to backward through the graph a second time"* -- with a traceback that
+        points at torch's autograd engine and says nothing about gpytorch.
+        ``detach_test_caches(False)`` does not fix it.
+    """
+    points = np.atleast_2d(np.asarray(points, dtype=np.float32))
+    if points.shape[-1] != 2:
+      raise ValueError(f"expected (n, 2) points, got {points.shape}")
+
+    scaled = self.x_scaler.transform(points)
+    tensor = torch.as_tensor(
+      scaled, dtype=torch.float32, device=self.device
+    ).requires_grad_(True)
+
+    clear_cache_hook(self.model.variational_strategy)
+    (gradient,) = torch.autograd.grad(self.model(tensor).mean.sum(), tensor)
+
+    # Out of the standardised input and target, back into metres per metre.
+    # ``train_map.py`` multiplies lengthscales by the same ``scale_``; this is
+    # the same conversion in the other direction.
+    return gradient.cpu().numpy() * self.y_std / self.x_scaler.scale_
