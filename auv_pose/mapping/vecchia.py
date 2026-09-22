@@ -34,7 +34,7 @@ alternatives.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import torch
@@ -231,6 +231,8 @@ class MeanBasis:
   knots: int = 12
   lower: tuple[float, ...] | None = None
   upper: tuple[float, ...] | None = None
+  keep: tuple[int, ...] | None = None
+  intercept: bool = False
 
   @classmethod
   def build(
@@ -239,6 +241,7 @@ class MeanBasis:
     kind: str = "linear",
     degree: int | None = None,
     knots: int = 12,
+    min_support: float = 5.0,
   ) -> MeanBasis:
     """Choose a basis and pin it to the extent of ``points``.
 
@@ -247,6 +250,39 @@ class MeanBasis:
         or ``"spline"``.
     :param degree: Overrides the degree implied by ``kind``.
     :param knots: Knots per axis, for ``"spline"``.
+    :param min_support: Drop spline basis functions supported by fewer than
+        this many points. See the note.
+
+    Note:
+        **Unsupported basis functions are dropped, and they must be.** A
+        tensor-product grid is laid over the survey's bounding box, but a
+        survey does not fill its bounding box -- four headings across this one
+        cover a diamond, leaving the corners empty. A basis function over an
+        empty corner is an all-zero column of ``H``, so ``H' K^-1 H`` is
+        singular and REML's ``-1/2 log|H' K^-1 H|`` is undefined. Measured
+        here: of 196 functions at 12 knots an axis, **25 have no data under
+        them at all** and ``H`` has rank 171.
+
+        Because B-splines are a partition of unity, a column's sum over the
+        survey *is* the effective number of soundings supporting it, so
+        ``min_support`` is a count rather than a tuned threshold. Keeping a
+        column supported by a point or two is worse than dropping it: its
+        coefficient is barely determined and the mean can swing wildly there,
+        which is precisely where a map should be admitting ignorance instead.
+
+    Note:
+        **A pruned spline basis therefore carries an explicit intercept**,
+        which a complete tensor-product basis neither needs nor tolerates --
+        adding one to a partition of unity duplicates the sum of the others
+        and leaves ``H`` rank deficient. Dropping columns destroys
+        the partition of unity, so the retained functions no longer sum to one
+        and the mean decays toward *zero* away from the survey -- on this
+        seabed, 0 m against a true mean depth of -65.3 m, a 65 m error at any
+        query more than 60 m from a sounding. With the intercept the same query
+        returns -63.7 m, and the fit is no worse for it (training residual
+        variance 7.65 against 7.70). The splines then model deviation from a
+        constant depth rather than depth itself, which is the more natural
+        reading of them anyway.
     """
     points = np.asarray(points, dtype=float)
     named = {"linear": 1, "quadratic": 2, "cubic": 3}
@@ -264,7 +300,7 @@ class MeanBasis:
     if knots < 2:
       raise ValueError(f"expected at least 2 knots, got {knots}")
 
-    return cls(
+    basis = cls(
       kind="spline",
       degree=3 if degree is None else degree,
       knots=knots,
@@ -272,12 +308,36 @@ class MeanBasis:
       upper=tuple(points.max(axis=0)),
     )
 
+    # On the raw tensor product: the assembled basis carries an intercept,
+    # which would shift every index by one.
+    support = basis._tensor(points).sum(axis=0)
+    keep = np.nonzero(support >= min_support)[0]
+    if len(keep) == 0:
+      raise ValueError(
+        f"no spline basis function is supported by {min_support} soundings; "
+        f"the survey may be far smaller than {knots} knots an axis implies"
+      )
+
+    # Only a *pruned* basis needs the intercept. A complete tensor product is
+    # already a partition of unity, so adding one would duplicate the sum of
+    # the others exactly and leave H rank deficient.
+    return replace(
+      basis,
+      keep=tuple(int(index) for index in keep),
+      intercept=len(keep) < len(support),
+    )
+
   @property
   def size(self) -> int:
-    """Number of basis functions, ``p``."""
+    """Number of basis functions actually used, ``p``."""
     if self.kind == "polynomial":
       return (self.degree + 1) * (self.degree + 2) // 2
-    return (self.knots + self.degree - 1) ** 2
+    kept = (
+      (self.knots + self.degree - 1) ** 2
+      if self.keep is None
+      else len(self.keep)
+    )
+    return kept + (1 if self.intercept else 0)
 
   def _knot_vector(self, axis: int) -> np.ndarray:
     assert self.lower is not None and self.upper is not None
@@ -305,6 +365,17 @@ class MeanBasis:
           )
       return np.column_stack(columns)
 
+    values = self._tensor(points)
+    if self.keep is not None:
+      values = values[:, self.keep]
+    if not self.intercept:
+      return values
+
+    # See the note on :meth:`build`.
+    return np.column_stack([np.ones(len(points)), values])
+
+  def _tensor(self, points: np.ndarray) -> np.ndarray:
+    """The full tensor-product B-spline basis, before selection or intercept."""
     from scipy.interpolate import BSpline
 
     assert self.lower is not None and self.upper is not None
@@ -385,7 +456,14 @@ class MeanBasis:
 
     by_north = (d_north[:, :, None] * east[:, None, :]).reshape(len(points), -1)
     by_east = (north[:, :, None] * d_east[:, None, :]).reshape(len(points), -1)
-    return np.stack([by_north, by_east], axis=-1)
+    slope = np.stack([by_north, by_east], axis=-1)
+    if self.keep is not None:
+      slope = slope[:, self.keep]
+    if not self.intercept:
+      return slope
+
+    # The intercept is constant, so it contributes no slope.
+    return np.concatenate([np.zeros((len(points), 1, 2)), slope], axis=1)
 
 
 #: §3.2's mean, kept as the default so nothing changes without being asked for.
@@ -1301,6 +1379,7 @@ def fit_vecchia(
   near: int | None = None,
   mean: str = "linear",
   mean_knots: int = 12,
+  mean_support: float = 5.0,
 ) -> VecchiaMap:
   """Fit the linear mean and the kernel hyperparameters to a survey.
 
@@ -1345,6 +1424,8 @@ def fit_vecchia(
       ``"cubic"`` or ``"spline"``. See :class:`MeanBasis` for what each absorbs
       on this seabed; the linear one absorbs 13%.
   :param mean_knots: Knots per axis when ``mean="spline"``.
+  :param mean_support: Soundings a spline basis function needs before it is
+      kept; see :meth:`MeanBasis.build`.
   :return: The fitted map.
 
   Note:
@@ -1374,7 +1455,9 @@ def fit_vecchia(
   if method not in ("reml", "ml"):
     raise ValueError(f'method must be "reml" or "ml", got {method!r}')
 
-  mean_basis = MeanBasis.build(ordered_points, kind=mean, knots=mean_knots)
+  mean_basis = MeanBasis.build(
+    ordered_points, kind=mean, knots=mean_knots, min_support=mean_support
+  )
   basis = design_matrix(ordered_points, mean_basis)
   # Only ever a starting point under REML, where the objective refits it.
   beta = np.linalg.lstsq(basis, ordered_depth, rcond=None)[0]

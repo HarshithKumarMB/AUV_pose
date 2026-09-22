@@ -1382,13 +1382,19 @@ def test_the_default_basis_is_still_the_linear_one():
 
 
 def test_each_basis_has_the_size_it_claims():
+  """``size`` must match what the basis actually produces, and be full rank.
+
+  ``min_support=0`` keeps every spline function, so the sizes below are the
+  complete grids. A pruned basis is smaller and carries an intercept instead;
+  that is covered by its own test.
+  """
   fitted = basis_points()
   for kind, extra, expected in (
     ("linear", {}, 3),
     ("quadratic", {}, 6),
     ("cubic", {}, 10),
-    ("spline", {"knots": 8}, 100),
-    ("spline", {"knots": 12}, 196),
+    ("spline", {"knots": 8, "min_support": 0.0}, 100),
+    ("spline", {"knots": 12, "min_support": 0.0}, 196),
   ):
     basis = MeanBasis.build(fitted, kind=kind, **extra)
     assert basis.size == expected
@@ -1397,8 +1403,8 @@ def test_each_basis_has_the_size_it_claims():
     # is bounded by the sample rather than by the basis.
     sample = max(2000, 8 * expected)
     values = basis(basis_points(sample, seed=71, spread=49.0))
-    assert values.shape == (sample, expected)
-    assert np.linalg.matrix_rank(values) == expected
+    assert values.shape == (sample, basis.size)
+    assert np.linalg.matrix_rank(values) == basis.size
 
 
 def test_the_basis_gradient_matches_finite_differences():
@@ -1445,7 +1451,7 @@ def test_the_linear_gradient_reduces_to_the_slope_coefficients():
 def test_a_spline_basis_goes_flat_outside_its_extent():
   """A polynomial mean diverges where the survey stops; this must not."""
   fitted = np.array([[0.0, 0.0], [100.0, 100.0]])
-  basis = MeanBasis.build(fitted, kind="spline", knots=8)
+  basis = MeanBasis.build(fitted, kind="spline", knots=8, min_support=0.0)
 
   edge = basis(np.array([[100.0, 100.0]]))
   beyond = basis(np.array([[5000.0, 5000.0]]))
@@ -1454,11 +1460,66 @@ def test_a_spline_basis_goes_flat_outside_its_extent():
   assert np.all(basis.gradient(np.array([[5000.0, 5000.0]])) == 0.0)
 
 
-def test_a_spline_basis_is_a_partition_of_unity():
-  """B-splines sum to one, so the basis can represent a constant depth."""
-  basis = MeanBasis.build(basis_points(), kind="spline", knots=10)
+def test_a_complete_spline_basis_is_a_partition_of_unity():
+  """B-splines sum to one, so a constant depth is representable without help."""
+  basis = MeanBasis.build(
+    basis_points(4000), kind="spline", knots=10, min_support=0.0
+  )
+  assert not basis.intercept
+
   values = basis(basis_points(80, seed=74, spread=40.0))
   np.testing.assert_allclose(values.sum(axis=1), 1.0, atol=1e-10)
+
+
+def test_a_pruned_spline_basis_carries_an_intercept_instead():
+  """The fix for what pruning breaks, and why it is conditional.
+
+  Dropping unsupported functions destroys the partition of unity, so the mean
+  would decay toward *zero* away from the survey -- 0 m against a seabed at
+  -65 m on the real data. An intercept restores a constant. But adding one to a
+  *complete* basis duplicates the sum of the others exactly and leaves the
+  design rank deficient, so it is added only when something was dropped.
+  """
+  rng = np.random.default_rng(76)
+  # A diamond, like four survey headings: its bounding box has empty corners.
+  points = rng.uniform(-50.0, 50.0, size=(6000, 2))
+  points = points[np.abs(points).sum(axis=1) < 50.0]
+
+  basis = MeanBasis.build(points, kind="spline", knots=10, min_support=5.0)
+  assert basis.intercept
+  assert basis.size < (10 + 3 - 1) ** 2
+
+  values = basis(points)
+  assert values.shape[1] == basis.size
+  np.testing.assert_allclose(values[:, 0], 1.0)
+  assert np.linalg.matrix_rank(values) == basis.size
+
+  # Far outside the surveyed diamond the mean must revert to the intercept,
+  # not decay to zero.
+  depth = -65.0 + 0.5 * points[:, 0] / 50.0
+  beta, *_ = np.linalg.lstsq(values, depth, rcond=None)
+  corner = basis(np.array([[49.0, 49.0]])) @ beta
+  assert -80.0 < corner[0] < -50.0
+
+
+def test_the_basis_gradient_is_one_sided_on_the_clamp_boundary():
+  """At the extent the basis has a kink, and the interior slope is the answer.
+
+  A central difference straddles the clamp and returns half of it, so this is
+  asserted against the interior derivative directly rather than numerically.
+  """
+  fitted = basis_points(2000, spread=50.0)
+  basis = MeanBasis.build(fitted, kind="spline", knots=8, min_support=0.0)
+
+  upper = np.array(basis.upper)
+  edge = basis.gradient(upper[None, :])
+  just_inside = basis.gradient((upper - 1e-6)[None, :])
+
+  np.testing.assert_allclose(edge, just_inside, atol=1e-6)
+  assert np.abs(edge).max() > 0.0
+
+  beyond = basis.gradient((upper + 10.0)[None, :])
+  assert np.all(beyond == 0.0)
 
 
 def test_it_rejects_an_unknown_basis():

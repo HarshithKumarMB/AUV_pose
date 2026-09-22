@@ -166,6 +166,12 @@ def save_vecchia_map(path: str | Path, bathymetry: VecchiaMap) -> None:
         if bathymetry.basis.upper is None
         else [float(v) for v in bathymetry.basis.upper]
       ),
+      "keep": (
+        None
+        if bathymetry.basis.keep is None
+        else [int(v) for v in bathymetry.basis.keep]
+      ),
+      "intercept": bool(bathymetry.basis.intercept),
     },
   }
   with open(path, "wb") as handle:
@@ -182,6 +188,12 @@ def _read_basis(stored: dict | None) -> MeanBasis:
     knots=int(stored["knots"]),
     lower=None if stored["lower"] is None else tuple(stored["lower"]),
     upper=None if stored["upper"] is None else tuple(stored["upper"]),
+    keep=(
+      None
+      if stored.get("keep") is None
+      else tuple(int(v) for v in stored["keep"])
+    ),
+    intercept=bool(stored.get("intercept", False)),
   )
 
 
