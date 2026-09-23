@@ -13,7 +13,16 @@ buildings in airborne LiDAR: a morphological **opening** (erosion, then
 dilation) of the lowest return per cell, with a window wider than any object.
 An opening leaves any surface that is flat or sloping at the window's scale
 exactly as it is, and cuts off anything narrower than the window that stands
-above it. A sounding far enough above the opened surface is an object.
+above it.
+
+**Width alone does not tell a pipe from a mound.** An opening also clips the
+rounded cap of any mound whose top is narrower than the window, and the Dam has
+broad 1-3 m mounds: a single 1 m threshold flagged 37% of a pass, a third of it
+seabed. What separates them is height -- pipes and the manifold stand 4-6 m
+proud, mounds about 3 -- so the threshold is a hysteresis, as in edge detection:
+a **core** must stand well above the opened ground, and an object then takes in
+its **flanks**, anything modestly proud within a few metres of a core. That
+reaches a pipe's sides without swallowing a mound beside it.
 
 Nothing here reads a reference surface or the simulator, so it runs on
 hardware data as it does on simulated.
@@ -80,7 +89,9 @@ def object_soundings(
   z: ArrayLike,
   cell: float = 1.0,
   window: float = 15.0,
-  height: float = 1.0,
+  core: float = 3.5,
+  flank: float = 0.5,
+  reach: float = 4.0,
 ) -> NDArray[np.bool_]:
   """Which soundings stand on an object rather than the seabed.
 
@@ -88,11 +99,29 @@ def object_soundings(
   :param z: Elevation, ``(n,)``, z-up.
   :param cell: See :func:`ground_surface`.
   :param window: See :func:`ground_surface`.
-  :param height: How far above the opened ground a sounding must stand to be
-      an object, metres. Well above the sonar's 0.1 m quantisation and the
-      seabed's own roughness within a cell, well below a pipe's 4-5 m.
+  :param core: Height above the opened ground that makes a sounding an
+      object on its own, metres. Above the Dam's mounds, below its pipes.
+  :param flank: Height that makes a sounding an object when it lies within
+      ``reach`` of a core, metres. Well above the sonar's 0.1 m quantisation.
+  :param reach: How far an object's flanks extend from its core, metres:
+      about the part of a pipe's width below the core height.
   :return: ``(n,)`` boolean, True for an object sounding.
   """
-  ground = ground_surface(points, z, cell, window)
-  above = np.asarray(z, dtype=float) - ground
-  return np.nan_to_num(above, nan=0.0) > height
+  from scipy import ndimage
+
+  points = np.asarray(points, dtype=float)
+  above = np.nan_to_num(
+    np.asarray(z, dtype=float) - ground_surface(points, z, cell, window),
+    nan=0.0,
+  )
+
+  index, shape = _grid(points, cell)
+  cores = np.zeros(tuple(shape), dtype=bool)
+  cores[index[above > core, 0], index[above > core, 1]] = True
+
+  radius = max(0, round(reach / cell))
+  offsets = np.arange(-radius, radius + 1)
+  disc = offsets[:, None] ** 2 + offsets[None, :] ** 2 <= radius**2
+  near = np.asarray(ndimage.binary_dilation(cores, structure=disc), dtype=bool)
+
+  return (above > core) | ((above > flank) & near[index[:, 0], index[:, 1]])

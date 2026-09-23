@@ -56,3 +56,33 @@ def test_isolated_soundings_are_left_alone():
   points = np.array([[0.0, 0.0], [500.0, 500.0]])
   z = np.array([-68.0, -60.0])
   assert not object_soundings(points, z).any()
+
+
+def mound(points, centre=(30.0, 30.0), radius=12.0, height=2.5):
+  """A broad, gentle mound: a Gaussian cap, too low to be an object."""
+  r2 = ((points - np.asarray(centre)) ** 2).sum(axis=1)
+  return height * np.exp(-r2 / (2 * (radius / 2) ** 2))
+
+
+def test_a_mounds_cap_is_seabed_even_where_the_opening_clips_it():
+  points, z = seabed(np.random.default_rng(5))
+  bump = mound(points)
+  assert (z + bump - ground_surface(points, z + bump)).max() > 1.0
+  assert not object_soundings(points, z + bump).any()
+
+
+def test_a_pipes_flanks_go_with_it():
+  """Below core height but beside a core: part of the pipe, not the seabed."""
+  points, z = seabed(np.random.default_rng(6))
+  bump = pipe(points)
+  flanks = (bump > 0.6) & (bump < 3.0)
+  assert object_soundings(points, z + bump)[flanks].all()
+
+
+def test_a_mound_beside_a_pipe_is_not_swallowed():
+  points, z = seabed(np.random.default_rng(7))
+  bump = pipe(points, centre_x=50.0) + mound(points, centre=(30.0, 50.0))
+  flagged = object_soundings(points, z + bump)
+  far_side = mound(points, centre=(30.0, 50.0)) > 0.6
+  far_side &= np.abs(points[:, 0] - 50.0) > 10.0
+  assert not flagged[far_side].any()

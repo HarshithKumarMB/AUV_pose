@@ -142,10 +142,13 @@ def parse_args() -> argparse.Namespace:
     help="opening window, metres; must exceed the widest object (~10 m here)",
   )
   parser.add_argument(
-    "--object-height",
+    "--object-core",
     type=float,
-    default=1.0,
-    help="height above the opened seabed that makes a sounding an object, m",
+    default=3.5,
+    help=(
+      "height above the opened seabed that makes a sounding an object on its "
+      "own, m: above the Dam's ~3 m mounds, below its 4-6 m pipes"
+    ),
   )
   parser.add_argument(
     "--method",
@@ -474,12 +477,12 @@ def main() -> None:
 
   if args.drop_objects:
     objects = object_soundings(
-      X, y, window=args.object_window, height=args.object_height
+      X, y, window=args.object_window, core=args.object_core
     )
     print(
       f"Dropped {int(objects.sum())} object soundings "
-      f"({100 * objects.mean():.1f}%) more than {args.object_height} m above "
-      f"a {args.object_window} m opening of the seabed"
+      f"({100 * objects.mean():.1f}%): cores over {args.object_core} m above a "
+      f"{args.object_window} m opening of the seabed, and their flanks"
     )
     seabed = ~objects
     X, y = X[seabed], y[seabed]
