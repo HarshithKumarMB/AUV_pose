@@ -332,6 +332,7 @@ def test_body_acceleration_recovers_a_straight_line_acceleration():
   dt = 1 / 30
 
   speed = 0.0
+  recovered = np.zeros(3)
   for _ in range(300):
     speed += 0.5 * dt
     recovered = body_accel.update([speed, 0.0, 0.0], np.zeros(3), dt)

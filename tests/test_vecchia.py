@@ -327,12 +327,13 @@ def test_it_is_differentiable_in_the_hyperparameters():
   value.backward()
 
   gradients = (amplitude.grad, lengthscale.grad, noise.grad)
-  assert all(g is not None for g in gradients)
   for gradient in gradients:
+    assert gradient is not None
     assert torch.all(torch.isfinite(gradient)), gradient
 
   # Regression: the lengthscale gradient came back NaN, from ``sqrt(0)`` on the
   # diagonal of every kernel block. The forward value was finite throughout.
+  assert lengthscale.grad is not None
   assert float(torch.abs(lengthscale.grad).max()) > 0.0
 
 
@@ -772,6 +773,7 @@ def test_reml_is_differentiable():
   value.backward()
 
   assert beta.shape == (3,)
+  assert amplitude.grad is not None and lengthscale.grad is not None
   assert torch.all(torch.isfinite(amplitude.grad))
   assert torch.all(torch.isfinite(lengthscale.grad))
 
@@ -1349,6 +1351,7 @@ def test_a_draw_comes_back_in_the_callers_order():
   from scipy.spatial import KDTree
 
   _, partner = KDTree(points).query(points, k=2)
+  partner = np.asarray(partner)
   close = np.abs(values - values[partner[:, 1]]).mean()
   rng = np.random.default_rng(0)
   far = np.abs(values - values[rng.permutation(len(values))]).mean()

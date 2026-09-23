@@ -80,10 +80,11 @@ def plot_plane(frame: pd.DataFrame, plane: str, path: Path) -> None:
   plt.close(figure)
 
 
-def error_norm(frame: pd.DataFrame, prefix: str) -> np.ndarray:
-  return np.sqrt(
-    sum((frame[axis] - frame[prefix + axis]) ** 2 for axis in ("x", "y", "z"))
+def error_norm(frame: pd.DataFrame, prefix: str) -> pd.Series:
+  squared = sum(
+    (frame[axis] - frame[prefix + axis]) ** 2 for axis in ("x", "y", "z")
   )
+  return pd.Series(np.sqrt(squared), index=frame.index)
 
 
 def plot_error(frame: pd.DataFrame, path: Path) -> None:

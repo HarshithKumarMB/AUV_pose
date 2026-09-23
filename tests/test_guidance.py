@@ -18,6 +18,13 @@ SQUARE = np.array(
 )
 
 
+def steer(follower, *args):
+  """``command`` for a follower still on its route, where None would be a bug."""
+  command = follower.command(*args)
+  assert command is not None, "follower unexpectedly finished"
+  return command
+
+
 def test_zero_error_gives_zero_thrust():
   np.testing.assert_allclose(thruster_command(np.zeros(3)), np.zeros(8))
 
@@ -64,7 +71,7 @@ def test_far_from_target_returns_the_thruster_command():
   position = np.array([-5.0, -5.0, -5.0])
 
   np.testing.assert_allclose(
-    follower.command(position), thruster_command(SQUARE[0] - position)
+    steer(follower, position), thruster_command(SQUARE[0] - position)
   )
   assert follower.index == 0  # no advance while still travelling
 
@@ -230,7 +237,7 @@ def test_the_real_level_attitude_steers_exactly_as_before():
 
   position = np.array([2.0, -3.0, 1.0])
   np.testing.assert_allclose(
-    follower.command(position, LEVEL), reference.command(position)
+    steer(follower, position, LEVEL), steer(reference, position)
   )
 
 
@@ -238,14 +245,14 @@ def test_depth_control_is_never_inverted():
   """Whatever the heading, a target above the vehicle thrusts the same way."""
   for degrees in (0.0, 45.0, 90.0, 180.0, -90.0):
     follower = WaypointFollower([[0.0, 0.0, 10.0]], arrival_radius=0.5)
-    command = follower.command(np.zeros(3), yawed(degrees))
+    command = steer(follower, np.zeros(3), yawed(degrees))
     np.testing.assert_allclose(command[:4], [10.0, 10.0, 10.0, 10.0])
 
 
 def test_a_yawed_vehicle_steers_in_its_own_frame():
   """At yaw 90 the body x axis points along world +y."""
   follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
-  command = follower.command(np.zeros(3), yawed(90.0))
+  command = steer(follower, np.zeros(3), yawed(90.0))
 
   # A world +x target is 10 m to starboard: pure body -y, no surge.
   np.testing.assert_allclose(command[4:], [-10.0, 10.0, -10.0, 10.0])
@@ -254,7 +261,7 @@ def test_a_yawed_vehicle_steers_in_its_own_frame():
 def test_a_reversed_heading_does_not_drive_away():
   """At 180 degrees an unrotated error would be pure positive feedback."""
   follower = WaypointFollower([[10.0, 0.0, 0.0]], arrival_radius=0.5)
-  command = follower.command(np.zeros(3), yawed(180.0))
+  command = steer(follower, np.zeros(3), yawed(180.0))
 
   # Body-frame surge is negative: the target is behind the vehicle.
   assert command[4] < 0 and command[5] < 0
@@ -267,6 +274,6 @@ def test_heading_is_taken_from_the_body_x_axis():
 
   # LEVEL and plain identity differ by a 180 degree roll, same heading.
   np.testing.assert_allclose(
-    follower.command(np.zeros(3), LEVEL),
-    reference.command(np.zeros(3), np.eye(3)),
+    steer(follower, np.zeros(3), LEVEL),
+    steer(reference, np.zeros(3), np.eye(3)),
   )

@@ -67,7 +67,7 @@ def test_drops_rows_with_no_echo(survey):
   frame = load_soundings([path])
 
   assert len(frame) == 2
-  assert not frame["z"].isna().any()
+  assert not bool(frame["z"].isna().any())
 
 
 def test_drops_infinities(survey):

@@ -104,4 +104,4 @@ def test_nan_is_written_as_a_readable_value(tmp_path):
     log.write(step=0, x=float("nan"), y=2.0, z=3.0)
 
   frame = pd.read_csv(path)
-  assert frame["x"].isna().all()
+  assert bool(frame["x"].isna().all())

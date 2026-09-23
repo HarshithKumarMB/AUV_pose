@@ -74,6 +74,7 @@ def test_the_checkpoint_carries_everything_prediction_needs(
   save_vecchia_map(path, vecchia)
 
   loaded = load_map(path)
+  assert isinstance(loaded, VecchiaMap)
   assert loaded.information is not None
   np.testing.assert_array_equal(loaded.information, vecchia.information)
   np.testing.assert_array_equal(loaded.beta, vecchia.beta)
@@ -86,6 +87,7 @@ def test_the_ordering_is_stored_rather_than_rebuilt(tmp_path, vecchia):
   path = tmp_path / "vecchia.pkl"
   save_vecchia_map(path, vecchia)
   loaded = load_map(path)
+  assert isinstance(loaded, VecchiaMap)
 
   np.testing.assert_array_equal(loaded.structure.order, vecchia.structure.order)
   np.testing.assert_array_equal(
@@ -255,6 +257,7 @@ def test_a_version_one_checkpoint_loads_as_a_linear_mean(tmp_path):
     pickle.dump(payload, handle)
 
   loaded = load_map(path)
+  assert isinstance(loaded, VecchiaMap)
   assert loaded.basis == LINEAR_MEAN
   np.testing.assert_allclose(
     loaded.predict(points[:5]), fitted.predict(points[:5])

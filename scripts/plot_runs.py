@@ -20,6 +20,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
+from matplotlib.typing import LineStyleType
 
 HZ = 30
 DT = 1 / HZ
@@ -27,7 +29,7 @@ DT = 1 / HZ
 SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#dcdbd6"
 
 # Canonical palette slots 1-4, in order.
-RUNS = [
+RUNS: list[tuple[str, str, str, LineStyleType]] = [
   ("all fixed", "dvl", "#2a78d6", "-"),
   ("mirrored frames (before)", "legacy", "#eb6834", "-"),
   ("no DVL", "att", "#1baf7a", "-"),
@@ -294,9 +296,7 @@ def main() -> None:
   ax.set_aspect("equal", adjustable="box")
 
   handles = [
-    plt.Line2D(
-      [], [], color=colour, linewidth=2, linestyle=linestyle, label=name
-    )
+    Line2D([], [], color=colour, linewidth=2, linestyle=linestyle, label=name)
     for name, _, colour, linestyle in RUNS
   ]
   fig.legend(
