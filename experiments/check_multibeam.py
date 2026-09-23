@@ -15,8 +15,9 @@ frame is ``nadir +z, swath +y``, recorded on
 That swath sign used to read ``-y`` here, and the octree fit that produced it
 could not have found the error: a mirror barely moves the residual over terrain
 that is symmetric across the track. It was caught by sweeping one patch on two
-perpendicular headings -- ``check_beam_geometry.py`` -- which is the test to
-reach for whenever the fan's geometry is in question.
+perpendicular headings -- ``check_beam_geometry.py``, retired but in git
+history -- which is the test to reach for whenever the fan's geometry is in
+question.
 
 What the knobs below are for now is the question those answers raised. The sonar
 agrees with the octree to 0.035 m almost everywhere and reports 4-5 m short over

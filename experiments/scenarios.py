@@ -116,10 +116,10 @@ def singlebeam_sonar(
 #: barely changes the residual, so the optimiser has nothing to pull on.
 #:
 #: What finds it is sweeping the same patch on two **perpendicular** headings
-#: and asking whether the two reconstructions agree --
-#: ``experiments/check_beam_geometry.py``. Note perpendicular, not opposite: a
-#: 180 degree yaw maps the mirrored fan exactly onto the true one, so a half
-#: turn is blind to this by construction.
+#: and asking whether the two reconstructions agree -- the retired
+#: ``experiments/check_beam_geometry.py``, in git history. Note perpendicular,
+#: not opposite: a 180 degree yaw maps the mirrored fan exactly onto the true
+#: one, so a half turn is blind to this by construction.
 #:
 #: Measured with that test, median disagreement between headings:
 #:
