@@ -6,7 +6,7 @@ import pytest
 
 from auv_pose.io.soundings import (
   load_soundings,
-  position_covariance,
+  placement_covariance,
   soundings_to_arrays,
 )
 
@@ -124,7 +124,9 @@ def placed(tmp_path, name, cov_xy=0.1):
       "z": [-70.0, -69.5],
       "cov_xx": [0.5, 0.6],
       "cov_xy": [cov_xy, cov_xy],
+      "cov_xz": [0.02, 0.02],
       "cov_yy": [0.7, 0.8],
+      "cov_yz": [0.03, 0.03],
       "cov_zz": [0.01, 0.01],
       "ping": [0, 0],
       "true_x": [0.1, 1.1],
@@ -135,12 +137,14 @@ def placed(tmp_path, name, cov_xy=0.1):
   return path
 
 
-def test_the_covariance_reads_back_as_two_by_two(tmp_path):
+def test_the_covariance_reads_back_as_three_by_three(tmp_path):
   frame = load_soundings([placed(tmp_path, "a.csv")])
-  cov = position_covariance(frame)
+  cov = placement_covariance(frame)
 
-  assert cov.shape == (2, 2, 2)
-  np.testing.assert_array_equal(cov[1], [[0.6, 0.1], [0.1, 0.8]])
+  assert cov.shape == (2, 3, 3)
+  np.testing.assert_array_equal(
+    cov[1], [[0.6, 0.1, 0.02], [0.1, 0.8, 0.03], [0.02, 0.03, 0.01]]
+  )
 
 
 def test_a_column_only_some_files_carry_is_dropped(survey, tmp_path):
@@ -151,10 +155,10 @@ def test_a_column_only_some_files_carry_is_dropped(survey, tmp_path):
 
   assert list(frame.columns) == ["x", "y", "z"]
   with pytest.raises(ValueError, match="georeference.py --pose smoothed"):
-    position_covariance(frame)
+    placement_covariance(frame)
 
 
 def test_files_that_all_carry_it_keep_it(tmp_path):
   frame = load_soundings([placed(tmp_path, "a.csv"), placed(tmp_path, "b.csv")])
-  assert len(position_covariance(frame)) == 4
+  assert len(placement_covariance(frame)) == 4
   assert "true_x" in frame.columns

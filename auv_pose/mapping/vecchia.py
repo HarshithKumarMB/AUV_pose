@@ -57,6 +57,7 @@ __all__ = [
   "fit_vecchia",
   "fit_vecchia_nigp",
   "initial_hyperparameters",
+  "input_noise_variance",
   "sparse_factor",
   "vecchia_loglik",
   "vecchia_reml",
@@ -1588,10 +1589,35 @@ def fit_vecchia(
   )
 
 
+def input_noise_variance(gradient: ArrayLike, cov: ArrayLike) -> np.ndarray:
+  """Depth variance a sounding's placement error causes, to first order.
+
+  A sounding placed at ``x + e_xy`` reporting depth ``z + e_z`` misses the
+  seabed ``f`` by ``e_z - g' e_xy``, with ``g`` the slope. Its variance is
+  ``a' Sigma a`` with ``a = (-g_x, -g_y, 1)``:
+
+      Sigma_zz - 2 g' Sigma_xy,z + g' Sigma_xy g
+
+  All three terms matter. The horizontal one alone -- McHutchon and
+  Rasmussen's case, where only the inputs are noisy -- is zero on flat seabed,
+  but a roll error moves an outer beam mostly vertically, so a flat seabed
+  still reads wrong. And on a slope the cross term can cancel much of the
+  horizontal one: a beam displaced along the slope is displaced in depth too.
+
+  :param gradient: Seabed slope at each sounding, ``(n, 2)``.
+  :param cov: Each sounding's placement covariance, ``(n, 3, 3)``.
+  :return: ``(n,)``, metres squared.
+  """
+  gradient = np.asarray(gradient, dtype=float)
+  cov = np.asarray(cov, dtype=float)
+  a = np.concatenate([-gradient, np.ones((len(gradient), 1))], axis=1)
+  return np.einsum("ni,nij,nj->n", a, cov, a)
+
+
 def fit_vecchia_nigp(
   points: ArrayLike,
   depth: ArrayLike,
-  position_cov: ArrayLike,
+  placement_cov: ArrayLike,
   passes: int = 2,
   **kwargs,
 ) -> tuple[VecchiaMap, list[np.ndarray]]:
@@ -1599,10 +1625,9 @@ def fit_vecchia_nigp(
 
   McHutchon and Rasmussen's noisy-input GP (NIGP), eq. 6: a position error
   ``e ~ N(0, Sigma_q)`` moves a sounding's depth by about ``grad(mu)' e``, so
-  to first order it is extra *output* noise of variance
-  ``s = grad(mu)' Sigma_q grad(mu)``. That is zero on flat seabed and large on
-  a slope, which is the point: a misplaced sounding on a slope is a wrong
-  depth, and one on the flat is harmless.
+  to first order it is extra *output* noise. Here the sounding's reported
+  depth is misplaced as well as its position, so the variance is the full
+  :func:`input_noise_variance` rather than their horizontal term alone.
 
   The slope comes from the map being fitted, so this iterates: fit, take the
   mean's gradient at every sounding, refit with ``s`` frozen and ``sigma_z^2``
@@ -1610,7 +1635,7 @@ def fit_vecchia_nigp(
 
   :param points: Sounding positions, ``(N, 2)``.
   :param depth: Seabed elevation, ``(N,)``.
-  :param position_cov: Each sounding's horizontal covariance, ``(N, 2, 2)``.
+  :param placement_cov: Each sounding's placement covariance, ``(N, 3, 3)``.
   :param passes: Fits to run, at least two: the first has no inflation, so a
       single pass would be a plain fit wearing NIGP's name.
   :param kwargs: Passed to every :func:`fit_vecchia`.
@@ -1628,11 +1653,11 @@ def fit_vecchia_nigp(
       "inflation, so one pass is a plain fit"
     )
   points = np.asarray(points, dtype=float)
-  position_cov = np.asarray(position_cov, dtype=float)
-  if position_cov.shape != (len(points), 2, 2):
+  placement_cov = np.asarray(placement_cov, dtype=float)
+  if placement_cov.shape != (len(points), 3, 3):
     raise ValueError(
-      f"expected ({len(points)}, 2, 2) position covariance, "
-      f"got {position_cov.shape}"
+      f"expected ({len(points)}, 3, 3) placement covariance, "
+      f"got {placement_cov.shape}"
     )
 
   inflation = None
@@ -1640,8 +1665,9 @@ def fit_vecchia_nigp(
   fitted = None
   for _ in range(passes):
     fitted = fit_vecchia(points, depth, noise_inflation=inflation, **kwargs)
-    slope = fitted.mean_gradient(points)
-    inflation = np.einsum("nd,nde,ne->n", slope, position_cov, slope)
+    inflation = input_noise_variance(
+      fitted.mean_gradient(points), placement_cov
+    )
     inflations.append(inflation)
 
   assert fitted is not None

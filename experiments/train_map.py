@@ -34,11 +34,15 @@ from auv_pose.io.checkpoints import save_map, save_vecchia_map
 from auv_pose.io.soundings import (
   COVARIANCE_COLUMNS,
   load_soundings,
-  position_covariance,
+  placement_covariance,
   soundings_to_arrays,
 )
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
-from auv_pose.mapping.vecchia import fit_vecchia, fit_vecchia_nigp
+from auv_pose.mapping.vecchia import (
+  fit_vecchia,
+  fit_vecchia_nigp,
+  input_noise_variance,
+)
 from experiments.cli import refuse_overwrite
 
 
@@ -302,7 +306,7 @@ def calibration(bathymetry, X, y, test, input_variance=None) -> float:
   amount that would make the smoother's update too sure of itself.
 
   :param input_variance: Each held-out sounding's own input noise,
-      ``g' Sigma_q g``, for a survey placed by navigation. A held-out sounding
+      from :func:`input_noise`, for a survey placed by navigation. A held-out sounding
       is misplaced like any other, so its interval must allow for that too;
       leaving it out scores a navigated map as overconfident when it is only
       being compared against misplaced truth.
@@ -316,9 +320,12 @@ def calibration(bathymetry, X, y, test, input_variance=None) -> float:
 
 
 def input_noise(bathymetry, X, cov, test) -> np.ndarray:
-  """``g' Sigma_q g`` at each held-out sounding, from the map's own slope."""
+  """Placement-induced depth variance at each held-out sounding.
+
+  :func:`~auv_pose.mapping.vecchia.input_noise_variance` at the map's own slope.
+  """
   slope = bathymetry.mean_gradient(X[test].astype(np.float64))
-  return np.einsum("nd,nde,ne->n", slope, cov[test], slope)
+  return input_noise_variance(slope, cov[test])
 
 
 def score(
@@ -398,7 +405,7 @@ def main() -> None:
   # covariance is read whenever the survey carries it, so a map fitted without
   # NIGP is still scored against its misplaced holdout fairly.
   cov = (
-    position_covariance(frame)
+    placement_covariance(frame)
     if args.nigp_passes > 0 or set(COVARIANCE_COLUMNS) <= set(frame.columns)
     else None
   )

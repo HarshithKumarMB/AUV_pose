@@ -42,6 +42,7 @@ from auv_pose.mapping.vecchia import (
   fit_vecchia,
   fit_vecchia_nigp,
   initial_hyperparameters,
+  input_noise_variance,
   sparse_factor,
   vecchia_loglik,
   vecchia_reml,
@@ -1574,7 +1575,7 @@ def misplaced_survey(seed=30, n=700):
     seed=seed + 1,
   )
   spread = rng.uniform(0.05, 1.2, size=n)
-  cov = spread[:, None, None] ** 2 * np.eye(2)
+  cov = spread[:, None, None] ** 2 * np.diag([1.0, 1.0, 0.0])
   recorded = truth + spread[:, None] * rng.normal(size=(n, 2))
   return recorded, depth, cov
 
@@ -1606,7 +1607,7 @@ def test_the_nigp_inflation_settles_across_passes():
 
 def test_nigp_refuses_a_covariance_of_the_wrong_shape():
   points, depth, cov = misplaced_survey(n=40)
-  with pytest.raises(ValueError, match="position covariance"):
+  with pytest.raises(ValueError, match="placement covariance"):
     fit_vecchia_nigp(points, depth, cov[:-1], m=5, steps=1, device="cpu")
 
 
@@ -1615,3 +1616,28 @@ def test_nigp_refuses_a_single_pass():
   points, depth, cov = misplaced_survey(n=40)
   with pytest.raises(ValueError, match="at least two passes"):
     fit_vecchia_nigp(points, depth, cov, passes=1, m=5, steps=1, device="cpu")
+
+
+def test_input_noise_on_flat_seabed_is_the_vertical_error():
+  """Zero slope: horizontal misplacement is harmless, vertical is not."""
+  cov = np.array([[[4.0, 0.0, 0.5], [0.0, 4.0, 0.5], [0.5, 0.5, 0.09]]])
+  assert input_noise_variance(np.zeros((1, 2)), cov) == pytest.approx([0.09])
+
+
+def test_input_noise_without_vertical_error_is_the_nigp_term():
+  g = np.array([[0.3, -0.4]])
+  horizontal = np.array([[2.0, 0.5], [0.5, 1.0]])
+  cov = np.zeros((1, 3, 3))
+  cov[0, :2, :2] = horizontal
+  assert input_noise_variance(g, cov) == pytest.approx(
+    [g[0] @ horizontal @ g[0]]
+  )
+
+
+def test_a_sounding_moved_along_the_slope_reads_no_depth_error():
+  """e_z = g' e_xy exactly: the sounding slid along the seabed, so f(x) fits it."""
+  g = np.array([0.5, 0.2])
+  horizontal = np.array([[1.0, 0.3], [0.3, 2.0]])
+  jacobian = np.vstack([np.eye(2), g])  # e = J e_xy
+  cov = (jacobian @ horizontal @ jacobian.T)[None]
+  assert input_noise_variance(g[None], cov) == pytest.approx([0.0], abs=1e-12)

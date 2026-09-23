@@ -30,15 +30,25 @@ __all__ = [
   "OPTIONAL_COLUMNS",
   "SOUNDING_COLUMNS",
   "load_soundings",
-  "position_covariance",
+  "placement_covariance",
   "soundings_to_arrays",
 ]
 
 SOUNDING_COLUMNS = ("x", "y", "z")
 
-#: The sounding's own position uncertainty, as ``georeference.py`` derives it
-#: from the smoothed pose: the horizontal block's upper triangle, and vertical.
-COVARIANCE_COLUMNS = ("cov_xx", "cov_xy", "cov_yy", "cov_zz")
+#: The sounding's own placement uncertainty, as ``georeference.py`` derives it
+#: from the smoothed pose: the upper triangle of its full ``(3, 3)`` covariance.
+#: The vertical terms are not optional extras. A roll error moves an outer beam
+#: mostly *vertically*, and the depth error a misplacement causes is
+#: ``e_z - g' e_xy``, whose variance needs every entry.
+COVARIANCE_COLUMNS = (
+  "cov_xx",
+  "cov_xy",
+  "cov_xz",
+  "cov_yy",
+  "cov_yz",
+  "cov_zz",
+)
 
 #: Written by ``georeference.py`` and optional on read. ``ping`` groups the
 #: beams of one ping, which share the vehicle's error; ``true_`` is where the
@@ -114,8 +124,8 @@ def soundings_to_arrays(
   return X, y
 
 
-def position_covariance(frame: pd.DataFrame) -> NDArray[np.float64]:
-  """Each sounding's horizontal position covariance, ``(n, 2, 2)``.
+def placement_covariance(frame: pd.DataFrame) -> NDArray[np.float64]:
+  """Each sounding's placement covariance, ``(n, 3, 3)``, world frame.
 
   Raises:
       ValueError: If the frame lacks the covariance columns -- a survey placed
@@ -129,7 +139,14 @@ def position_covariance(frame: pd.DataFrame) -> NDArray[np.float64]:
       "place them from a raw log with "
       "`experiments/georeference.py --pose smoothed`"
     )
-  xx, xy, yy = (
-    frame[c].to_numpy(np.float64) for c in ("cov_xx", "cov_xy", "cov_yy")
+  xx, xy, xz, yy, yz, zz = (
+    frame[c].to_numpy(np.float64) for c in COVARIANCE_COLUMNS
   )
-  return np.stack([np.stack([xx, xy], -1), np.stack([xy, yy], -1)], -2)
+  return np.stack(
+    [
+      np.stack([xx, xy, xz], -1),
+      np.stack([xy, yy, yz], -1),
+      np.stack([xz, yz, zz], -1),
+    ],
+    -2,
+  )
