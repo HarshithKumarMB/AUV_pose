@@ -347,14 +347,17 @@ def score(
     "  inside its own 95% interval  "
     f"{calibration(bathymetry, X, y, test, input_variance):7.1%}"
   )
-  if input_variance is not None:
-    # Where the coverage fails says which term is wrong: on low input noise it
-    # is the nugget, on high it is the NIGP inflation.
+  # Where the coverage fails says which term is wrong: on low input noise it is
+  # the nugget, on high it is the NIGP inflation. Nothing to split for a survey
+  # placed from truth, whose input noise is zero throughout.
+  if input_variance is not None and np.ptp(input_variance) > 0.0:
     edges = np.quantile(input_variance, [0.0, 1 / 3, 2 / 3, 1.0])
     thirds = np.digitize(input_variance, edges[1:-1])
     indices = np.flatnonzero(test)
     parts = []
     for third in range(3):
+      if not np.any(thirds == third):
+        continue
       subset = np.zeros_like(test)
       subset[indices[thirds == third]] = True
       coverage = calibration(

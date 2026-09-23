@@ -220,3 +220,13 @@ def test_calibration_allows_for_a_held_out_soundings_own_misplacement():
     map_only, points, truth, test, input_variance=np.full(4000, 3.0)
   )
   assert honest == pytest.approx(0.95, abs=0.015)
+
+
+def test_score_survives_a_survey_placed_from_truth(capsys):
+  """Zero input noise everywhere has no thirds to split into."""
+  rng = np.random.default_rng(4)
+  X = rng.uniform(0, 10, size=(200, 2))
+  y = rng.normal(size=200)
+  train = np.arange(200) < 150
+  score(_Calibrated(0.0, 1.0), X, y, train, ~train, input_variance=np.zeros(50))
+  assert "by input noise" not in capsys.readouterr().out
