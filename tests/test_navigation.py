@@ -29,7 +29,10 @@ from auv_pose.estimation.manifold import (
   boxplus,
 )
 from auv_pose.estimation.navigation import (
+  MAGNETIC_NORTH,
   Aiding,
+  AidingNoise,
+  InertialNavigator,
   depth_reading,
   dvl_noise_covariance,
   dvl_reading,
@@ -343,3 +346,91 @@ def test_the_smoother_is_consistent_with_its_own_covariance(monte_carlo):
   low, high = consistent_band(*smoothed.shape)
   mean = smoothed.mean(axis=0)
   assert np.all((low < mean) & (mean < high)), mean
+
+
+# -- the tick-driven navigator ----------------------------------------------
+
+
+AIDING_NOISE = AidingNoise(DVL_NOISE, depth=0.05, magnetometer=0.02)
+
+
+def navigator():
+  prior = ManifoldGaussian(
+    NavState.at_rest(position=(0.0, 0.0, -60.0), velocity=(1.0, 0.0, 0.0)),
+    np.eye(DOF) * 1e-4,
+  )
+  return InertialNavigator(prior, DT, AIDING_NOISE, imu_noise=NOISE)
+
+
+def ticks(rng, n):
+  """``n`` noisy still-water IMU ticks with aiding on every sixth."""
+  for index in range(n):
+    aided = index % SAMPLES_PER_STEP == SAMPLES_PER_STEP - 1
+    yield {
+      "index": index,
+      "gyro": rng.normal(scale=NOISE.gyro, size=3),
+      "accel": -GRAVITY_NWU + rng.normal(scale=NOISE.accel, size=3),
+      "dvl": np.array([1.0, 0.0, 0.0]) if aided else None,
+      "depth": -60.0 if aided else None,
+      "magnetometer": MAGNETIC_NORTH if aided else None,
+    }
+
+
+def test_a_cycle_closes_on_aiding_and_carries_every_sample_since():
+  nav = navigator()
+  for reading in ticks(np.random.default_rng(0), 18):
+    nav.tick(**reading)
+
+  assert nav.cycle_ticks == [5, 11, 17]
+  assert all(len(v) == 3 for v in nav.nis.values())
+
+
+def test_a_ping_closes_a_cycle_without_aiding():
+  nav = navigator()
+  still = {"gyro": np.zeros(3), "accel": -GRAVITY_NWU}
+  assert nav.tick(0, **still) is None
+  assert nav.tick(1, **still, close=True) is not None
+  assert nav.cycle_ticks == [1]
+
+
+def test_the_navigator_matches_calling_the_step_directly():
+  """Buffering is bookkeeping only: the record is inertial_step's."""
+  rng = np.random.default_rng(1)
+  readings = list(ticks(rng, 6))
+
+  nav = navigator()
+  for reading in readings:
+    nav.tick(**reading)
+
+  samples = ImuSamples.uniform(
+    [r["gyro"] for r in readings], [r["accel"] for r in readings], DT
+  )
+  last = readings[-1]
+  step, _ = inertial_step(
+    navigator().initial,
+    samples,
+    [
+      Aiding(last["dvl"], dvl_reading, DVL_NOISE),
+      Aiding(np.array([last["depth"]]), depth_reading, np.eye(1) * 0.05**2),
+      Aiding(last["magnetometer"], magnetometer_reading, np.eye(3) * 0.02**2),
+    ],
+    noise=NOISE,
+  )
+
+  np.testing.assert_allclose(nav.belief.cov, step.posterior.cov, atol=1e-15)
+  np.testing.assert_allclose(
+    boxminus(nav.belief.mean, step.posterior.mean), 0.0, atol=1e-15
+  )
+
+
+def test_replaying_the_same_ticks_gives_the_same_record():
+  readings = list(ticks(np.random.default_rng(2), 24))
+  first, second = navigator(), navigator()
+  for reading in readings:
+    first.tick(**reading)
+  for reading in readings:
+    second.tick(**reading)
+
+  for a, b in zip(first.history, second.history):
+    np.testing.assert_array_equal(a.posterior.cov, b.posterior.cov)
+    np.testing.assert_array_equal(a.cross_cov, b.cross_cov)

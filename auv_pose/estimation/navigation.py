@@ -63,6 +63,8 @@ from auv_pose.estimation.unscented import (
 __all__ = [
   "MAGNETIC_NORTH",
   "Aiding",
+  "AidingNoise",
+  "InertialNavigator",
   "Update",
   "depth_reading",
   "dvl_noise_covariance",
@@ -308,3 +310,140 @@ def inertial_step(
 
   step = SmootherStep(prior=prior, posterior=posterior, cross_cov=cross_cov)
   return step, updates
+
+
+class AidingNoise(NamedTuple):
+  """Measurement noise of the three aiding sensors.
+
+  :param dvl: Body-velocity covariance, ``(3, 3)``; see
+      :func:`dvl_noise_covariance`.
+  :param depth: Pressure-depth standard deviation, metres.
+  :param magnetometer: Per-axis standard deviation of the unit field reading.
+      At small angles this is the heading error in radians, so 0.03 is about
+      1.7 degrees.
+  """
+
+  dvl: NumpyArray
+  depth: float
+  magnetometer: float
+
+
+class InertialNavigator:
+  """The forward pass driven one IMU tick at a time.
+
+  The same object serves a vehicle navigating live and a log being replayed,
+  so the two give the same record by construction. IMU samples are buffered
+  until a tick closes a cycle -- any tick carrying an aiding reading, or one
+  the caller closes explicitly because a ping was taken there -- and each
+  closed cycle is one :func:`inertial_step`. Cycle boundaries therefore land
+  exactly on the ticks a sounding needs a pose for.
+
+  :param initial: Belief at the tick before the first sample.
+  :param dt: IMU sample interval, seconds.
+  :param aiding_noise: Noise of the DVL, depth and magnetometer readings.
+  :param imu_noise: The IMU's per-sample noise.
+  :param field: World vector the magnetometer measures.
+  :param gravity: World-frame gravity.
+  """
+
+  def __init__(
+    self,
+    initial: ManifoldGaussian,
+    dt: float,
+    aiding_noise: AidingNoise,
+    imu_noise: ImuNoise = DEFAULT_NOISE,
+    field: ArrayLike = MAGNETIC_NORTH,
+    gravity: ArrayLike = GRAVITY_NWU,
+  ) -> None:
+    self.initial = initial
+    self.belief = initial
+    self.dt = dt
+    self.aiding_noise = aiding_noise
+    self.imu_noise = imu_noise
+    self.field = np.asarray(field, dtype=float)
+    self.gravity = np.asarray(gravity, dtype=float)
+
+    #: One recorded step per closed cycle, and the tick that closed it.
+    self.history: list[SmootherStep[ManifoldGaussian]] = []
+    self.cycle_ticks: list[int] = []
+    #: Normalised innovation squared per update, keyed by sensor name.
+    self.nis: dict[str, list[float]] = {"dvl": [], "depth": [], "compass": []}
+
+    self._gyro: list[NumpyArray] = []
+    self._accel: list[NumpyArray] = []
+
+  def _aiding(self, dvl, depth, magnetometer) -> tuple[list[str], list[Aiding]]:
+    names, aiding = [], []
+    if dvl is not None:
+      names.append("dvl")
+      aiding.append(
+        Aiding(np.asarray(dvl, float), dvl_reading, self.aiding_noise.dvl)
+      )
+    if depth is not None:
+      names.append("depth")
+      aiding.append(
+        Aiding(
+          np.atleast_1d(np.asarray(depth, float)),
+          depth_reading,
+          np.eye(1) * self.aiding_noise.depth**2,
+        )
+      )
+    if magnetometer is not None:
+      names.append("compass")
+      aiding.append(
+        Aiding(
+          np.asarray(magnetometer, float),
+          lambda state: magnetometer_reading(state, self.field),
+          np.eye(3) * self.aiding_noise.magnetometer**2,
+        )
+      )
+    return names, aiding
+
+  def tick(
+    self,
+    index: int,
+    gyro: ArrayLike,
+    accel: ArrayLike,
+    dvl: ArrayLike | None = None,
+    depth: float | None = None,
+    magnetometer: ArrayLike | None = None,
+    close: bool = False,
+  ) -> ManifoldGaussian | None:
+    """Take one IMU sample, and close the cycle if this tick ends one.
+
+    :param index: The tick's index, recorded against the cycle it closes.
+    :param gyro: Body angular rate, rad/s, ``(3,)``.
+    :param accel: Body specific force, m/s^2, ``(3,)``.
+    :param dvl: Body velocity reading, if one arrived this tick.
+    :param depth: Pressure depth, if one arrived this tick.
+    :param magnetometer: Field reading, if one arrived this tick.
+    :param close: End the cycle here even without aiding.
+    :return: The new posterior if a cycle closed, else ``None``.
+    """
+    self._gyro.append(np.asarray(gyro, dtype=float))
+    self._accel.append(np.asarray(accel, dtype=float))
+
+    names, aiding = self._aiding(dvl, depth, magnetometer)
+    if not aiding and not close:
+      return None
+
+    samples = ImuSamples.uniform(self._gyro, self._accel, self.dt)
+    self._gyro, self._accel = [], []
+
+    step, updates = inertial_step(
+      self.belief,
+      samples,
+      aiding,
+      noise=self.imu_noise,
+      gravity=self.gravity,
+    )
+    for name, update in zip(names, updates):
+      innovation = update.innovation
+      self.nis[name].append(
+        float(innovation @ np.linalg.solve(update.innovation_cov, innovation))
+      )
+
+    self.history.append(step)
+    self.cycle_ticks.append(index)
+    self.belief = step.posterior
+    return self.belief
