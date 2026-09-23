@@ -25,7 +25,7 @@ TRACKS = (
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--log", type=Path, default=Path("wp_c.csv"))
+  parser.add_argument("--log", type=Path, default=Path("navigation.csv"))
   parser.add_argument("--prefix", type=Path, default=Path("trajectory"))
   parser.add_argument(
     "--planes", nargs="+", choices=sorted(PLANES), default=["xy", "xz"]

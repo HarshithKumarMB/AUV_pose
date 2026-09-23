@@ -15,7 +15,7 @@ class CsvLogger:
 
   Use as a context manager::
 
-      with CsvLogger("wp_c.csv", NAVIGATION_COLUMNS) as log:
+      with CsvLogger("navigation.csv", NAVIGATION_COLUMNS) as log:
           log.write(step=0, x=1.0, ...)
   """
 

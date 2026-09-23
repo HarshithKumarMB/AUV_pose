@@ -211,7 +211,7 @@ def parse_args() -> argparse.Namespace:
     description="Terrain-aided waypoint navigation"
   )
   parser.add_argument("--map", type=Path, default=Path("svgp_bathymetry.pkl"))
-  parser.add_argument("--out", type=Path, default=Path("wp_c.csv"))
+  parser.add_argument("--out", type=Path, default=Path("navigation.csv"))
   parser.add_argument("--max-steps", type=int, default=20_000)
   parser.add_argument("--arrival-radius", type=float, default=0.5)
   parser.add_argument(

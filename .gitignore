@@ -14,6 +14,12 @@ result-*
 *.png
 !visuals/*.png
 
+# Pipeline outputs written to the root: surveys, map checkpoints, navigation
+# logs. Surveys live on the data volume; none is committed.
+/*.csv
+/*.pkl
+/*.npz
+
 # Python
 __pycache__/
 *.pyc
