@@ -181,7 +181,8 @@ def parse_args() -> argparse.Namespace:
     help=(
       "carry each sounding's position covariance into its noise over N "
       "fits (McHutchon and Rasmussen's NIGP; the paper's procedure is 2). "
-      "Needs soundings placed by georeference.py --pose smoothed. 0 is off"
+      "Needs soundings placed by georeference.py --pose smoothed. 0 is off; "
+      "1 would be one fit with no inflation, so it is refused"
     ),
   )
   parser.add_argument("--batch-size", type=int, default=5000)
@@ -378,6 +379,11 @@ def score(
 
 def main() -> None:
   args = parse_args()
+  if args.nigp_passes == 1:
+    raise SystemExit(
+      "--nigp-passes 1 is a plain fit: the first pass has no inflation yet. "
+      "Use 0 for off, or 2 for the paper's procedure"
+    )
   if args.out is None:
     primary = "svgp" if args.method == "svgp" else "vecchia"
     args.out = Path(f"{primary}_bathymetry.pkl")
@@ -396,9 +402,9 @@ def main() -> None:
     if args.nigp_passes > 0 or set(COVARIANCE_COLUMNS) <= set(frame.columns)
     else None
   )
-  true_xy = (
-    frame[["true_x", "true_y"]].to_numpy(np.float64)
-    if {"true_x", "true_y"} <= set(frame.columns)
+  truth = (
+    frame[["true_x", "true_y", "true_z"]].to_numpy(np.float64)
+    if {"true_x", "true_y", "true_z"} <= set(frame.columns)
     else None
   )
   print(
@@ -421,7 +427,7 @@ def main() -> None:
       raise SystemExit("no soundings inside --bounds")
     X, y = X[inside], y[inside]
     cov = None if cov is None else cov[inside]
-    true_xy = None if true_xy is None else true_xy[inside]
+    truth = None if truth is None else truth[inside]
 
   if args.max_elevation is not None:
     deep = y <= args.max_elevation
@@ -433,7 +439,7 @@ def main() -> None:
       raise SystemExit("no soundings below --max-elevation")
     X, y = X[deep], y[deep]
     cov = None if cov is None else cov[deep]
-    true_xy = None if true_xy is None else true_xy[deep]
+    truth = None if truth is None else truth[deep]
 
   if args.decimate_cell > 0:
     if args.decimate_cell >= args.holdout_cell:
@@ -443,12 +449,12 @@ def main() -> None:
         "soundings across the boundary the blocked split relies on"
       )
     before = len(X)
-    if cov is not None or true_xy is not None:
+    if cov is not None or truth is not None:
       groups = cell_groups(X, args.decimate_cell)
       if cov is not None:
         cov = aggregate_covariance(cov, groups)
-      if true_xy is not None:
-        true_xy = np.stack([np.median(true_xy[g], axis=0) for g in groups])
+      if truth is not None:
+        truth = np.stack([np.median(truth[g], axis=0) for g in groups])
     X, y = decimate(X, y, args.decimate_cell)
     print(
       f"Decimated to {len(X)} soundings "
@@ -541,13 +547,14 @@ def main() -> None:
         passes=args.nigp_passes,
         **options,
       )
-      inflation = inflations[-1]
-      used = inflations[-2] if len(inflations) > 1 else np.zeros_like(inflation)
+      # The last fit used inflations[-2]; inflations[-1] is what a further
+      # pass would use, so their difference is whether it has settled.
+      inflation = inflations[-2]
       print(
-        f"  NIGP, {args.nigp_passes} passes: input-noise variance median "
-        f"{np.median(inflations[-1]):.4f}, 95th "
-        f"{np.percentile(inflations[-1], 95):.4f} m^2; last change "
-        f"{np.abs(inflations[-1] - used).max():.4f} m^2 at most"
+        f"  NIGP, {args.nigp_passes} passes: input-noise variance used, median "
+        f"{np.median(inflation):.4f}, 95th "
+        f"{np.percentile(inflation, 95):.4f} m^2; a further pass would change "
+        f"it by {np.abs(inflations[-1] - inflation).max():.4f} m^2 at most"
       )
 
     print(f"  fitted on {vecchia.fit_device}")
@@ -585,12 +592,12 @@ def main() -> None:
         if cov is None
         else input_noise(vecchia, X, cov, test),
       )
-      if true_xy is not None:
-        # The held-out soundings are misplaced too, so scoring at their
-        # recorded positions measures self-consistency. At their true ones it
-        # measures the map.
-        at_truth = vecchia.predict(true_xy[test])
-        error = np.sqrt(np.mean((at_truth - y[test]) ** 2))
+      if truth is not None:
+        # The held-out soundings are misplaced too, horizontally and in depth,
+        # so scoring against them measures self-consistency. Against where
+        # they truly lie -- both position and depth -- it measures the map.
+        at_truth = vecchia.predict(truth[test, :2])
+        error = np.sqrt(np.mean((at_truth - truth[test, 2]) ** 2))
         print(f"  rmse at the true positions      {error:.3f} m")
 
   if len(rmse) == 2:

@@ -1611,7 +1611,8 @@ def fit_vecchia_nigp(
   :param points: Sounding positions, ``(N, 2)``.
   :param depth: Seabed elevation, ``(N,)``.
   :param position_cov: Each sounding's horizontal covariance, ``(N, 2, 2)``.
-  :param passes: Fits to run. The first has no inflation.
+  :param passes: Fits to run, at least two: the first has no inflation, so a
+      single pass would be a plain fit wearing NIGP's name.
   :param kwargs: Passed to every :func:`fit_vecchia`.
   :return: The last fit, and the inflation computed after each pass, so
       ``inflations[-1] - inflations[-2]`` shows whether it has settled.
@@ -1621,8 +1622,11 @@ def fit_vecchia_nigp(
       back. A survey whose navigation drifted *consistently* -- the whole map
       shifted by the same error -- is biased, and no variance term fixes that.
   """
-  if passes < 1:
-    raise ValueError(f"need at least one pass, got {passes}")
+  if passes < 2:
+    raise ValueError(
+      f"NIGP needs at least two passes, got {passes}: the first has no "
+      "inflation, so one pass is a plain fit"
+    )
   points = np.asarray(points, dtype=float)
   position_cov = np.asarray(position_cov, dtype=float)
   if position_cov.shape != (len(points), 2, 2):

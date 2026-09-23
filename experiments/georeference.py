@@ -197,6 +197,7 @@ def main() -> None:
   # The start's own horizontal error, and its spread: shared by every sounding.
   start = initial_belief(meta).mean.position[:2] - start_truth(survey)
   sigma0 = np.sqrt(np.diag(initial_belief(meta).cov)[:2])
+  map_frame = np.zeros(2) if args.pose == "truth" else start
 
   if args.pose == "truth":
     poses = {
@@ -261,6 +262,10 @@ def main() -> None:
     true_points = seabed_points(
       true.position, true.rotation, ranges, bearings, swath, nadir
     )
+    # Truth in the map's frame, which the shared start offset displaces
+    # rigidly from the world's: the question downstream is how wrong the map is,
+    # not where its frame sits.
+    true_points[:, :2] += map_frame
     finite = np.isfinite(points).all(axis=1)
     frames.append(
       pd.DataFrame(
@@ -288,11 +293,11 @@ def main() -> None:
   )
 
   if args.pose != "truth":
-    # Relative to the start's offset, like the covariance it is compared with.
+    # Truth is already in the map's frame, so this is relative to the start,
+    # like the covariance it is compared with.
     offset = (
       soundings[["x", "y"]].to_numpy()
       - soundings[["true_x", "true_y"]].to_numpy()
-      - start
     )
     distance = np.linalg.norm(offset, axis=1)
     sigma = np.sqrt(soundings["cov_xx"] + soundings["cov_yy"]).to_numpy()

@@ -1608,3 +1608,10 @@ def test_nigp_refuses_a_covariance_of_the_wrong_shape():
   points, depth, cov = misplaced_survey(n=40)
   with pytest.raises(ValueError, match="position covariance"):
     fit_vecchia_nigp(points, depth, cov[:-1], m=5, steps=1, device="cpu")
+
+
+def test_nigp_refuses_a_single_pass():
+  """One pass has no inflation yet: it would be a plain fit under NIGP's name."""
+  points, depth, cov = misplaced_survey(n=40)
+  with pytest.raises(ValueError, match="at least two passes"):
+    fit_vecchia_nigp(points, depth, cov, passes=1, m=5, steps=1, device="cpu")

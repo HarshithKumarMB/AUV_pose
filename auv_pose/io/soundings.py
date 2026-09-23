@@ -42,7 +42,9 @@ COVARIANCE_COLUMNS = ("cov_xx", "cov_xy", "cov_yy", "cov_zz")
 
 #: Written by ``georeference.py`` and optional on read. ``ping`` groups the
 #: beams of one ping, which share the vehicle's error; ``true_`` is where the
-#: same range would have landed from the true pose -- scoring only.
+#: same range would have landed from the true pose, **in the map's frame** --
+#: shifted by the survey's shared start offset, so it can be compared with the
+#: map directly. Scoring only.
 OPTIONAL_COLUMNS = (*COVARIANCE_COLUMNS, "ping", "true_x", "true_y", "true_z")
 
 
