@@ -55,6 +55,7 @@ __all__ = [
   "design_matrix",
   "draw",
   "fit_vecchia",
+  "fit_vecchia_nigp",
   "initial_hyperparameters",
   "sparse_factor",
   "vecchia_loglik",
@@ -1585,6 +1586,62 @@ def fit_vecchia(
     fit_device=str(resolved),
     information=information,
   )
+
+
+def fit_vecchia_nigp(
+  points: ArrayLike,
+  depth: ArrayLike,
+  position_cov: ArrayLike,
+  passes: int = 2,
+  **kwargs,
+) -> tuple[VecchiaMap, list[np.ndarray]]:
+  """Fit with each sounding's position uncertainty carried into its noise.
+
+  McHutchon and Rasmussen's noisy-input GP (NIGP), eq. 6: a position error
+  ``e ~ N(0, Sigma_q)`` moves a sounding's depth by about ``grad(mu)' e``, so
+  to first order it is extra *output* noise of variance
+  ``s = grad(mu)' Sigma_q grad(mu)``. That is zero on flat seabed and large on
+  a slope, which is the point: a misplaced sounding on a slope is a wrong
+  depth, and one on the flat is harmless.
+
+  The slope comes from the map being fitted, so this iterates: fit, take the
+  mean's gradient at every sounding, refit with ``s`` frozen and ``sigma_z^2``
+  still free. §3.2's procedure is two passes; the paper notes it can go on.
+
+  :param points: Sounding positions, ``(N, 2)``.
+  :param depth: Seabed elevation, ``(N,)``.
+  :param position_cov: Each sounding's horizontal covariance, ``(N, 2, 2)``.
+  :param passes: Fits to run. The first has no inflation.
+  :param kwargs: Passed to every :func:`fit_vecchia`.
+  :return: The last fit, and the inflation computed after each pass, so
+      ``inflations[-1] - inflations[-2]`` shows whether it has settled.
+
+  Note:
+      This inflates the variance of a misplaced sounding; it does not move it
+      back. A survey whose navigation drifted *consistently* -- the whole map
+      shifted by the same error -- is biased, and no variance term fixes that.
+  """
+  if passes < 1:
+    raise ValueError(f"need at least one pass, got {passes}")
+  points = np.asarray(points, dtype=float)
+  position_cov = np.asarray(position_cov, dtype=float)
+  if position_cov.shape != (len(points), 2, 2):
+    raise ValueError(
+      f"expected ({len(points)}, 2, 2) position covariance, "
+      f"got {position_cov.shape}"
+    )
+
+  inflation = None
+  inflations: list[np.ndarray] = []
+  fitted = None
+  for _ in range(passes):
+    fitted = fit_vecchia(points, depth, noise_inflation=inflation, **kwargs)
+    slope = fitted.mean_gradient(points)
+    inflation = np.einsum("nd,nde,ne->n", slope, position_cov, slope)
+    inflations.append(inflation)
+
+  assert fitted is not None
+  return fitted, inflations
 
 
 def _query_order(queries: np.ndarray) -> np.ndarray:

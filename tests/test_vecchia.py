@@ -24,6 +24,7 @@ import math
 from itertools import pairwise
 
 import numpy as np
+import pytest
 import torch
 
 from auv_pose.estimation.terrain import DepthMap
@@ -39,6 +40,7 @@ from auv_pose.mapping.vecchia import (
   design_matrix,
   draw,
   fit_vecchia,
+  fit_vecchia_nigp,
   initial_hyperparameters,
   sparse_factor,
   vecchia_loglik,
@@ -1551,3 +1553,58 @@ def test_a_spline_mean_fits_and_predicts():
   gradient = fitted.mean_gradient(queries)
   assert gradient.shape == (40, 2)
   assert np.all(np.isfinite(gradient))
+
+
+# -- noisy inputs (NIGP) ----------------------------------------------------
+
+
+def misplaced_survey(seed=30, n=700):
+  """A known field sampled at true positions, recorded at jittered ones.
+
+  Each sounding's position covariance grows with a stand-in for its offset
+  across the swath, as the heading term makes it.
+  """
+  rng = np.random.default_rng(seed)
+  truth = rng.uniform(-40, 40, size=(n, 2))
+  depth = gp_draw(
+    truth,
+    torch.tensor(math.log(9.0), dtype=torch.float64),
+    torch.log(torch.tensor([6.0, 6.0], dtype=torch.float64)),
+    0.04,
+    seed=seed + 1,
+  )
+  spread = rng.uniform(0.05, 1.2, size=n)
+  cov = spread[:, None, None] ** 2 * np.eye(2)
+  recorded = truth + spread[:, None] * rng.normal(size=(n, 2))
+  return recorded, depth, cov
+
+
+def test_nigp_gives_the_position_error_back_to_the_positions():
+  """Plain, the nugget absorbs the misplacement; with NIGP it need not."""
+  points, depth, cov = misplaced_survey()
+  kwargs = {"m": 20, "steps": 300, "device": "cpu"}
+
+  plain = fit_vecchia(points, depth, **kwargs)
+  nigp, _ = fit_vecchia_nigp(points, depth, cov, passes=2, **kwargs)
+
+  assert nigp.hyper.noise < 0.5 * plain.hyper.noise, (
+    nigp.hyper.noise,
+    plain.hyper.noise,
+  )
+
+
+def test_the_nigp_inflation_settles_across_passes():
+  points, depth, cov = misplaced_survey(seed=32)
+  _, inflations = fit_vecchia_nigp(
+    points, depth, cov, passes=3, m=20, steps=300, device="cpu"
+  )
+
+  first = np.abs(inflations[1] - inflations[0]).max()
+  second = np.abs(inflations[2] - inflations[1]).max()
+  assert second < first, (first, second)
+
+
+def test_nigp_refuses_a_covariance_of_the_wrong_shape():
+  points, depth, cov = misplaced_survey(n=40)
+  with pytest.raises(ValueError, match="position covariance"):
+    fit_vecchia_nigp(points, depth, cov[:-1], m=5, steps=1, device="cpu")
