@@ -125,6 +125,18 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--place-by",
+    choices=("recorded", "truth"),
+    default="recorded",
+    help=(
+      "which positions and depths the map is fitted to. 'truth' is the "
+      "control for a navigated survey: every selection -- bounds, objects, "
+      "decimation cells, holdout blocks -- is still made on the recorded "
+      "positions, and only then are the true ones swapped in, so the two maps "
+      "are fitted and scored on the same soundings. Needs true_x/y/z"
+    ),
+  )
+  parser.add_argument(
     "--drop-objects",
     action="store_true",
     help=(
@@ -413,6 +425,10 @@ def score(
 
 def main() -> None:
   args = parse_args()
+  if args.place_by == "truth" and args.nigp_passes > 0:
+    raise SystemExit(
+      "--place-by truth has no placement error for NIGP to model"
+    )
   if args.nigp_passes == 1:
     raise SystemExit(
       "--nigp-passes 1 is a plain fit: the first pass has no inflation yet. "
@@ -514,6 +530,16 @@ def main() -> None:
   else:
     train = np.ones(len(X), dtype=bool)
     test = np.zeros(len(X), dtype=bool)
+
+  if args.place_by == "truth":
+    # After every selection, never before: selections made on true positions
+    # would hand the control a different set of soundings, and a comparison of
+    # two maps on different soundings is not a comparison.
+    if truth is None:
+      raise SystemExit("--place-by truth needs true_x, true_y, true_z columns")
+    X, y = truth[:, :2], truth[:, 2]
+    cov = None
+    print("Fitting the true positions and depths of the same soundings")
 
   fitted: dict[str, object] = {}
   rmse: dict[str, float] = {}
