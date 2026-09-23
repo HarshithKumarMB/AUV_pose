@@ -13,6 +13,7 @@ __all__ = [
   "bottom_return_ranges",
   "range_bins",
   "seabed_points",
+  "sounding_covariance",
 ]
 
 
@@ -146,3 +147,74 @@ def seabed_points(
     np.asarray(position, dtype=float)
     + offsets @ np.asarray(rotation, dtype=float).T
   )
+
+
+def sounding_covariance(
+  pose_cov: ArrayLike,
+  rotation: ArrayLike,
+  beam_ranges: ArrayLike,
+  bearings: ArrayLike,
+  swath_axis: ArrayLike = (0.0, 1.0, 0.0),
+  nadir_axis: ArrayLike = (0.0, 0.0, 1.0),
+  sigma_range: float = 0.0,
+) -> NDArray[np.float64]:
+  """Covariance of each sounding :func:`seabed_points` places, from the pose's.
+
+  A sounding is ``q = p + R d`` with ``d`` the beam's body-frame offset. Under
+  the right perturbation the navigation state uses, ``R -> R exp(phi)``, the
+  first-order error is ``dq = dp - R [d]x phi``, so
+
+      Sigma_q = J P J^T,   J = [ I | -R [d]x ],
+
+  with ``P`` the pose's ``(6, 6)`` position-and-rotation covariance, cross terms
+  included. Range noise adds ``sigma_r^2 u u^T`` along the beam.
+
+  **The rotation term is the one that matters, and it is per-beam.** It scales
+  with ``|d|``: at 70 m altitude an outer beam lands 40 m out, so one degree of
+  heading error moves it 0.7 m sideways while barely moving nadir. That growth
+  across the swath is the structure the map's input-noise correction uses; a
+  covariance equal for every beam of a ping would reduce it to a constant.
+
+  Args:
+      pose_cov: ``(6, 6)`` covariance of ``[position, rotation]``, rotation as a
+          right perturbation in radians -- the ``POSITION`` and ``ROTATION``
+          blocks of a :class:`~auv_pose.estimation.manifold.ManifoldGaussian`.
+      rotation: Body-to-world rotation, shape ``(3, 3)``.
+      beam_ranges: Range per beam in metres.
+      bearings: Bearing per beam in radians from nadir.
+      swath_axis: Body-frame unit vector the fan opens along.
+      nadir_axis: Body-frame unit vector the fan is centred on.
+      sigma_range: Range noise standard deviation, metres.
+
+  Returns:
+      Covariances, shape ``(n, 3, 3)``, world frame; NaN where the range is.
+  """
+  pose_cov = np.asarray(pose_cov, dtype=float)
+  if pose_cov.shape != (6, 6):
+    raise ValueError(f"expected a (6, 6) pose covariance, got {pose_cov.shape}")
+  rotation = np.asarray(rotation, dtype=float)
+  beam_ranges = np.asarray(beam_ranges, dtype=float)
+  bearings = np.asarray(bearings, dtype=float)
+
+  directions = np.cos(bearings)[:, None] * np.asarray(
+    nadir_axis, dtype=float
+  ) + np.sin(bearings)[:, None] * np.asarray(swath_axis, dtype=float)
+  offsets = beam_ranges[:, None] * directions
+
+  # [d]x for every beam, then -R [d]x.
+  skews = np.zeros((len(offsets), 3, 3))
+  skews[:, 0, 1], skews[:, 0, 2] = -offsets[:, 2], offsets[:, 1]
+  skews[:, 1, 0], skews[:, 1, 2] = offsets[:, 2], -offsets[:, 0]
+  skews[:, 2, 0], skews[:, 2, 1] = -offsets[:, 1], offsets[:, 0]
+
+  jacobian = np.zeros((len(offsets), 3, 6))
+  jacobian[:, :, :3] = np.eye(3)
+  jacobian[:, :, 3:] = -rotation @ skews
+
+  cov = jacobian @ pose_cov @ jacobian.transpose(0, 2, 1)
+
+  if sigma_range > 0.0:
+    along = directions @ rotation.T
+    cov = cov + sigma_range**2 * along[:, :, None] * along[:, None, :]
+
+  return 0.5 * (cov + cov.transpose(0, 2, 1))
