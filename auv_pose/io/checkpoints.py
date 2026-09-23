@@ -225,7 +225,10 @@ def _load_vecchia(path: Path, checkpoint: dict) -> VecchiaMap:
     beta=np.asarray(checkpoint["beta"], dtype=np.float64),
     hyper=VecchiaHyperparameters(
       log_amplitude=float(checkpoint["log_amplitude"]),
-      log_lengthscale=tuple(float(v) for v in checkpoint["log_lengthscale"]),
+      log_lengthscale=(
+        float(checkpoint["log_lengthscale"][0]),
+        float(checkpoint["log_lengthscale"][1]),
+      ),
       log_noise=float(checkpoint["log_noise"]),
     ),
     noise=np.asarray(checkpoint["noise"], dtype=np.float64),

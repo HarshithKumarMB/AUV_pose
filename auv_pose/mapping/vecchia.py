@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Literal, overload
 
 import numpy as np
 import torch
@@ -44,6 +45,9 @@ from torch.utils.checkpoint import checkpoint
 
 from auv_pose.mapping.kernels import matern52, matern52_gradient
 from auv_pose.mapping.ordering import maximin_order, ordered_neighbours
+
+if TYPE_CHECKING:
+  from scipy.spatial import KDTree
 
 __all__ = [
   "DEFAULT_JITTER",
@@ -625,7 +629,7 @@ def whiten_gram(
       rows = tail[start : start + chunk]
       conditioning = neighbours[start : start + chunk]
 
-      piece, diagonal = checkpoint(
+      recomputed = checkpoint(
         _gram_chunk,
         _gather_block(points, conditioning, rows),
         _gather_block(values, conditioning, rows),
@@ -635,6 +639,9 @@ def whiten_gram(
         floor,
         use_reentrant=False,
       )
+      # checkpoint returns what the function does; its stub only says Any|None.
+      assert recomputed is not None
+      piece, diagonal = recomputed
       gram = gram + piece
       log_diagonal = log_diagonal + diagonal
 
@@ -1108,7 +1115,7 @@ class VecchiaMap:
   basis: MeanBasis = LINEAR_MEAN
   fit_device: str = "cpu"
   information: np.ndarray | None = None
-  _tree: object | None = field(default=None, repr=False, compare=False)
+  _tree: KDTree | None = field(default=None, repr=False, compare=False)
 
   @property
   def lengthscale(self) -> np.ndarray:
@@ -1116,7 +1123,7 @@ class VecchiaMap:
     return self.hyper.lengthscale
 
   @property
-  def tree(self):
+  def tree(self) -> KDTree:
     """A ``KDTree`` over the survey, built **once** and kept.
 
     ``navigate.py`` queries the map every ping at 5 Hz. Rebuilding a tree over
@@ -1125,11 +1132,12 @@ class VecchiaMap:
     than in ``__init__`` so that loading a checkpoint stays cheap for callers
     that only want the hyperparameters.
     """
-    if self._tree is None:
+    tree = self._tree
+    if tree is None:
       from scipy.spatial import KDTree
 
-      self._tree = KDTree(self.structure.points)
-    return self._tree
+      tree = self._tree = KDTree(self.structure.points)
+    return tree
 
   def predict_joint(
     self,
@@ -1273,6 +1281,27 @@ class VecchiaMap:
       gradients.append((slope * weights).sum(dim=1).numpy() + mean_slope)
 
     return np.concatenate(gradients)
+
+  @overload
+  def predict(
+    self,
+    points: ArrayLike,
+    chunk_size: int = ...,
+    with_std: Literal[False] = ...,
+    observation_noise: bool = ...,
+    jitter: float = ...,
+  ) -> np.ndarray: ...
+
+  @overload
+  def predict(
+    self,
+    points: ArrayLike,
+    chunk_size: int = ...,
+    *,
+    with_std: Literal[True],
+    observation_noise: bool = ...,
+    jitter: float = ...,
+  ) -> tuple[np.ndarray, np.ndarray]: ...
 
   def predict(
     self,
@@ -1746,7 +1775,7 @@ def _sparse_columns(
   fitted: VecchiaMap,
   queries: np.ndarray,
   jitter: float,
-) -> tuple[Tensor, Tensor, Tensor, np.ndarray]:
+) -> tuple[Tensor, Tensor, np.ndarray, np.ndarray]:
   """The nonzero entries of ``U``'s query columns, one block at a time.
 
   Under the response-first ordering of Katzfuss et al. (2020) the joint is

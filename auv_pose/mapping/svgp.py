@@ -8,6 +8,7 @@ points is.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Literal, cast, overload
 
 import gpytorch
 import numpy as np
@@ -74,8 +75,10 @@ class SVGPModel(gpytorch.models.ApproximateGP):
   def forward(
     self, x: torch.Tensor
   ) -> gpytorch.distributions.MultivariateNormal:
+    # gpytorch types every Module call as Tensor | Distribution | LinearOperator;
+    # a ConstantMean returns a Tensor.
     return gpytorch.distributions.MultivariateNormal(
-      self.mean_module(x), self.covar_module(x)
+      cast(torch.Tensor, self.mean_module(x)), self.covar_module(x)
     )
 
 
@@ -150,7 +153,7 @@ def fit_svgp(
     batches = 0
     for x_batch, y_batch in loader:
       optimizer.zero_grad()
-      loss = -mll(model(x_batch), y_batch)
+      loss = -cast(torch.Tensor, mll(model(x_batch), y_batch))
       loss.backward()
       optimizer.step()
       epoch_loss += float(loss.detach())
@@ -210,6 +213,25 @@ class BathymetryMap:
     tensor = torch.as_tensor(scaled, dtype=torch.float32, device=self.device)
     for i in range(0, len(tensor), chunk_size):
       yield tensor[i : i + chunk_size]
+
+  @overload
+  def predict(
+    self,
+    points: ArrayLike,
+    chunk_size: int = ...,
+    with_std: Literal[False] = ...,
+    observation_noise: bool = ...,
+  ) -> NDArray: ...
+
+  @overload
+  def predict(
+    self,
+    points: ArrayLike,
+    chunk_size: int = ...,
+    *,
+    with_std: Literal[True],
+    observation_noise: bool = ...,
+  ) -> tuple[NDArray, NDArray]: ...
 
   def predict(
     self,
@@ -307,7 +329,10 @@ class BathymetryMap:
 
     with torch.no_grad():
       latent = self.model(tensor)
-      predicted = self.likelihood(latent) if observation_noise else latent
+      predicted = cast(
+        gpytorch.distributions.MultivariateNormal,
+        self.likelihood(latent) if observation_noise else latent,
+      )
       mean = predicted.mean.cpu().numpy()
       cov = predicted.covariance_matrix.cpu().numpy()
 

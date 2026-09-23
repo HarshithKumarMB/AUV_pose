@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Generic, NamedTuple, Protocol, Self, TypeAlias, TypeVar
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 NumpyArray: TypeAlias = NDArray[np.floating]
 
@@ -65,14 +65,17 @@ class GaussianState(NamedTuple):
 class Measurement(NamedTuple):
   """A linear-Gaussian observation of the state.
 
+  Array-like rather than arrays: every consumer converts with ``np.asarray``,
+  so a list or a scalar is as good as an array here.
+
   :param z: Observed value, shape ``(m,)``.
   :param H: Observation model mapping state to measurement, shape ``(m, n)``.
   :param R: Observation noise covariance, shape ``(m, m)``.
   """
 
-  z: NumpyArray
-  H: NumpyArray
-  R: NumpyArray
+  z: ArrayLike
+  H: ArrayLike
+  R: ArrayLike
 
 
 class Step(NamedTuple):
