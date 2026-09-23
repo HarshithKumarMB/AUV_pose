@@ -23,6 +23,7 @@ __all__ = [
   "dvl_sensor",
   "imaging_sonar",
   "imu_sensor",
+  "magnetometer_sensor",
   "ocean_scenario",
   "orientation_sensor",
   "pose_sensor",
@@ -39,8 +40,12 @@ def imu_sensor(
   ang_vel_sigma: float = 0.01,
   accel_bias_sigma: float = 6e-5,
   ang_vel_bias_sigma: float = 5e-5,
+  return_bias: bool = False,
 ) -> dict[str, Any]:
   """An IMU with noise that actually takes effect. Returns ``[accel; ang_vel]``.
+
+  With ``return_bias`` it returns ``[accel; ang_vel; accel_bias; ang_vel_bias]``
+  instead -- the true biases, for scoring an estimator against.
 
   .. warning::
 
@@ -67,7 +72,7 @@ def imu_sensor(
       "AngVelSigma": ang_vel_sigma,
       "AccelBiasSigma": accel_bias_sigma,
       "AngVelBiasSigma": ang_vel_bias_sigma,
-      "ReturnBias": False,
+      "ReturnBias": return_bias,
     },
   }
 
@@ -326,13 +331,43 @@ def orientation_sensor(
   return block
 
 
-def depth_sensor(name: str = "depthsensor", hz: int = 30) -> dict[str, Any]:
-  """Pressure depth."""
-  return {
+def depth_sensor(
+  name: str = "depthsensor", hz: int = 30, sigma: float = 0.0
+) -> dict[str, Any]:
+  """Pressure depth: world ``z``, increasing upward.
+
+  :param sigma: Noise standard deviation, metres. Zero by default, which no
+      real pressure sensor achieves.
+  """
+  block: dict[str, Any] = {
     "sensor_name": name,
     "sensor_type": "DepthSensor",
     "socket": "IMUSocket",
     "Hz": hz,
+  }
+  if sigma > 0.0:
+    block["configuration"] = {"Sigma": sigma}
+  return block
+
+
+def magnetometer_sensor(
+  name: str = "magnetometer", hz: int = 5, sigma: float = 0.03
+) -> dict[str, Any]:
+  """Magnetometer: the world x axis, read in the body frame.
+
+  HoloOcean models an ideal field with additive noise -- no hard- or soft-iron
+  distortion, no declination -- so the reading is ``R^T [1, 0, 0]`` plus noise.
+
+  :param sigma: Per-axis noise on the unit reading. At small angles this is
+      the heading error in radians, so 0.03 is about 1.7 degrees, a plausible
+      compass once a real vehicle's calibration residual is allowed for.
+  """
+  return {
+    "sensor_name": name,
+    "sensor_type": "MagnetometerSensor",
+    "socket": "IMUSocket",
+    "Hz": hz,
+    "configuration": {"Sigma": sigma},
   }
 
 

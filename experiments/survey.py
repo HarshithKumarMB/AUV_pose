@@ -1,41 +1,54 @@
-"""Survey the seabed on a lawnmower track, logging soundings.
+"""Survey the seabed on a lawnmower track, navigating on the vehicle's own filter.
 
-    nix run .#sim -- -c "python -u experiments/survey.py --out pass0.csv"
+    nix run .#sim -- -c "python -u experiments/survey.py --out pass0 --yaw 0"
 
-Flies a boustrophedon pattern with a downward **multibeam** and writes one
-``x, y, z`` row per beam that returned an echo -- the world-frame point where
-that beam struck the seabed. The output feeds ``train_map.py``.
+Flies a boustrophedon pattern with a downward **multibeam**, steering on the
+estimate of an unscented inertial filter aided by a DVL, a pressure sensor and
+a magnetometer -- no absolute position fix, as on the hardware vehicle. It
+writes a **raw log** (:mod:`auv_pose.io.raw_survey`), not soundings: where a
+sounding lies depends on a pose that is only settled once the whole run can be
+smoothed, so ``georeference.py`` places them afterwards. That is how a real
+survey is processed, and it means one flight yields both the navigated map and
+a ground-truth-placed control, from the same pings.
 
-The sensor changed because the singlebeam's soundings split into two tight
-populations 4.87 m apart and one beam gives no way to tell which is the seabed.
-A fan does, by letting each beam be checked against its neighbours. (The "a
-constant beats every bin-selection rule" figure that used to appear here was
-measured over a four-metre strip where the seabed barely varies, so a constant
-won by construction. It does not generalise.) The multibeam's per-beam return is
-0.40 m wide.
+Ground truth is logged beside every reading for scoring and never read by the
+filter or the controller. The one exception is the initial belief, which is
+drawn *around* the true start pose with the stated covariance -- standing in for
+the surface fix a real vehicle takes before it dives.
 
-Uses the ground-truth pose *and attitude* to place each sounding: every beam but
-nadir lands ``range * sin(bearing)`` from the vehicle, so a survey that records
-soundings at the vehicle's own ``(x, y)`` misplaces all of them. This builds the
-reference map that navigation is later corrected against, so it must not itself
-be drifting.
+The multibeam's per-beam return is 0.40 m wide, and 100% of beams answer at
+survey altitude. Sonar and aiding sensors all run at 5 Hz, so every filter
+cycle closes on a ping tick and the smoothed pose lands exactly on it.
 """
 
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 
 import holoocean
 import numpy as np
 
-from auv_pose.io.logs import CsvLogger
-from auv_pose.io.soundings import SOUNDING_COLUMNS
+from auv_pose.estimation.inertial import ImuNoise
+from auv_pose.estimation.manifold import (
+  DOF,
+  ManifoldGaussian,
+  NavState,
+  boxplus,
+)
+from auv_pose.estimation.navigation import (
+  MAGNETIC_NORTH,
+  AidingNoise,
+  InertialNavigator,
+  dvl_noise_covariance,
+)
+from auv_pose.estimation.quaternion import quat_to_rotmat, rotmat_to_quat
+from auv_pose.io.raw_survey import RawSurveyWriter
 from auv_pose.mapping.sonar import (
   azimuth_angles,
   bottom_return_ranges,
   range_bins,
-  seabed_points,
 )
 from experiments.captures import write_capture
 from experiments.cli import configure_sdl, refuse_overwrite
@@ -43,6 +56,10 @@ from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
   PROFILER_NADIR_AXIS,
   PROFILER_SWATH_AXIS,
+  depth_sensor,
+  dvl_sensor,
+  imu_sensor,
+  magnetometer_sensor,
   ocean_scenario,
   orientation_sensor,
   pose_sensor,
@@ -61,6 +78,35 @@ SONAR = {
   "azimuth": 60.0,
   "azimuth_bins": 240,
   "elevation": 1.0,
+}
+
+#: The aiding sensors run at the sonar's rate, as a survey DVL typically does,
+#: so a filter cycle closes on every ping. Running depth at the 30 Hz tick rate
+#: instead is what made the older filter 3-10 sigma overconfident in z: each
+#: reading was treated as independent when the noise was not.
+AIDING_HZ = SONAR_HZ
+DVL_BEAM_SIGMA = 0.02
+DVL_ELEVATION = 22.5
+DEPTH_SIGMA = 0.05
+COMPASS_SIGMA = 0.03
+
+#: IMU noise for a survey. The white-noise terms are the scenarios' defaults;
+#: the bias random walks are sized for a *pass*, not for the 300-sample runs
+#: :func:`~experiments.scenarios.imu_sensor`'s defaults target. A diagonal pass
+#: is about 25,000 ticks, over which those defaults would grow the gyro bias to
+#: 0.45 deg/s. These give about 0.01 deg/s and 1e-3 m/s^2 by the end, which is
+#: a tactical-grade MEMS unit.
+SURVEY_IMU = ImuNoise(gyro=0.01, accel=0.05, gyro_bias=1e-6, accel_bias=6e-6)
+
+#: Spread of the belief navigation starts from, around the true start pose:
+#: position as from a surface GNSS fix, attitude as from a levelled AHRS, and
+#: the biases at what a pass accumulates.
+INITIAL_SIGMA = {
+  "position": [1.0, 1.0, 0.1],
+  "attitude_deg": [1.0, 1.0, 3.0],
+  "velocity": [0.05, 0.05, 0.05],
+  "gyro_bias": [2e-4] * 3,
+  "accel_bias": [1e-3] * 3,
 }
 
 
@@ -132,6 +178,20 @@ def lawnmower(
   return waypoints
 
 
+def initial_covariance() -> np.ndarray:
+  """The initial belief's covariance, from :data:`INITIAL_SIGMA`."""
+  sigma = np.concatenate(
+    [
+      INITIAL_SIGMA["position"],
+      np.radians(INITIAL_SIGMA["attitude_deg"]),
+      INITIAL_SIGMA["velocity"],
+      INITIAL_SIGMA["gyro_bias"],
+      INITIAL_SIGMA["accel_bias"],
+    ]
+  )
+  return np.diag(sigma**2)
+
+
 def build_scenario(
   start: list[float], octree_min: float, yaw: float = 0.0
 ) -> dict:
@@ -143,10 +203,24 @@ def build_scenario(
     # across-track, so it must match the heading lawnmower() was built with.
     rotation=[0.0, 0.0, yaw],
     sensors=[
+      # Truth, logged for scoring only. The socket is load-bearing -- see
+      # orientation_sensor's docstring.
       pose_sensor(),
-      # Seabed points need attitude, not just position. The socket is
-      # load-bearing -- see orientation_sensor's docstring.
       orientation_sensor(),
+      imu_sensor(
+        "imu",
+        hz=TICK_RATE_HZ,
+        accel_sigma=SURVEY_IMU.accel,
+        ang_vel_sigma=SURVEY_IMU.gyro,
+        accel_bias_sigma=SURVEY_IMU.accel_bias,
+        ang_vel_bias_sigma=SURVEY_IMU.gyro_bias,
+        return_bias=True,
+      ),
+      dvl_sensor(
+        hz=AIDING_HZ, vel_sigma=DVL_BEAM_SIGMA, elevation=DVL_ELEVATION
+      ),
+      depth_sensor(hz=AIDING_HZ, sigma=DEPTH_SIGMA),
+      magnetometer_sensor(hz=AIDING_HZ, sigma=COMPASS_SIGMA),
       profiling_sonar("multibeam", hz=SONAR_HZ, **SONAR),
     ],
   )
@@ -154,7 +228,12 @@ def build_scenario(
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="Bathymetry survey")
-  parser.add_argument("--out", type=Path, default=Path("map1.csv"))
+  parser.add_argument(
+    "--out",
+    type=Path,
+    required=True,
+    help="raw log directory to write, e.g. ~/data/auv_pose/surveys_v3/pass0",
+  )
   parser.add_argument(
     "--force", action="store_true", help="overwrite --out if it exists"
   )
@@ -185,8 +264,22 @@ def parse_args() -> argparse.Namespace:
     help=(
       "line spacing, metres. Sets redundancy, not coverage: the swath is 80 m "
       "wide at survey altitude, so 20 m already gives four looks at every "
-      "patch from one heading. The old 2 m came from a survey whose fan lay "
-      "along the track and so covered nothing the line spacing did not"
+      "patch from one heading"
+    ),
+  )
+  parser.add_argument(
+    "--seed",
+    type=int,
+    default=0,
+    help="seeds the initial belief's draw around the true start pose",
+  )
+  parser.add_argument(
+    "--settle-steps",
+    type=int,
+    default=60,
+    help=(
+      "ticks under zero thrust before navigation starts. The vehicle is "
+      "dropped in negatively buoyant and is still sinking on the first tick"
     ),
   )
   parser.add_argument("--max-steps", type=int, default=100_000)
@@ -196,19 +289,16 @@ def parse_args() -> argparse.Namespace:
     type=Path,
     default=None,
     help=(
-      "also write the raw sonar images, poses and attitudes to this .npz. "
-      "check_beam_validity.py reads it directly, so the "
-      "sonar can be scored against the octree on survey data -- over the whole "
-      "box rather than one hover, which matters because the two disagree only "
-      "over particular patches of seabed and a single site cannot tell a sensor "
-      "defect from a feature of the ground"
+      "also write the raw sonar images, with true poses, to this .npz for "
+      "check_beam_validity.py -- scoring the sonar against the octree over "
+      "the whole box rather than one hover"
     ),
   )
   parser.add_argument(
     "--profile-steps",
     type=int,
     default=400,
-    help="stop recording pings after this many; diagnosis, not a survey",
+    help="stop recording images after this many pings; diagnosis, not a survey",
   )
   parser.add_argument(
     "--octree-min",
@@ -218,10 +308,9 @@ def parse_args() -> argparse.Namespace:
       "finest octree voxel in metres. The multibeam's range bins are 0.0995 m, "
       "so holoocean's default of 0.02 is 5x finer -- about the right ratio. "
       "Budget ~30 GB and three minutes of octree generation at startup, after "
-      "which it stops: InitOctreeRange builds the neighbourhood once and the "
-      "run writes nothing more. Raising this is not a free speedup, because "
-      "ShadowEpsilon defaults to 4*OctreeMin, so it changes sonar returns and "
-      "makes surveys inconsistent with maps built at another value"
+      "which it stops. Raising this is not a free speedup: ShadowEpsilon "
+      "defaults to 4*OctreeMin, so it changes sonar returns and makes surveys "
+      "inconsistent with maps built at another value"
     ),
   )
   parser.add_argument(
@@ -232,8 +321,30 @@ def parse_args() -> argparse.Namespace:
   return parser.parse_args()
 
 
+def commit() -> str:
+  """The code version that flew the survey, recorded in the log's metadata."""
+  try:
+    return subprocess.run(
+      ["git", "describe", "--always", "--dirty"],
+      capture_output=True,
+      text=True,
+      check=True,
+    ).stdout.strip()
+  except (OSError, subprocess.CalledProcessError):
+    return "unknown"
+
+
+def reading(state: dict, name: str, size: int | None = None):
+  """A sensor's reading this tick, or ``None`` if it did not report."""
+  if name not in state:
+    return None
+  value = np.asarray(state[name], dtype=float).ravel()
+  return value if size is None else value[:size]
+
+
 def main() -> None:
   args = parse_args()
+  args.out = args.out.expanduser()
 
   refuse_overwrite(args.out, args.force)
   configure_sdl(args.headless)
@@ -257,24 +368,138 @@ def main() -> None:
   )
   bearings = azimuth_angles(SONAR["azimuth"], SONAR["azimuth_bins"])
 
-  follower = WaypointFollower(waypoints, args.arrival_radius)
   command = np.zeros(8)
-  soundings = 0
+  state = env.tick()
+  dvl = None
+  for _ in range(args.settle_steps):
+    state = env.step(command)
+    dvl = reading(state, "dvl", 3) if "dvl" in state else dvl
+
+  # The belief starts *around* the truth, not on it: the stand-in for a
+  # surface fix. Velocity comes from the last DVL reading, rotated by the
+  # believed attitude, as a vehicle would have it.
+  rng = np.random.default_rng(args.seed)
+  true_rotation = np.array(state["orient"], dtype=float)
+  truth = NavState.at_rest(
+    position=np.array(state["pose"])[:3, 3],
+    attitude=rotmat_to_quat(true_rotation),
+  )
+  cov = initial_covariance()
+  mean = boxplus(truth, np.sqrt(np.diag(cov)) * rng.normal(size=DOF))
+  velocity = np.zeros(3) if dvl is None else mean.rotation @ dvl
+  mean = mean._replace(velocity=velocity)
+  initial = ManifoldGaussian(mean, cov)
+
+  aiding_noise = AidingNoise(
+    dvl=dvl_noise_covariance(DVL_BEAM_SIGMA, DVL_ELEVATION),
+    depth=DEPTH_SIGMA,
+    magnetometer=COMPASS_SIGMA,
+  )
+  navigator = InertialNavigator(
+    initial, 1.0 / TICK_RATE_HZ, aiding_noise, imu_noise=SURVEY_IMU
+  )
+
+  meta = {
+    "commit": commit(),
+    "tick_rate_hz": TICK_RATE_HZ,
+    "sonar_hz": SONAR_HZ,
+    "aiding_hz": AIDING_HZ,
+    "sonar": SONAR,
+    "bearings": bearings.tolist(),
+    "swath_axis": list(PROFILER_SWATH_AXIS),
+    "nadir_axis": list(PROFILER_NADIR_AXIS),
+    "imu_noise": SURVEY_IMU._asdict(),
+    "dvl_beam_sigma": DVL_BEAM_SIGMA,
+    "dvl_elevation_deg": DVL_ELEVATION,
+    "depth_sigma": DEPTH_SIGMA,
+    "compass_sigma": COMPASS_SIGMA,
+    "magnetic_field": MAGNETIC_NORTH.tolist(),
+    "initial_sigma": INITIAL_SIGMA,
+    "initial_mean": {
+      k: np.asarray(v).tolist() for k, v in mean._asdict().items()
+    },
+    "seed": args.seed,
+    "yaw_deg": args.yaw,
+    "box": list(args.box),
+    "spacing": args.spacing,
+    "waypoints": waypoints,
+  }
+
+  follower = WaypointFollower(waypoints, args.arrival_radius)
+  ticks = 0
   pings = 0
   live_beams = 0
   images: list[np.ndarray] = []
   image_poses: list[np.ndarray] = []
   image_rotations: list[np.ndarray] = []
 
-  with CsvLogger(args.out, SOUNDING_COLUMNS) as log:
+  with RawSurveyWriter(args.out, len(bearings), meta) as log:
     for step in range(args.max_steps):
       state = env.step(command)
-      position = np.array(state["pose"])[:3, 3]
+      ticks += 1
 
-      # Steer in the body frame: at a non-zero yaw a world-frame error drives
-      # the vehicle sideways, and at 180 degrees it drives it away.
+      imu = np.asarray(state["imu"], dtype=float)
+      accel, gyro, accel_bias, gyro_bias = imu[:4]
+      true_position = np.array(state["pose"])[:3, 3]
+      true_rotation = np.array(state["orient"], dtype=float)
+
+      dvl = reading(state, "dvl", 3)
+      depth_reading = reading(state, "depthsensor", 1)
+      depth = None if depth_reading is None else float(depth_reading[0])
+      compass = reading(state, "magnetometer", 3)
+
+      beam_ranges = None
+      if "multibeam" in state:
+        image = np.asarray(state["multibeam"], dtype=float)
+        beam_ranges = bottom_return_ranges(image, ranges)
+        if args.profiles and len(images) < args.profile_steps:
+          images.append(image.copy())
+          image_poses.append(true_position.copy())
+          image_rotations.append(true_rotation.copy())
+
+      log.tick(
+        step,
+        gyro=gyro,
+        accel=accel,
+        true_position=true_position,
+        true_attitude=rotmat_to_quat(true_rotation),
+        true_gyro_bias=gyro_bias,
+        true_accel_bias=accel_bias,
+        dvl=dvl,
+        depth=depth,
+        magnetometer=compass,
+      )
+      navigator.tick(
+        step,
+        gyro,
+        accel,
+        dvl=dvl,
+        depth=depth,
+        magnetometer=compass,
+        close=beam_ranges is not None,
+      )
+
+      if beam_ranges is not None:
+        log.ping(step, beam_ranges)
+        pings += 1
+        live_beams += int(np.isfinite(beam_ranges).sum())
+
+        # Count pings, not steps: the sonar runs at 5 Hz against a 30 Hz tick.
+        if pings % 200 == 0:
+          estimate = navigator.belief
+          error = np.linalg.norm(estimate.mean.position[:2] - true_position[:2])
+          sigma = np.sqrt(np.trace(estimate.cov[:2, :2]))
+          print(
+            f"step {step} | waypoint {follower.index}/{len(waypoints)} "
+            f"| {pings} pings | horizontal error {error:.2f} m "
+            f"against {sigma:.2f} m (1 sigma)"
+          )
+
+      # Steer on the estimate, in the body frame: at a non-zero yaw a
+      # world-frame error drives the vehicle sideways.
+      estimate = navigator.belief.mean
       next_command = follower.command(
-        position, np.array(state["orient"], dtype=float)
+        estimate.position, quat_to_rotmat(estimate.attitude)
       )
       if next_command is None:
         if follower.finished:
@@ -282,61 +507,22 @@ def main() -> None:
           break
         continue
       command = next_command
-
-      # The sonar runs slower than the tick, so most steps carry no image.
-      if "multibeam" not in state:
-        continue
-
-      image = np.asarray(state["multibeam"], dtype=float)
-      rotation = np.array(state["orient"], dtype=float)
-      if args.profiles and len(images) < args.profile_steps:
-        images.append(image.copy())
-        image_poses.append(position.copy())
-        image_rotations.append(rotation.copy())
-
-      beam_ranges = bottom_return_ranges(image, ranges)
-      points = seabed_points(
-        position,
-        rotation,
-        beam_ranges,
-        bearings,
-        swath_axis=PROFILER_SWATH_AXIS,
-        nadir_axis=PROFILER_NADIR_AXIS,
-      )
-
-      pings += 1
-      finite = np.isfinite(points).all(axis=1)
-      live_beams += int(finite.sum())
-      for x, y, z in points[finite]:
-        log.write(x=x, y=y, z=z)
-      soundings += int(finite.sum())
-
-      # Count pings, not steps. The sonar runs at 5 Hz against a 30 Hz tick and
-      # this sits below the `continue` for a tick without one, so a step-based
-      # test almost never coincides with a ping and a long run prints nothing.
-      if pings % 200 == 0:
-        print(
-          f"step {step} | waypoint {follower.index}/{len(waypoints)} "
-          f"| {pings} pings | {soundings} soundings"
-        )
     else:
       print(f"stopped after {args.max_steps} steps without finishing")
 
-  print(f"Wrote {soundings} soundings to {args.out}")
+  print(f"Wrote {pings} pings and {ticks} ticks to {args.out}")
   if pings:
-    # Measured, this is 100% and stays there -- every beam answers, at every
-    # altitude flown. So it is a regression check and not a quality one: a drop
-    # means the fan stopped reaching the seabed, while 100% says nothing at all
-    # about whether the ranges are right. For that, pass --profiles and score
-    # the capture with check_beam_validity.py.
     fraction = live_beams / (pings * len(bearings))
-    print(f"{pings} pings, {100 * fraction:.1f}% of beams returned an echo")
+    print(f"{100 * fraction:.1f}% of beams returned an echo")
+  for name, values in navigator.nis.items():
+    if values:
+      dof = {"dvl": 3, "depth": 1, "compass": 3}[name]
+      print(
+        f"{name:8s} mean NIS {np.mean(values):.2f} against {dof} "
+        f"over {len(values)} updates"
+      )
 
   if args.profiles and images:
-    # Same schema check_multibeam.py writes, so check_beam_validity.py scores
-    # survey data without a separate flight -- which matters because the
-    # lawnmower crosses the whole box, and the sonar's disagreements with the
-    # octree turned out to be local to particular patches of seabed.
     write_capture(args.profiles, images, image_poses, image_rotations, SONAR)
     print(f"Wrote {len(images)} pings to {args.profiles}")
 
