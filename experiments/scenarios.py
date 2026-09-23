@@ -28,7 +28,6 @@ __all__ = [
   "pose_sensor",
   "profiling_sonar",
   "sidescan_sonar",
-  "singlebeam_sonar",
   "viewport_capture",
 ]
 
@@ -69,30 +68,6 @@ def imu_sensor(
       "AccelBiasSigma": accel_bias_sigma,
       "AngVelBiasSigma": ang_vel_bias_sigma,
       "ReturnBias": False,
-    },
-  }
-
-
-def singlebeam_sonar(
-  name: str = "singlebeam",
-  hz: int = 30,
-  range_min: float = 0.5,
-  range_max: float = 100.0,
-  range_bins: int = 256,
-  opening_angle: float = 10.0,
-) -> dict[str, Any]:
-  """Downward-facing echosounder, for seabed ranging."""
-  return {
-    "sensor_name": name,
-    "sensor_type": "SinglebeamSonar",
-    "rotation": [0, -90, 0],
-    "socket": "IMUSocket",
-    "Hz": hz,
-    "configuration": {
-      "OpeningAngle": opening_angle,
-      "RangeMin": range_min,
-      "RangeMax": range_max,
-      "RangeBins": range_bins,
     },
   }
 
@@ -153,9 +128,9 @@ def profiling_sonar(
 ) -> dict[str, Any]:
   """Downward-facing multibeam, for seabed mapping.
 
-  Replaces :func:`singlebeam_sonar` for surveying, because a fan of narrow beams
-  makes a defect in any one of them visible against its neighbours, which one
-  beam cannot do.
+  Chosen over a singlebeam for surveying, because a fan of narrow beams makes a
+  defect in any one of them visible against its neighbours, which one beam
+  cannot do.
 
   **The singlebeam's soundings are bimodal, not smeared.** Against the octree
   they fall in two *tight* populations 4.87 m apart, the far one agreeing to a

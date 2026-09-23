@@ -27,7 +27,7 @@ from experiments.scenarios import (
   ocean_scenario,
   orientation_sensor,
   pose_sensor,
-  singlebeam_sonar,
+  profiling_sonar,
 )
 
 TICK_RATE_HZ = 30
@@ -40,7 +40,7 @@ EXPECTED_SHAPES = {
   "imu_1": (2, 3),
 }
 
-SONAR_SHAPE = {"singlebeam": (256,)}
+SONAR_SHAPE = {"multibeam": (1000, 240)}
 
 
 def build_scenario(
@@ -53,7 +53,7 @@ def build_scenario(
     imu_sensor("imu_1", hz=TICK_RATE_HZ),
   ]
   if sonar:
-    sensors.append(singlebeam_sonar("singlebeam", hz=TICK_RATE_HZ))
+    sensors.append(profiling_sonar("multibeam"))
 
   return ocean_scenario(
     "smoke",
@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     "--sonar",
     action="store_true",
     help=(
-      "also check the singlebeam. Off by default: sonar needs an octree, "
+      "also check the multibeam. Off by default: sonar needs an octree, "
       "which the simulator builds on first use at several GB per minute"
     ),
   )
@@ -168,9 +168,11 @@ def main() -> int:
   position = np.array(state["pose"])[:3, 3]
   print(f"\nafter {args.steps} steps at zero thrust:")
   print(f"  position      {np.array2string(position, precision=3)}")
-  if args.sonar:
-    peak = int(np.argmax(np.asarray(state["singlebeam"])))
-    print(f"  sonar peak    bin {peak}")
+  # The multibeam pings at 5 Hz, so the last tick may carry no image.
+  if args.sonar and "multibeam" in state:
+    image = np.asarray(state["multibeam"])
+    echoes = int(np.count_nonzero(np.ptp(image, axis=0)))
+    print(f"  sonar echoes  {echoes} of {image.shape[1]} beams")
 
   if failures:
     print(f"\nFAILED: {', '.join(failures)}")

@@ -17,14 +17,13 @@ does not consult it at all. A disagreement is a question, not a verdict.
 
 from auv_pose.mapping.octree import load_surface, top_surface
 from auv_pose.mapping.raycast import Heightfield, raycast
-from auv_pose.mapping.sonar import bottom_return_range, range_bins
+from auv_pose.mapping.sonar import range_bins
 from auv_pose.mapping.svgp import BathymetryMap, SVGPModel, fit_svgp
 
 __all__ = [
   "BathymetryMap",
   "Heightfield",
   "SVGPModel",
-  "bottom_return_range",
   "fit_svgp",
   "load_surface",
   "range_bins",
