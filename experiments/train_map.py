@@ -31,9 +31,14 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from auv_pose.io.checkpoints import save_map, save_vecchia_map
-from auv_pose.io.soundings import load_soundings, soundings_to_arrays
+from auv_pose.io.soundings import (
+  COVARIANCE_COLUMNS,
+  load_soundings,
+  position_covariance,
+  soundings_to_arrays,
+)
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
-from auv_pose.mapping.vecchia import fit_vecchia
+from auv_pose.mapping.vecchia import fit_vecchia, fit_vecchia_nigp
 from experiments.cli import refuse_overwrite
 
 
@@ -168,6 +173,17 @@ def parse_args() -> argparse.Namespace:
       "round-off by about 1500 on the four-heading survey"
     ),
   )
+  parser.add_argument(
+    "--nigp-passes",
+    type=int,
+    default=0,
+    metavar="N",
+    help=(
+      "carry each sounding's position covariance into its noise over N "
+      "fits (McHutchon and Rasmussen's NIGP; the paper's procedure is 2). "
+      "Needs soundings placed by georeference.py --pose smoothed. 0 is off"
+    ),
+  )
   parser.add_argument("--batch-size", type=int, default=5000)
   parser.add_argument(
     "--grid", type=int, default=200, help="plot resolution per axis"
@@ -275,7 +291,7 @@ def blocked_split(
   return ~test, test
 
 
-def calibration(bathymetry, X, y, test) -> float:
+def calibration(bathymetry, X, y, test, input_variance=None) -> float:
   """Fraction of held-out soundings inside the map's own 95% interval.
 
   Accuracy alone cannot tell whether a map's uncertainty is worth propagating
@@ -283,14 +299,30 @@ def calibration(bathymetry, X, y, test) -> float:
   posterior uncertainty rather than a tuning parameter, which makes it
   falsifiable. A map reporting 60% coverage is overconfident by exactly the
   amount that would make the smoother's update too sure of itself.
+
+  :param input_variance: Each held-out sounding's own input noise,
+      ``g' Sigma_q g``, for a survey placed by navigation. A held-out sounding
+      is misplaced like any other, so its interval must allow for that too;
+      leaving it out scores a navigated map as overconfident when it is only
+      being compared against misplaced truth.
   """
   predicted, spread = bathymetry.predict(
     X[test], with_std=True, observation_noise=True
   )
+  if input_variance is not None:
+    spread = np.sqrt(spread**2 + input_variance)
   return float((np.abs(predicted - y[test]) <= 1.96 * spread).mean())
 
 
-def score(bathymetry, X, y, train, test, neighbours: int = 4) -> float:
+def input_noise(bathymetry, X, cov, test) -> np.ndarray:
+  """``g' Sigma_q g`` at each held-out sounding, from the map's own slope."""
+  slope = bathymetry.mean_gradient(X[test].astype(np.float64))
+  return np.einsum("nd,nde,ne->n", slope, cov[test], slope)
+
+
+def score(
+  bathymetry, X, y, train, test, neighbours: int = 4, input_variance=None
+) -> float:
   """Print held-out error beside a nearest-neighbour baseline.
 
   :return: The map's held-out rmse, so callers comparing two maps need not
@@ -312,7 +344,8 @@ def score(bathymetry, X, y, train, test, neighbours: int = 4) -> float:
     f"  predicting the mean depth    {float(np.sqrt(((y[train].mean() - y[test]) ** 2).mean())):7.3f} m"
   )
   print(
-    f"  inside its own 95% interval  {calibration(bathymetry, X, y, test):7.1%}"
+    "  inside its own 95% interval  "
+    f"{calibration(bathymetry, X, y, test, input_variance):7.1%}"
   )
   if gp_rmse > knn_rmse:
     print(
@@ -337,6 +370,19 @@ def main() -> None:
 
   frame = load_soundings(args.surveys)
   X, y = soundings_to_arrays(frame)
+  # Both ride along with X through every filter below, row for row. The
+  # covariance is read whenever the survey carries it, so a map fitted without
+  # NIGP is still scored against its misplaced holdout fairly.
+  cov = (
+    position_covariance(frame)
+    if args.nigp_passes > 0 or set(COVARIANCE_COLUMNS) <= set(frame.columns)
+    else None
+  )
+  true_xy = (
+    frame[["true_x", "true_y"]].to_numpy(np.float64)
+    if {"true_x", "true_y"} <= set(frame.columns)
+    else None
+  )
   print(
     f"Loaded {len(X)} soundings from {', '.join(str(p) for p in args.surveys)}"
   )
@@ -356,6 +402,8 @@ def main() -> None:
     if not inside.any():
       raise SystemExit("no soundings inside --bounds")
     X, y = X[inside], y[inside]
+    cov = None if cov is None else cov[inside]
+    true_xy = None if true_xy is None else true_xy[inside]
 
   if args.max_elevation is not None:
     deep = y <= args.max_elevation
@@ -366,6 +414,8 @@ def main() -> None:
     if not deep.any():
       raise SystemExit("no soundings below --max-elevation")
     X, y = X[deep], y[deep]
+    cov = None if cov is None else cov[deep]
+    true_xy = None if true_xy is None else true_xy[deep]
 
   if args.decimate_cell > 0:
     if args.decimate_cell >= args.holdout_cell:
@@ -375,6 +425,12 @@ def main() -> None:
         "soundings across the boundary the blocked split relies on"
       )
     before = len(X)
+    if cov is not None or true_xy is not None:
+      groups = cell_groups(X, args.decimate_cell)
+      if cov is not None:
+        cov = aggregate_covariance(cov, groups)
+      if true_xy is not None:
+        true_xy = np.stack([np.median(true_xy[g], axis=0) for g in groups])
     X, y = decimate(X, y, args.decimate_cell)
     print(
       f"Decimated to {len(X)} soundings "
@@ -446,16 +502,35 @@ def main() -> None:
       f"Fitting Vecchia on {int(train.sum())} soundings: "
       f"m={args.conditioning} ({split}), {mean}, {args.steps} steps"
     )
-    vecchia = fit_vecchia(
-      X[train].astype(np.float64),
-      y[train].astype(np.float64),
-      m=args.conditioning,
-      steps=args.steps,
-      device=args.device,
-      near=args.near,
-      mean=args.mean,
-      mean_knots=args.mean_knots,
-    )
+    options = {
+      "m": args.conditioning,
+      "steps": args.steps,
+      "device": args.device,
+      "near": args.near,
+      "mean": args.mean,
+      "mean_knots": args.mean_knots,
+    }
+    inflation = None
+    if args.nigp_passes == 0:
+      vecchia = fit_vecchia(
+        X[train].astype(np.float64), y[train].astype(np.float64), **options
+      )
+    else:
+      vecchia, inflations = fit_vecchia_nigp(
+        X[train].astype(np.float64),
+        y[train].astype(np.float64),
+        np.asarray(cov)[train],
+        passes=args.nigp_passes,
+        **options,
+      )
+      inflation = inflations[-1]
+      used = inflations[-2] if len(inflations) > 1 else np.zeros_like(inflation)
+      print(
+        f"  NIGP, {args.nigp_passes} passes: input-noise variance median "
+        f"{np.median(inflations[-1]):.4f}, 95th "
+        f"{np.percentile(inflations[-1], 95):.4f} m^2; last change "
+        f"{np.abs(inflations[-1] - used).max():.4f} m^2 at most"
+      )
 
     print(f"  fitted on {vecchia.fit_device}")
     trace = vecchia.loglik_trace
@@ -473,9 +548,32 @@ def main() -> None:
       print(f"  mean: {vecchia.beta.size} spline coefficients")
     else:
       print(f"  mean coefficients {np.round(vecchia.beta, 4)}")
+    if inflation is not None:
+      # Whether NIGP had anything to do: an inflation far below the nugget
+      # means the fit would have been the same without it.
+      print(
+        "  median input noise / nugget "
+        f"{np.median(inflation) / vecchia.hyper.noise:.3f}"
+      )
     fitted["vecchia"] = vecchia
     if test.any():
-      rmse["vecchia"] = score(vecchia, X, y, train, test)
+      rmse["vecchia"] = score(
+        vecchia,
+        X,
+        y,
+        train,
+        test,
+        input_variance=None
+        if cov is None
+        else input_noise(vecchia, X, cov, test),
+      )
+      if true_xy is not None:
+        # The held-out soundings are misplaced too, so scoring at their
+        # recorded positions measures self-consistency. At their true ones it
+        # measures the map.
+        at_truth = vecchia.predict(true_xy[test])
+        error = np.sqrt(np.mean((at_truth - y[test]) ** 2))
+        print(f"  rmse at the true positions      {error:.3f} m")
 
   if len(rmse) == 2:
     better, worse = sorted(rmse, key=rmse.get)

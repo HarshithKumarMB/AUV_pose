@@ -205,3 +205,18 @@ def test_the_aggregate_stays_positive_semi_definite():
   aggregated = aggregate_covariance(cov, cell_groups(X, cell=1.0))
 
   assert np.linalg.eigvalsh(aggregated[0]).min() >= 0.0
+
+
+def test_calibration_allows_for_a_held_out_soundings_own_misplacement():
+  """A navigated holdout is misplaced too; its interval must say so."""
+  rng = np.random.default_rng(3)
+  points = rng.uniform(0, 10, size=(4000, 2))
+  truth = rng.normal(scale=np.sqrt(1.0 + 3.0), size=4000)
+  test = np.ones(4000, dtype=bool)
+  map_only = _Calibrated(0.0, 1.0)
+
+  assert calibration(map_only, points, truth, test) < 0.8
+  honest = calibration(
+    map_only, points, truth, test, input_variance=np.full(4000, 3.0)
+  )
+  assert honest == pytest.approx(0.95, abs=0.015)
