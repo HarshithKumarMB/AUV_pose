@@ -228,6 +228,18 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--short-lengthscale",
+    type=float,
+    default=None,
+    metavar="METRES",
+    help=(
+      "add a second Matern-5/2 term starting at this length -- about the "
+      "sonar footprint -- so the map can follow objects' steep flanks as "
+      "well as the natural seabed. The single-scale fit is run first, scored, "
+      "saved beside --out as *_single, and used as the long term's start"
+    ),
+  )
+  parser.add_argument(
     "--nigp-passes",
     type=int,
     default=0,
@@ -459,6 +471,53 @@ def score(
   return gp_rmse
 
 
+def describe(vecchia: VecchiaMap, mean: str) -> None:
+  """Print a fitted Vecchia map's convergence and hyperparameters."""
+  print(f"  fitted on {vecchia.fit_device}")
+  trace = vecchia.loglik_trace
+  earlier = trace[max(-len(trace), -(len(trace) // 10) - 1)]
+  print(
+    f"  restricted log likelihood {trace[0]:.1f} -> {trace[-1]:.1f}; "
+    f"last tenth improved by {trace[-1] - earlier:.3f} "
+    "(near zero means converged)"
+  )
+  hyper = vecchia.hyper
+  short = hyper.short_lengthscale
+  if short is not None:
+    print(
+      f"  long term:  lengthscales {np.round(hyper.lengthscale, 2)} m, "
+      f"amplitude {hyper.amplitude:.3f} m^2"
+    )
+    print(
+      f"  short term: lengthscales {np.round(short, 2)} m, "
+      f"amplitude {hyper.short_amplitude:.3f} m^2"
+    )
+    print(f"  nugget {hyper.noise:.4f} m^2")
+  else:
+    print(f"  lengthscales {np.round(vecchia.lengthscale, 2)} m")
+    print(
+      f"  amplitude {hyper.amplitude:.3f} m^2, nugget {hyper.noise:.4f} m^2"
+    )
+  if mean == "spline":
+    print(f"  mean: {vecchia.beta.size} spline coefficients")
+  else:
+    print(f"  mean coefficients {np.round(vecchia.beta, 4)}")
+
+
+def report_truth(
+  vecchia: VecchiaMap, truth: np.ndarray, test: np.ndarray
+) -> None:
+  """Score against where the held-out soundings truly lie.
+
+  They are misplaced too, horizontally and in depth, so scoring against them
+  measures self-consistency. Against their true position and depth it
+  measures the map.
+  """
+  at_truth = vecchia.predict(truth[test, :2])
+  error = np.sqrt(np.mean((at_truth - truth[test, 2]) ** 2))
+  print(f"  rmse at the true positions      {error:.3f} m")
+
+
 def main() -> None:
   args = parse_args()
   if args.place_by == "truth" and args.nigp_passes > 0:
@@ -665,7 +724,36 @@ def main() -> None:
       "mean_knots": args.mean_knots,
     }
     inflation = None
-    if args.nigp_passes == 0:
+    if args.nigp_passes == 0 and args.short_lengthscale is not None:
+      # The single-scale fit is both the two-scale fit's starting point and
+      # the baseline it has to beat, so it is scored and kept too.
+      single = fit_vecchia(
+        X[train].astype(np.float64), y[train].astype(np.float64), **options
+      )
+      print("  single scale:")
+      describe(single, args.mean)
+      if test.any():
+        score(single, X, y, train, test)
+        if truth is not None:
+          report_truth(single, truth, test)
+      single_path = args.out.with_name(
+        f"{args.out.stem}_single{args.out.suffix}"
+      )
+      save_vecchia_map(single_path, single)
+      print(f"  wrote {single_path}")
+
+      print(
+        f"  two scales, short term from {args.short_lengthscale} m, long from "
+        "the single-scale fit:"
+      )
+      vecchia = fit_vecchia(
+        X[train].astype(np.float64),
+        y[train].astype(np.float64),
+        short_lengthscale=args.short_lengthscale,
+        initial=single.hyper,
+        **options,
+      )
+    elif args.nigp_passes == 0:
       vecchia = fit_vecchia(
         X[train].astype(np.float64), y[train].astype(np.float64), **options
       )
@@ -675,6 +763,7 @@ def main() -> None:
         y[train].astype(np.float64),
         np.asarray(cov)[train],
         passes=args.nigp_passes,
+        short_lengthscale=args.short_lengthscale,
         **options,
       )
       # The last fit used inflations[-2]; inflations[-1] is what a further
@@ -687,22 +776,7 @@ def main() -> None:
         f"it by {np.abs(inflations[-1] - inflation).max():.4f} m^2 at most"
       )
 
-    print(f"  fitted on {vecchia.fit_device}")
-    trace = vecchia.loglik_trace
-    print(
-      f"  restricted log likelihood {trace[0]:.1f} -> {trace[-1]:.1f}; "
-      f"last tenth improved by {trace[-1] - trace[max(-len(trace), -(len(trace) // 10) - 1)]:.3f} "
-      "(near zero means converged)"
-    )
-    print(f"  lengthscales {np.round(vecchia.lengthscale, 2)} m")
-    print(
-      f"  amplitude {vecchia.hyper.amplitude:.3f} m^2, "
-      f"nugget {vecchia.hyper.noise:.4f} m^2"
-    )
-    if args.mean == "spline":
-      print(f"  mean: {vecchia.beta.size} spline coefficients")
-    else:
-      print(f"  mean coefficients {np.round(vecchia.beta, 4)}")
+    describe(vecchia, args.mean)
     if inflation is not None:
       # Whether NIGP had anything to do: an inflation far below the nugget
       # means the fit would have been the same without it.
@@ -723,12 +797,7 @@ def main() -> None:
         else input_noise(vecchia, X, cov, test),
       )
       if truth is not None:
-        # The held-out soundings are misplaced too, horizontally and in depth,
-        # so scoring against them measures self-consistency. Against where
-        # they truly lie -- both position and depth -- it measures the map.
-        at_truth = vecchia.predict(truth[test, :2])
-        error = np.sqrt(np.mean((at_truth - truth[test, 2]) ** 2))
-        print(f"  rmse at the true positions      {error:.3f} m")
+        report_truth(vecchia, truth, test)
 
   if len(rmse) == 2:
     better, worse = sorted(rmse, key=lambda name: rmse[name])
