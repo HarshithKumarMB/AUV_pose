@@ -34,6 +34,7 @@ alternatives.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, overload
 
@@ -51,7 +52,9 @@ if TYPE_CHECKING:
 
 __all__ = [
   "DEFAULT_JITTER",
+  "SEPARATION",
   "MeanBasis",
+  "MergedScalesWarning",
   "VecchiaHyperparameters",
   "VecchiaMap",
   "VecchiaStructure",
@@ -606,7 +609,7 @@ def whiten_gram(
   noise = torch.as_tensor(noise, dtype=dtype, device=device).expand(
     structure.size
   )
-  floor = jitter * torch.exp(log_amplitude)
+  floor = jitter * torch.exp(log_amplitude).sum()
 
   n0 = structure.n0
   head_points = points[:n0]
@@ -687,7 +690,7 @@ def whiten(
   noise = torch.as_tensor(noise, dtype=dtype, device=device).expand(
     structure.size
   )
-  floor = jitter * torch.exp(log_amplitude)
+  floor = jitter * torch.exp(log_amplitude).sum()
 
   n0 = structure.n0
   head_points = points[:n0]
@@ -774,7 +777,7 @@ def sparse_factor(
   noise = torch.as_tensor(noise, dtype=dtype, device=device).expand(
     structure.size
   )
-  floor = jitter * torch.exp(log_amplitude)
+  floor = jitter * torch.exp(log_amplitude).sum()
 
   size, n0 = structure.size, structure.n0
   rows: list[np.ndarray] = []
@@ -1057,11 +1060,75 @@ class VecchiaHyperparameters:
       seabed about its linear trend, in metres squared.
   :param log_lengthscale: ``log`` of the per-axis correlation length, metres.
   :param log_noise: ``log(sigma_z^2)``, the base per-sounding variance.
+  :param short_log_amplitude: The second Matérn-5/2 term's ``log(sigma^2)``,
+      for a two-scale kernel; ``None`` for one scale. The first term is then
+      the long one, following the natural seabed; this one follows steep
+      flanks at about the sonar footprint.
+  :param short_log_lengthscale: The second term's per-axis ``log`` lengths.
   """
 
   log_amplitude: float
   log_lengthscale: tuple[float, float]
   log_noise: float
+  short_log_amplitude: float | None = None
+  short_log_lengthscale: tuple[float, float] | None = None
+
+  @property
+  def two_scale(self) -> bool:
+    """Whether the kernel is a sum of a long and a short term."""
+    return self.short_log_amplitude is not None
+
+  @property
+  def total_amplitude(self) -> float:
+    """Marginal variance of the whole kernel, metres squared."""
+    short = (
+      0.0
+      if self.short_log_amplitude is None
+      else math.exp(self.short_log_amplitude)
+    )
+    return self.amplitude + short
+
+  @property
+  def short_amplitude(self) -> float | None:
+    """The short term's ``sigma^2``, metres squared, if there is one."""
+    if self.short_log_amplitude is None:
+      return None
+    return math.exp(self.short_log_amplitude)
+
+  @property
+  def short_lengthscale(self) -> np.ndarray | None:
+    """The short term's per-axis length, metres, if there is one."""
+    if self.short_log_lengthscale is None:
+      return None
+    return np.exp(np.asarray(self.short_log_lengthscale, dtype=float))
+
+  def kernel_tensors(
+    self, device: torch.device | str | None = None
+  ) -> tuple[Tensor, Tensor]:
+    """``(log_amplitude, log_lengthscale)`` as :func:`matern52` takes them.
+
+    Scalar and ``(2,)`` for one scale; stacked ``(2,)`` and ``(2, 2)`` -- long
+    term first -- for two.
+    """
+    amplitude = [self.log_amplitude]
+    lengthscale = [list(self.log_lengthscale)]
+    if self.short_log_amplitude is not None:
+      assert self.short_log_lengthscale is not None
+      amplitude.append(self.short_log_amplitude)
+      lengthscale.append(list(self.short_log_lengthscale))
+    stacked = len(amplitude) > 1
+    return (
+      torch.tensor(
+        amplitude if stacked else amplitude[0],
+        dtype=torch.float64,
+        device=device,
+      ),
+      torch.tensor(
+        lengthscale if stacked else lengthscale[0],
+        dtype=torch.float64,
+        device=device,
+      ),
+    )
 
   @property
   def amplitude(self) -> float:
@@ -1247,11 +1314,8 @@ class VecchiaMap:
     structure = self.structure
     width = min(structure.conditioning, structure.size)
 
-    log_amplitude = torch.tensor(self.hyper.log_amplitude, dtype=torch.float64)
-    log_lengthscale = torch.tensor(
-      self.hyper.log_lengthscale, dtype=torch.float64
-    )
-    floor = jitter * self.hyper.amplitude
+    log_amplitude, log_lengthscale = self.hyper.kernel_tensors()
+    floor = jitter * self.hyper.total_amplitude
 
     survey = torch.as_tensor(structure.points, dtype=torch.float64)
     residual = torch.as_tensor(self.residual, dtype=torch.float64)
@@ -1394,6 +1458,38 @@ def initial_hyperparameters(
   )
 
 
+#: How far apart the two terms' lengths must stay for a two-scale fit to be
+#: two scales. Closer than this and they describe the same structure.
+SEPARATION = 5.0
+
+
+class MergedScalesWarning(UserWarning):
+  """A two-scale fit whose terms converged to the same length."""
+
+
+def _check_separation(hyper: VecchiaHyperparameters) -> None:
+  """Say so when a two-scale fit has collapsed into one scale.
+
+  If the short term's length drifts up to the long one's, the data did not
+  need it, and what comes back is numerically a single-scale map with an extra
+  pair of parameters. That is a finding about the seabed, and the fit reports
+  it rather than handing back a model that only looks richer.
+  """
+  short = hyper.short_lengthscale
+  if short is None:
+    return
+  ratio = hyper.lengthscale / short
+  if np.any(ratio < SEPARATION):
+    warnings.warn(
+      f"the two kernel terms merged: short lengthscale {np.round(short, 2)} m "
+      f"against long {np.round(hyper.lengthscale, 2)} m, a ratio of "
+      f"{np.round(ratio, 1)} where at least {SEPARATION} was expected. The "
+      "short term was not needed; the single-scale map describes this data",
+      MergedScalesWarning,
+      stacklevel=3,
+    )
+
+
 def fit_vecchia(
   points: ArrayLike,
   depth: ArrayLike,
@@ -1411,6 +1507,8 @@ def fit_vecchia(
   mean: str = "linear",
   mean_knots: int = 12,
   mean_support: float = 5.0,
+  short_lengthscale: float | None = None,
+  initial: VecchiaHyperparameters | None = None,
 ) -> VecchiaMap:
   """Fit the linear mean and the kernel hyperparameters to a survey.
 
@@ -1457,6 +1555,12 @@ def fit_vecchia(
   :param mean_knots: Knots per axis when ``mean="spline"``.
   :param mean_support: Soundings a spline basis function needs before it is
       kept; see :meth:`MeanBasis.build`.
+  :param short_lengthscale: Add a second Matérn-5/2 term starting at this
+      length, metres -- about the sonar footprint -- so the map can follow
+      steep flanks as well as the natural seabed. ``None`` for one scale.
+  :param initial: Hyperparameters to start from instead of the data-driven
+      guess: a single-scale fit, say, so the two-scale fit's long term starts
+      in the right basin.
   :return: The fitted map.
 
   Note:
@@ -1494,7 +1598,45 @@ def fit_vecchia(
   beta = np.linalg.lstsq(basis, ordered_depth, rcond=None)[0]
   residual = ordered_depth - basis @ beta
 
-  start = initial_hyperparameters(ordered_points, residual, ard=ard)
+  if short_lengthscale is not None and initial is None:
+    # The long term starts where a single-scale fit ends, so the optimiser
+    # begins in the basin the two-scale model is meant to refine rather than
+    # one where the two terms trade places.
+    initial = fit_vecchia(
+      points,
+      depth,
+      m=m,
+      n0=n0,
+      noise_inflation=noise_inflation,
+      steps=steps,
+      learning_rate=learning_rate,
+      ard=ard,
+      method=method,
+      device=device,
+      jitter=jitter,
+      chunk=chunk,
+      near=near,
+      mean=mean,
+      mean_knots=mean_knots,
+      mean_support=mean_support,
+    ).hyper
+
+  start = (
+    initial
+    if initial is not None
+    else initial_hyperparameters(ordered_points, residual, ard=ard)
+  )
+  if short_lengthscale is not None and not start.two_scale:
+    # The short term starts at the footprint and at a tenth of the long term's
+    # variance: small enough not to displace it, large enough to be pulled on.
+    start = replace(
+      start,
+      short_log_amplitude=start.log_amplitude + math.log(0.1),
+      short_log_lengthscale=(
+        math.log(short_lengthscale),
+        math.log(short_lengthscale),
+      ),
+    )
   resolved = _resolve_device(device)
 
   inflation = (
@@ -1514,23 +1656,24 @@ def fit_vecchia(
     inflation, dtype=torch.float64, device=resolved
   )
 
-  log_amplitude = torch.tensor(
-    start.log_amplitude,
-    dtype=torch.float64,
-    device=resolved,
-    requires_grad=True,
-  )
+  # Stacked, long term first, when the kernel has two scales; see matern52.
+  start_amplitude, start_lengthscale = start.kernel_tensors(resolved)
+  log_amplitude = start_amplitude.clone().requires_grad_(True)
   log_noise = torch.tensor(
     start.log_noise, dtype=torch.float64, device=resolved, requires_grad=True
   )
-  # With ard off there is one lengthscale, broadcast to both axes, so the
-  # optimiser cannot pull them apart.
-  log_lengthscale = torch.tensor(
-    list(start.log_lengthscale) if ard else [start.log_lengthscale[0]],
-    dtype=torch.float64,
-    device=resolved,
-    requires_grad=True,
+  # With ard off there is one lengthscale per term, broadcast to both axes,
+  # so the optimiser cannot pull them apart.
+  log_lengthscale = (
+    (start_lengthscale if ard else start_lengthscale[..., :1])
+    .clone()
+    .requires_grad_(True)
   )
+
+  def per_axis(lengthscale: Tensor) -> Tensor:
+    return (
+      lengthscale if ard else lengthscale.expand(*lengthscale.shape[:-1], 2)
+    )
 
   optimiser = torch.optim.Adam(
     [log_amplitude, log_lengthscale, log_noise], lr=learning_rate
@@ -1541,7 +1684,7 @@ def fit_vecchia(
 
   for _ in range(steps):
     optimiser.zero_grad()
-    lengthscale = log_lengthscale if ard else log_lengthscale.expand(2)
+    lengthscale = per_axis(log_lengthscale)
     variance = torch.exp(log_noise) + inflation_tensor
 
     if method == "reml":
@@ -1571,7 +1714,7 @@ def fit_vecchia(
     trace.append(float(value.detach()))
 
   with torch.no_grad():
-    final = log_lengthscale if ard else log_lengthscale.expand(2)
+    final = per_axis(log_lengthscale)
     if method == "reml":
       # One last evaluation, so beta matches the hyperparameters returned
       # rather than the ones from the step before the final update.
@@ -1599,11 +1742,18 @@ def fit_vecchia(
     )
     information = gram.cpu().numpy()
 
+    amplitudes = log_amplitude.reshape(-1).tolist()
+    lengths = final.reshape(-1, 2).tolist()
     fitted = VecchiaHyperparameters(
-      log_amplitude=float(log_amplitude),
-      log_lengthscale=(float(final[0]), float(final[1])),
+      log_amplitude=amplitudes[0],
+      log_lengthscale=(lengths[0][0], lengths[0][1]),
       log_noise=float(log_noise),
+      short_log_amplitude=amplitudes[1] if len(amplitudes) > 1 else None,
+      short_log_lengthscale=(
+        (lengths[1][0], lengths[1][1]) if len(lengths) > 1 else None
+      ),
     )
+    _check_separation(fitted)
 
   return VecchiaMap(
     structure=structure,
@@ -1810,11 +1960,8 @@ def _sparse_columns(
   survey_distance = survey_distance.reshape(groups, beams, width)
   survey_neighbours = survey_neighbours.reshape(groups, beams, width)
 
-  log_amplitude = torch.tensor(fitted.hyper.log_amplitude, dtype=torch.float64)
-  log_lengthscale = torch.tensor(
-    fitted.hyper.log_lengthscale, dtype=torch.float64
-  )
-  floor = jitter * math.exp(fitted.hyper.log_amplitude)
+  log_amplitude, log_lengthscale = fitted.hyper.kernel_tensors()
+  floor = jitter * fitted.hyper.total_amplitude
 
   block_points = np.empty((groups, beams, width + 1, 2))
   block_noise = np.zeros((groups, beams, width + 1))
