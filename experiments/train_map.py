@@ -37,6 +37,7 @@ from auv_pose.io.soundings import (
   placement_covariance,
   soundings_to_arrays,
 )
+from auv_pose.mapping.cleaning import object_soundings
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
 from auv_pose.mapping.vecchia import (
   fit_vecchia,
@@ -122,6 +123,29 @@ def parse_args() -> argparse.Namespace:
       "echoes. The corrected surveys need none: the 5%% shallow tail once seen "
       "here was the swath-sign mirror, not echoes"
     ),
+  )
+  parser.add_argument(
+    "--drop-objects",
+    action="store_true",
+    help=(
+      "leave out soundings standing on objects -- the Dam's pipelines -- found "
+      "by a morphological opening of the soundings themselves, so a real "
+      "survey can use it too. A bathymetric map should not fit a pipe, and "
+      "the map's input-noise correction cannot: its first-order slope is "
+      "wrong at a sharp edge"
+    ),
+  )
+  parser.add_argument(
+    "--object-window",
+    type=float,
+    default=15.0,
+    help="opening window, metres; must exceed the widest object (~10 m here)",
+  )
+  parser.add_argument(
+    "--object-height",
+    type=float,
+    default=1.0,
+    help="height above the opened seabed that makes a sounding an object, m",
   )
   parser.add_argument(
     "--method",
@@ -447,6 +471,20 @@ def main() -> None:
     X, y = X[deep], y[deep]
     cov = None if cov is None else cov[deep]
     truth = None if truth is None else truth[deep]
+
+  if args.drop_objects:
+    objects = object_soundings(
+      X, y, window=args.object_window, height=args.object_height
+    )
+    print(
+      f"Dropped {int(objects.sum())} object soundings "
+      f"({100 * objects.mean():.1f}%) more than {args.object_height} m above "
+      f"a {args.object_window} m opening of the seabed"
+    )
+    seabed = ~objects
+    X, y = X[seabed], y[seabed]
+    cov = None if cov is None else cov[seabed]
+    truth = None if truth is None else truth[seabed]
 
   if args.decimate_cell > 0:
     if args.decimate_cell >= args.holdout_cell:
