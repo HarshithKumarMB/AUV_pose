@@ -137,6 +137,16 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--decimate-per-line",
+    action="store_true",
+    help=(
+      "keep one point per cell per survey line, told apart by a jump in "
+      "ping index, rather than one per cell. Soundings of one line share its "
+      "drift, so their covariance averages honestly; soundings of different "
+      "lines do not. Needs the ping column"
+    ),
+  )
+  parser.add_argument(
     "--drop-objects",
     action="store_true",
     help=(
@@ -292,6 +302,31 @@ def cell_groups(X: np.ndarray, cell: float) -> list[np.ndarray]:
   _, inverse = np.unique(key, axis=0, return_inverse=True)
   order = np.argsort(inverse.ravel(), kind="stable")
   return np.split(order, np.cumsum(np.bincount(inverse.ravel()))[:-1])
+
+
+def line_groups(
+  X: np.ndarray, ping: np.ndarray, cell: float, gap: int = 50
+) -> list[np.ndarray]:
+  """Like :func:`cell_groups`, but a cell is split by survey line.
+
+  One pass of the vehicle reaches a cell over a few consecutive pings; another
+  line reaches it hundreds of pings later. So within each cell the soundings
+  are ordered by ping and split wherever the ping index jumps by more than
+  ``gap``. Every group then holds one line's soundings, which share that
+  line's drift -- the case in which averaging their covariance is right.
+
+  :param X: Sounding positions, ``(n, 2)``.
+  :param ping: Ping index of each sounding, ``(n,)``.
+  :param cell: Cell side in metres.
+  :param gap: Ping jump that starts a new line.
+  """
+  key = np.floor(X / cell).astype(np.int64)
+  order = np.lexsort((ping, key[:, 1], key[:, 0]))
+  key, ping = key[order], np.asarray(ping)[order]
+  new_cell = np.any(np.diff(key, axis=0) != 0, axis=1)
+  new_line = np.diff(ping) > gap
+  starts = np.flatnonzero(np.concatenate([[True], new_cell | new_line]))
+  return np.split(order, starts[1:])
 
 
 def aggregate_covariance(
@@ -452,6 +487,9 @@ def main() -> None:
     if args.nigp_passes > 0 or set(COVARIANCE_COLUMNS) <= set(frame.columns)
     else None
   )
+  ping = frame["ping"].to_numpy() if "ping" in frame.columns else None
+  if args.decimate_per_line and ping is None:
+    raise SystemExit("--decimate-per-line needs a ping column")
   truth = (
     frame[["true_x", "true_y", "true_z"]].to_numpy(np.float64)
     if {"true_x", "true_y", "true_z"} <= set(frame.columns)
@@ -478,6 +516,7 @@ def main() -> None:
     X, y = X[inside], y[inside]
     cov = None if cov is None else cov[inside]
     truth = None if truth is None else truth[inside]
+    ping = None if ping is None else ping[inside]
 
   if args.max_elevation is not None:
     deep = y <= args.max_elevation
@@ -490,6 +529,7 @@ def main() -> None:
     X, y = X[deep], y[deep]
     cov = None if cov is None else cov[deep]
     truth = None if truth is None else truth[deep]
+    ping = None if ping is None else ping[deep]
 
   if args.drop_objects:
     objects = object_soundings(
@@ -504,6 +544,7 @@ def main() -> None:
     X, y = X[seabed], y[seabed]
     cov = None if cov is None else cov[seabed]
     truth = None if truth is None else truth[seabed]
+    ping = None if ping is None else ping[seabed]
 
   if args.decimate_cell > 0:
     if args.decimate_cell >= args.holdout_cell:
@@ -513,13 +554,17 @@ def main() -> None:
         "soundings across the boundary the blocked split relies on"
       )
     before = len(X)
-    if cov is not None or truth is not None:
+    if args.decimate_per_line:
+      assert ping is not None  # checked on load
+      groups = line_groups(X, ping, args.decimate_cell)
+    else:
       groups = cell_groups(X, args.decimate_cell)
-      if cov is not None:
-        cov = aggregate_covariance(cov, groups)
-      if truth is not None:
-        truth = np.stack([np.median(truth[g], axis=0) for g in groups])
-    X, y = decimate(X, y, args.decimate_cell)
+    if cov is not None:
+      cov = aggregate_covariance(cov, groups)
+    if truth is not None:
+      truth = np.stack([np.median(truth[g], axis=0) for g in groups])
+    X = np.stack([np.median(X[g], axis=0) for g in groups]).astype(X.dtype)
+    y = np.asarray([np.median(y[g]) for g in groups], dtype=y.dtype)
     print(
       f"Decimated to {len(X)} soundings "
       f"({before / max(len(X), 1):.1f}x) at {args.decimate_cell} m cells"

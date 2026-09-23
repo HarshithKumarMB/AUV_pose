@@ -9,6 +9,7 @@ from experiments.train_map import (
   calibration,
   cell_groups,
   decimate,
+  line_groups,
   score,
 )
 
@@ -230,3 +231,21 @@ def test_score_survives_a_survey_placed_from_truth(capsys):
   train = np.arange(200) < 150
   score(_Calibrated(0.0, 1.0), X, y, train, ~train, input_variance=np.zeros(50))
   assert "by input noise" not in capsys.readouterr().out
+
+
+def test_line_groups_split_a_cell_by_survey_line():
+  X = np.array([[0.1, 0.1], [0.2, 0.2], [0.3, 0.3], [0.4, 0.4], [5.0, 5.0]])
+  ping = np.array([10, 11, 400, 401, 12])
+  groups = line_groups(X, ping, cell=1.0)
+  assert sorted(map(sorted, map(list, groups))) == [[0, 1], [2, 3], [4]]
+
+
+def test_line_groups_without_a_second_line_match_cell_groups():
+  rng = np.random.default_rng(5)
+  X = rng.uniform(0, 5, size=(300, 2))
+  ping = np.arange(300) // 10
+  by_line = sorted(
+    tuple(sorted(g)) for g in line_groups(X, ping, 1.0, gap=10**6)
+  )
+  by_cell = sorted(tuple(sorted(g)) for g in cell_groups(X, 1.0))
+  assert by_line == by_cell
