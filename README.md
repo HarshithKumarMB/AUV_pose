@@ -3,9 +3,14 @@
 Terrain-aided pose estimation for an underwater vehicle (BlueROV2) in the
 [HoloOcean](https://byu-holoocean.github.io/holoocean-docs/) simulator.
 
-IMU dead reckoning drifts. The approach here corrects it against a bathymetry map: survey
-the seabed with a downward multibeam sonar, fit a sparse Gaussian process to the
-soundings, then use `sonar_altitude + map_depth` as a position measurement in an EKF.
+IMU dead reckoning drifts. The approach here corrects it against a bathymetry map:
+survey the seabed with a downward multibeam sonar, fit a Vecchia-approximated
+Gaussian process to the soundings, and condition an on-manifold unscented
+smoother on it.
+
+The smoother and its building blocks are in `auv_pose/estimation/` but not yet
+driven by an experiment: `navigate.py` still runs the earlier EKF, with the
+map's depth as a measurement of `z`.
 
 ## Setup
 
@@ -52,19 +57,17 @@ Run from the repository root.
 
 | Step | Command | Needs sim | Output |
 |---|---|---|---|
-| 0. Extract the true seabed | `python experiments/extract_seabed.py` | no | `seabed_truth.csv` — `x, y, z` |
-| 1. Survey the seabed | `python experiments/survey.py --out map2.csv` | yes | `map2.csv` — `x, y, z` |
-| 2. Fit the GP bathymetry map | `python experiments/train_map.py map2.csv` | no | `svgp_bathymetry.pkl`, `gp_bathymetry_surface.png` |
+| 1. Survey the seabed | `python experiments/survey.py --out pass0.csv` | yes | `pass0.csv` — `x, y, z` |
+| 2. Fit the bathymetry map | `python experiments/train_map.py pass0.csv` | no | `vecchia_bathymetry.pkl`, `gp_bathymetry_surface.png` |
 | 3. Query a depth | `python experiments/predict_depth.py` | no | prints depth |
-| 4. Navigate with the EKF | `python experiments/navigate.py` | yes | `wp_c.csv` |
+| 4. Navigate | `python experiments/navigate.py` | yes | `navigation.csv` |
 | 5. Plot tracks and error | `python experiments/plot_trajectory.py` | no | `trajectory_*.png` |
 
-**No survey is committed, so the pipeline starts at step 1 and needs the
-simulator.** `map.csv` and `map1.csv` used to be, but they were singlebeam runs
-in the old `x, y, sonar_depth` schema and could not be migrated — the vehicle's
-own `z` was never recorded, so seabed elevation is unrecoverable. They are in
-git history. `wp_c.csv` is still committed, so step 5 runs, but it is a
-navigation log from before the multibeam. Every script takes `--help`.
+**No survey is committed.** The current four-heading survey lives on the data
+volume at `~/data/auv_pose/surveys_v2/pass{0,45,90,135}.csv`, 174 MB; see
+`survey.py --help` for flying another. `train_map.py`'s defaults are the
+configuration the map ships in, scored on an 8 m blocked holdout. Every script
+takes `--help`.
 
 `survey.py` and `train_map.py` refuse to overwrite an existing output, since a
 survey costs a simulator run to reproduce; pass `--out` to write elsewhere, or
@@ -86,8 +89,10 @@ survey costs a simulator run to reproduce; pass `--out` to write elsewhere, or
 
 ```
 auv_pose/                    # algorithms -- importable, no I/O, no simulator
-  estimation/                # quaternion, strapdown, filters, smoothers
-  mapping/                   # SVGP bathymetry, sonar ranges, octree + raycast
+  estimation/                # state manifold, unscented transform, IMU
+                             #   propagation, RTS smoothers; EKF + strapdown
+  mapping/                   # Vecchia GP (kernels, ordering, vecchia), SVGP
+                             #   baseline, sonar ranges, octree + raycast
   io/                        # soundings, checkpoints, run logs
 experiments/                 # runnable scripts composing auv_pose
 tests/                       # pytest; no simulator required
@@ -102,7 +107,7 @@ HoloOcean lives in `experiments/`.
 ## Tests
 
 ```
-nix develop --command pytest      # 135 tests, none need the simulator
+nix develop --command pytest      # 477 tests, none need the simulator
 nix flake check                   # the same suite, in a sandbox
 ```
 
@@ -122,11 +127,6 @@ seabed sits near `z = -69`. Body axes are HoloOcean's `IMUSocket`, where the
 body-to-world rotation is `diag(1, -1, -1)` at rest, so body `+z` points down.
 Quaternions are scalar-first `[w, x, y, z]` and rotate body vectors into the
 world. See `auv_pose/estimation/`.
-
-(This paragraph previously said NED with `z` down and gravity `[0, 0, +9.81]`.
-That was left over from before the frame fix on this branch and contradicted
-both the logs and `navigate.py`'s default; `--legacy-frames` still reproduces
-the old behaviour.)
 
 Survey CSVs store `x, y, z`: where a beam struck the seabed, in the world frame,
 `z` increasing upward. The GP models that elevation directly.

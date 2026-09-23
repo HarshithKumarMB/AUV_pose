@@ -97,13 +97,7 @@ def test_rejects_an_empty_file_list():
 
 
 def test_round_trips_a_survey_written_by_the_logger(survey):
-  """What the writer emits is what the GP reads.
-
-  This replaces a test that loaded the committed map.csv. That file is a
-  singlebeam survey in the retired schema, and it is separately known to be
-  about 47% wrong -- see the octree comparison -- so it is no longer a fixture
-  worth guarding.
-  """
+  """What the writer emits is what the GP reads."""
   path = survey("a.csv", [[0.0, 0.0, -70.3], [1.0, -2.0, -69.8]])
   frame = load_soundings([path])
   X, y = soundings_to_arrays(frame)

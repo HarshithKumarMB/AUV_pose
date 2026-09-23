@@ -1,6 +1,6 @@
 """Survey the seabed on a lawnmower track, logging soundings.
 
-    nix run .#sim -- -c "python -u experiments/survey.py --out map1.csv"
+    nix run .#sim -- -c "python -u experiments/survey.py --out pass0.csv"
 
 Flies a boustrophedon pattern with a downward **multibeam** and writes one
 ``x, y, z`` row per beam that returned an echo -- the world-frame point where
@@ -197,7 +197,7 @@ def parse_args() -> argparse.Namespace:
     default=None,
     help=(
       "also write the raw sonar images, poses and attitudes to this .npz. "
-      "analyse_multibeam.py and check_beam_validity.py read it directly, so the "
+      "check_beam_validity.py reads it directly, so the "
       "sonar can be scored against the octree on survey data -- over the whole "
       "box rather than one hover, which matters because the two disagree only "
       "over particular patches of seabed and a single site cannot tell a sensor "

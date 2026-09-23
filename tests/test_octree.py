@@ -351,13 +351,10 @@ def test_the_real_cache_reduces_to_a_plausible_seabed():
   Deliberately weak: it checks the survey box reduces to a dense surface with
   physically sensible relief, and nothing about accuracy.
 
-  Accuracy is no longer checkable here. It used to be, against ``map.csv``'s
-  far-return population -- but those surveys were the pre-``a1fd5b1``
-  ``x, y, sonar_depth`` schema and could not be migrated, since the vehicle's
-  own z was never recorded. The equivalent check now lives in
-  ``experiments/check_beam_validity.py``, which scores a real capture against a
-  ray-cast through this cache and gets -0.049 m with a 0.035 m MAD-std. It
-  needs a capture and so cannot be a unit test.
+  Accuracy is checked by ``experiments/check_beam_validity.py`` instead, which
+  scores a real capture against a ray-cast through this cache and gets
+  -0.049 m with a 0.035 m MAD-std. It needs a capture and so cannot be a unit
+  test.
   """
   surface = load_surface(CACHE, bounds=(-40.0, 0.0, -20.0, 0.0))
 
