@@ -1,12 +1,11 @@
-"""Fit the SVGP bathymetry map from survey soundings.
+"""Fit the Vecchia GP bathymetry map from survey soundings.
 
-    python experiments/train_map.py
+    python experiments/train_map.py ~/data/auv_pose/surveys_v2/pass*.csv
 
-Reads the survey CSVs, fits a sparse variational GP, scores it against held-out
-soundings, writes the checkpoint, and renders the fitted seabed.
-
-Refitting is also how you refresh a stale checkpoint: pickled scikit-learn scalers
-are not portable across versions, and every depth query passes through one.
+Reads the survey CSVs, fits the map, scores it against held-out soundings,
+writes the checkpoint, and renders the fitted seabed. The defaults are the
+configuration the map ships in: a 12x12 spline mean, ``m = 30``, 2000 steps,
+scored on an 8 m blocked holdout. ``--method both`` adds the SVGP baseline.
 
 **Hold out whole cells, not random soundings.** Consecutive soundings along a
 survey track are about a centimetre apart, so a random split leaves every
@@ -44,15 +43,14 @@ def parse_args() -> argparse.Namespace:
     "surveys",
     nargs="+",
     type=Path,
-    help=(
-      "survey CSVs to fit. Required: this used to default to map.csv and "
-      "map1.csv, which were singlebeam surveys in the pre-a1fd5b1 "
-      "'x, y, sonar_depth' schema. They could not be migrated -- the vehicle's "
-      "own z was never recorded, so seabed elevation is unrecoverable -- and a "
-      "default that always failed was worse than none"
-    ),
+    help="survey CSVs to fit",
   )
-  parser.add_argument("--out", type=Path, default=Path("svgp_bathymetry.pkl"))
+  parser.add_argument(
+    "--out",
+    type=Path,
+    default=None,
+    help="checkpoint to write; defaults to <method>_bathymetry.pkl",
+  )
   parser.add_argument(
     "--plot", type=Path, default=Path("gp_bathymetry_surface.png")
   )
@@ -85,10 +83,12 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--holdout-cell",
     type=float,
-    default=1.0,
+    default=8.0,
     help=(
-      "side of the cells the holdout is blocked by, metres. Must exceed the "
-      "spacing between consecutive soundings (~1 cm) or the split leaks"
+      "side of the cells the holdout is blocked by, metres. **State it beside "
+      "every rmse**: at 1 m a held-out sounding sits a median 0.31 m from "
+      "training data and the test barely asks for interpolation; at 8 m it is "
+      "1.55 m, and the Vecchia-versus-4-NN verdict reverses between the two"
     ),
   )
   parser.add_argument(
@@ -109,12 +109,9 @@ def parse_args() -> argparse.Namespace:
     default=None,
     metavar="Z",
     help=(
-      "drop soundings shallower than Z metres. The four-heading survey carries "
-      "about 5%% of returns tens of metres above the seabed -- the 99th "
-      "percentile is -14.5 m against a seabed near -68 -- which are water "
-      "column or surface echoes rather than bathymetry. Left in, they inflate "
-      "the fitted nugget and account for roughly 40%% of held-out squared "
-      "error while being 3%% of the soundings. -42 suits that survey"
+      "drop soundings shallower than Z metres, for rejecting water-column "
+      "echoes. The corrected surveys need none: the 5%% shallow tail once seen "
+      "here was the swath-sign mirror, not echoes"
     ),
   )
   parser.add_argument(
@@ -142,17 +139,18 @@ def parse_args() -> argparse.Namespace:
     help=(
       "how many of --conditioning are nearest neighbours; the rest are "
       "spread across the ordering. Default is all nearest. Stein, Chi and "
-      "Welty (2004) find all-nearest the worst design for estimating a "
-      "range parameter under a linear mean, and this map has one"
+      "Welty (2004) find all-nearest the worst design for estimating a range "
+      "parameter under a linear mean. At 2 m cells with the linear mean, 22 "
+      "nearest + 8 spread made no measurable difference"
     ),
   )
   parser.add_argument(
     "--mean",
-    default="linear",
+    default="spline",
     choices=("linear", "quadratic", "cubic", "spline"),
     help=(
-      "mean basis. The linear one is the paper's, and absorbs 13%% of the "
-      "held-out variance on this seabed; a 12x12 spline absorbs 92%%"
+      "mean basis. At 0.25 m cells and an 8 m holdout the spline scores "
+      "2.178 m against the linear mean's 3.900 m and 4-NN's 2.387 m"
     ),
   )
   parser.add_argument(
@@ -162,7 +160,13 @@ def parse_args() -> argparse.Namespace:
     help="knots per axis when --mean spline",
   )
   parser.add_argument(
-    "--steps", type=int, default=300, help="Vecchia optimiser steps"
+    "--steps",
+    type=int,
+    default=2000,
+    help=(
+      "Vecchia optimiser steps, run in full. The objective reaches float64 "
+      "round-off by about 1500 on the four-heading survey"
+    ),
   )
   parser.add_argument("--batch-size", type=int, default=5000)
   parser.add_argument(
@@ -297,6 +301,9 @@ def score(bathymetry, X, y, train, test, neighbours: int = 4) -> float:
 
 def main() -> None:
   args = parse_args()
+  if args.out is None:
+    primary = "svgp" if args.method == "svgp" else "vecchia"
+    args.out = Path(f"{primary}_bathymetry.pkl")
 
   refuse_overwrite(args.out, args.force)
   if not args.no_plot:
@@ -436,7 +443,10 @@ def main() -> None:
       f"  amplitude {vecchia.hyper.amplitude:.3f} m^2, "
       f"nugget {vecchia.hyper.noise:.4f} m^2"
     )
-    print(f"  linear mean {np.round(vecchia.beta, 4)}")
+    if args.mean == "spline":
+      print(f"  mean: {vecchia.beta.size} spline coefficients")
+    else:
+      print(f"  mean coefficients {np.round(vecchia.beta, 4)}")
     fitted["vecchia"] = vecchia
     if test.any():
       rmse["vecchia"] = score(vecchia, X, y, train, test)

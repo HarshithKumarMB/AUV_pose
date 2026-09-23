@@ -26,7 +26,9 @@ def parse_args() -> argparse.Namespace:
     type=float,
     help="x y pairs; defaults to the reference probe point",
   )
-  parser.add_argument("--map", type=Path, default=Path("svgp_bathymetry.pkl"))
+  parser.add_argument(
+    "--map", type=Path, default=Path("vecchia_bathymetry.pkl")
+  )
   parser.add_argument(
     "--std", action="store_true", help="also report uncertainty"
   )
