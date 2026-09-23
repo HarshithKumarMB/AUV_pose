@@ -212,19 +212,45 @@ def decimate(
   :return: ``(X, y)`` reduced to one point per occupied cell, at the cell's
       median position and elevation.
   """
+  groups = cell_groups(X, cell)
+  return (
+    np.asarray([np.median(X[g], axis=0) for g in groups], dtype=X.dtype),
+    np.asarray([np.median(y[g]) for g in groups], dtype=y.dtype),
+  )
+
+
+def cell_groups(X: np.ndarray, cell: float) -> list[np.ndarray]:
+  """Indices of the soundings in each occupied horizontal cell.
+
+  In the order :func:`decimate` emits its cells, so anything aggregated over
+  these groups lines up with its output row for row.
+
+  :param X: Sounding positions, ``(n, 2)``.
+  :param cell: Cell side in metres.
+  """
   key = np.floor(X / cell).astype(np.int64)
   _, inverse = np.unique(key, axis=0, return_inverse=True)
-  order = np.argsort(inverse, kind="stable")
+  order = np.argsort(inverse.ravel(), kind="stable")
+  return np.split(order, np.cumsum(np.bincount(inverse.ravel()))[:-1])
 
-  reduced_x, reduced_y = [], []
-  for group in np.split(order, np.cumsum(np.bincount(inverse))[:-1]):
-    reduced_x.append(np.median(X[group], axis=0))
-    reduced_y.append(np.median(y[group]))
 
-  return (
-    np.asarray(reduced_x, dtype=X.dtype),
-    np.asarray(reduced_y, dtype=y.dtype),
-  )
+def aggregate_covariance(
+  cov: np.ndarray, groups: list[np.ndarray]
+) -> np.ndarray:
+  """Position covariance of each decimated cell: the **mean** of its members'.
+
+  The one place :func:`decimate`'s median convention has to break. A cell's
+  soundings are mostly beams of the same ping, and they share the vehicle's
+  whole position error -- so the cell is no better placed than any one of
+  them, and dividing by the count would treat correlated beams as independent
+  fixes. The mean rather than the median because a mean of positive
+  semi-definite matrices is one, and an element-wise median need not be.
+
+  :param cov: Per-sounding covariance, ``(n, 2, 2)``.
+  :param groups: From :func:`cell_groups`.
+  :return: ``(n_cells, 2, 2)``.
+  """
+  return np.stack([cov[group].mean(axis=0) for group in groups])
 
 
 def blocked_split(

@@ -4,8 +4,10 @@ import numpy as np
 import pytest
 
 from experiments.train_map import (
+  aggregate_covariance,
   blocked_split,
   calibration,
+  cell_groups,
   decimate,
   score,
 )
@@ -167,3 +169,39 @@ def test_score_returns_the_rmse_it_printed(capsys):
 
   assert returned == pytest.approx(0.0, abs=1e-12)
   assert "held out 50 soundings" in capsys.readouterr().out
+
+
+def test_cell_groups_line_up_with_decimate():
+  rng = np.random.default_rng(0)
+  X = rng.uniform(0, 3, size=(200, 2)).astype(np.float32)
+  y = rng.normal(size=200).astype(np.float32)
+
+  reduced_x, reduced_y = decimate(X, y, cell=1.0)
+  groups = cell_groups(X, cell=1.0)
+
+  assert len(groups) == len(reduced_x)
+  for group, point, depth in zip(groups, reduced_x, reduced_y):
+    np.testing.assert_allclose(point, np.median(X[group], axis=0))
+    assert depth == pytest.approx(np.median(y[group]))
+
+
+def test_a_cell_is_placed_no_better_than_its_members():
+  """Beams of one ping share its error: the mean, not the mean over count."""
+  X = np.array([[0.1, 0.1], [0.2, 0.2], [0.3, 0.3]])
+  cov = np.stack([np.eye(2) * v for v in (1.0, 2.0, 3.0)])
+
+  aggregated = aggregate_covariance(cov, cell_groups(X, cell=1.0))
+
+  np.testing.assert_allclose(aggregated, [np.eye(2) * 2.0])
+
+
+def test_the_aggregate_stays_positive_semi_definite():
+  """An element-wise median of PSD matrices need not be PSD; a mean is."""
+  rng = np.random.default_rng(1)
+  roots = rng.normal(size=(5, 2, 2))
+  cov = roots @ roots.transpose(0, 2, 1)
+  X = np.full((5, 2), 0.5)
+
+  aggregated = aggregate_covariance(cov, cell_groups(X, cell=1.0))
+
+  assert np.linalg.eigvalsh(aggregated[0]).min() >= 0.0
