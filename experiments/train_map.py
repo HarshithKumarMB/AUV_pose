@@ -40,6 +40,7 @@ from auv_pose.io.soundings import (
 from auv_pose.mapping.cleaning import object_soundings
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
 from auv_pose.mapping.vecchia import (
+  VecchiaMap,
   fit_vecchia,
   fit_vecchia_nigp,
   input_noise_variance,
@@ -586,7 +587,9 @@ def main() -> None:
     cov = None
     print("Fitting the true positions and depths of the same soundings")
 
-  fitted: dict[str, object] = {}
+  fitted: dict[str, BathymetryMap | VecchiaMap] = {}
+  # What save_map needs, and only exists once the SVGP has been fitted.
+  svgp_checkpoint: tuple | None = None
   rmse: dict[str, float] = {}
 
   if args.method in ("svgp", "both"):
@@ -614,7 +617,7 @@ def main() -> None:
     trace = model.elbo_trace
     print(
       f"  negative ELBO {trace[0]:.4f} -> {trace[-1]:.4f}; "
-      f"last tenth improved by {trace[-len(trace) // 10 - 1] - trace[-1]:.4f} "
+      f"last tenth improved by {trace[max(-len(trace), -(len(trace) // 10) - 1)] - trace[-1]:.4f} "
       "(near zero means converged)"
     )
     lengthscale = (
@@ -625,6 +628,14 @@ def main() -> None:
 
     svgp = BathymetryMap(
       model, likelihood, x_scaler, y_mean, y_std, device=model.fit_device
+    )
+    svgp_checkpoint = (
+      model,
+      likelihood,
+      inducing_points,
+      x_scaler,
+      y_mean,
+      y_std,
     )
     fitted["svgp"] = svgp
     if test.any():
@@ -680,7 +691,7 @@ def main() -> None:
     trace = vecchia.loglik_trace
     print(
       f"  restricted log likelihood {trace[0]:.1f} -> {trace[-1]:.1f}; "
-      f"last tenth improved by {trace[-1] - trace[-len(trace) // 10 - 1]:.3f} "
+      f"last tenth improved by {trace[-1] - trace[max(-len(trace), -(len(trace) // 10) - 1)]:.3f} "
       "(near zero means converged)"
     )
     print(f"  lengthscales {np.round(vecchia.lengthscale, 2)} m")
@@ -720,7 +731,7 @@ def main() -> None:
         print(f"  rmse at the true positions      {error:.3f} m")
 
   if len(rmse) == 2:
-    better, worse = sorted(rmse, key=rmse.get)
+    better, worse = sorted(rmse, key=lambda name: rmse[name])
     margin = 100 * (1 - rmse[better] / rmse[worse])
     print(
       f"\n{better} wins by {margin:.1f}% on held-out rmse "
@@ -730,12 +741,11 @@ def main() -> None:
   primary = "vecchia" if "vecchia" in fitted else "svgp"
   bathymetry = fitted[primary]
 
-  if primary == "vecchia":
+  if isinstance(bathymetry, VecchiaMap):
     save_vecchia_map(args.out, bathymetry)
   else:
-    save_map(
-      args.out, model, likelihood, inducing_points, x_scaler, y_mean, y_std
-    )
+    assert svgp_checkpoint is not None  # set wherever an SVGP was fitted
+    save_map(args.out, *svgp_checkpoint)
   print(f"Wrote {args.out}")
 
   if args.no_plot:
