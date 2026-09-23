@@ -415,6 +415,13 @@ def main() -> None:
     "compass_sigma": COMPASS_SIGMA,
     "magnetic_field": MAGNETIC_NORTH.tolist(),
     "initial_sigma": INITIAL_SIGMA,
+    # Truth at the moment navigation started, so the pose's error can be
+    # scored relative to the start's own -- which is what an anchored map's
+    # covariance describes. Scoring only.
+    "initial_truth": {
+      "position": truth.position.tolist(),
+      "attitude": truth.attitude.tolist(),
+    },
     "initial_mean": {
       k: np.asarray(v).tolist() for k, v in mean._asdict().items()
     },

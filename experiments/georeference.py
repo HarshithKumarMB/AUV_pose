@@ -14,6 +14,17 @@ covariance (:func:`~auv_pose.mapping.sonar.sounding_covariance`) -- the input
 uncertainty the map's NIGP step feeds on -- and where the same range would have
 landed from the true pose, for scoring.
 
+**The covariance is relative to the start.** Nothing observes horizontal
+position, so the surface fix's error is carried unchanged to the end of the
+run: one offset, shared by every sounding, which moves the whole map rigidly
+and distorts none of it. Left in, it swamps each sounding's covariance --
+measured on a trial flight, a 1.43 m predicted sigma against a 0.25 m actual
+placement error -- and the map's input-noise correction, which treats every
+sounding's noise as its own, would read one shared error as thousands of
+independent ones. So the replay pins the start's horizontal position, and the
+shared offset is reported apart: it belongs to the map's frame, not to any
+sounding in it.
+
 ``--pose truth`` is the control: the same pings, placed exactly, with zero
 covariance. Fitting a map to both separates "the map is distorted by
 navigation" from everything else.
@@ -81,8 +92,12 @@ def parse_args() -> argparse.Namespace:
   return parser.parse_args()
 
 
-def initial_belief(meta: dict) -> ManifoldGaussian:
-  """The belief the flight started from, as its metadata recorded it."""
+def initial_belief(meta: dict, anchored: bool = False) -> ManifoldGaussian:
+  """The belief the flight started from, as its metadata recorded it.
+
+  :param anchored: Pin the start's horizontal position, so every covariance
+      that follows is relative to it. See the module docstring.
+  """
   mean = meta["initial_mean"]
   sigma = meta["initial_sigma"]
   state = NavState(
@@ -101,14 +116,21 @@ def initial_belief(meta: dict) -> ManifoldGaussian:
       sigma["accel_bias"],
     ]
   )
-  return ManifoldGaussian(state, np.diag(np.asarray(spread, float) ** 2))
+  cov = np.diag(np.asarray(spread, float) ** 2)
+  if anchored:
+    cov[:2, :2] = 0.0
+  return ManifoldGaussian(state, cov)
 
 
-def replay(survey: RawSurvey) -> InertialNavigator:
-  """Run the flight's forward pass again, tick for tick."""
+def replay(survey: RawSurvey, anchored: bool = True) -> InertialNavigator:
+  """Run the flight's forward pass again, tick for tick.
+
+  Anchored, the means are the flight's -- nothing observes horizontal position,
+  so its prior never enters a gain -- and only the covariances change.
+  """
   meta = survey.meta
   navigator = InertialNavigator(
-    initial_belief(meta),
+    initial_belief(meta, anchored),
     1.0 / meta["tick_rate_hz"],
     AidingNoise(
       dvl=dvl_noise_covariance(
@@ -140,6 +162,18 @@ def replay(survey: RawSurvey) -> InertialNavigator:
   return navigator
 
 
+def start_truth(survey: RawSurvey) -> np.ndarray:
+  """True horizontal position where navigation started.
+
+  Logs from before it was recorded fall back to the first tick's truth, one
+  tick later -- a few centimetres at survey speed.
+  """
+  recorded = survey.meta.get("initial_truth")
+  if recorded is not None:
+    return np.asarray(recorded["position"][:2], float)
+  return survey.ticks[["true_x", "true_y"]].to_numpy(float)[0]
+
+
 def truth_at(survey: RawSurvey) -> dict[int, NavState]:
   """The logged true pose at each ping tick."""
   frame = survey.ticks.set_index("tick").loc[survey.ping_ticks]
@@ -160,6 +194,9 @@ def main() -> None:
   bearings = np.asarray(meta["bearings"], float)
   swath, nadir = meta["swath_axis"], meta["nadir_axis"]
   truth = truth_at(survey)
+  # The start's own horizontal error, and its spread: shared by every sounding.
+  start = initial_belief(meta).mean.position[:2] - start_truth(survey)
+  sigma0 = np.sqrt(np.diag(initial_belief(meta).cov)[:2])
 
   if args.pose == "truth":
     poses = {
@@ -183,16 +220,22 @@ def main() -> None:
     poses = dict(zip(navigator.cycle_ticks, beliefs))
 
     # How honest the pose is where it matters: at the pings, in the six
-    # coordinates that place a sounding.
+    # coordinates that place a sounding -- horizontally relative to the start's
+    # own error, which is what the anchored covariance describes.
+    print(
+      f"  shared start offset {np.round(start, 2)} m against "
+      f"{np.round(sigma0, 2)} m (1 sigma), in the map frame, not per sounding"
+    )
     errors, nees = [], []
     for tick, state in truth.items():
       belief = poses[tick]
       error = boxminus(state, belief.mean)[POSE]
+      error[:2] += start
       errors.append(np.linalg.norm(error[:2]))
       block = belief.cov[np.ix_(POSE, POSE)]
       nees.append(error @ np.linalg.solve(block, error))
     print(
-      f"  {args.pose} pose at the pings: horizontal error median "
+      f"  {args.pose} pose at the pings: error relative to the start median "
       f"{np.median(errors):.2f} m, max {np.max(errors):.2f} m; "
       f"mean NEES {np.mean(nees):.2f} against 6"
     )
@@ -245,14 +288,17 @@ def main() -> None:
   )
 
   if args.pose != "truth":
+    # Relative to the start's offset, like the covariance it is compared with.
     offset = (
       soundings[["x", "y"]].to_numpy()
       - soundings[["true_x", "true_y"]].to_numpy()
+      - start
     )
     distance = np.linalg.norm(offset, axis=1)
     sigma = np.sqrt(soundings["cov_xx"] + soundings["cov_yy"]).to_numpy()
     print(
-      f"  placement error median {np.median(distance):.2f} m, "
+      f"  placement error relative to the start median "
+      f"{np.median(distance):.2f} m, "
       f"95th {np.percentile(distance, 95):.2f} m; "
       f"predicted 1-sigma median {np.median(sigma):.2f} m"
     )
