@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from auv_pose.io.soundings import load_soundings, soundings_to_arrays
+from auv_pose.io.soundings import (
+  load_soundings,
+  position_covariance,
+  soundings_to_arrays,
+)
 
 
 @pytest.fixture
@@ -105,3 +109,52 @@ def test_round_trips_a_survey_written_by_the_logger(survey):
   assert X.shape == (2, 2)
   np.testing.assert_allclose(y, [-70.3, -69.8], rtol=1e-6)
   assert np.all(y < 0)  # the seabed is below the surface
+
+
+# -- the optional covariance columns ----------------------------------------
+
+
+def placed(tmp_path, name, cov_xy=0.1):
+  """A georeferenced survey: two soundings with covariance and truth."""
+  path = tmp_path / name
+  pd.DataFrame(
+    {
+      "x": [0.0, 1.0],
+      "y": [0.0, 2.0],
+      "z": [-70.0, -69.5],
+      "cov_xx": [0.5, 0.6],
+      "cov_xy": [cov_xy, cov_xy],
+      "cov_yy": [0.7, 0.8],
+      "cov_zz": [0.01, 0.01],
+      "ping": [0, 0],
+      "true_x": [0.1, 1.1],
+      "true_y": [0.0, 2.0],
+      "true_z": [-70.0, -69.5],
+    }
+  ).to_csv(path, index=False)
+  return path
+
+
+def test_the_covariance_reads_back_as_two_by_two(tmp_path):
+  frame = load_soundings([placed(tmp_path, "a.csv")])
+  cov = position_covariance(frame)
+
+  assert cov.shape == (2, 2, 2)
+  np.testing.assert_array_equal(cov[1], [[0.6, 0.1], [0.1, 0.8]])
+
+
+def test_a_column_only_some_files_carry_is_dropped(survey, tmp_path):
+  """Filling it with zero would claim the other survey was placed exactly."""
+  frame = load_soundings(
+    [placed(tmp_path, "a.csv"), survey("b.csv", [[5.0, 5.0, -68.0]])]
+  )
+
+  assert list(frame.columns) == ["x", "y", "z"]
+  with pytest.raises(ValueError, match="georeference.py --pose smoothed"):
+    position_covariance(frame)
+
+
+def test_files_that_all_carry_it_keep_it(tmp_path):
+  frame = load_soundings([placed(tmp_path, "a.csv"), placed(tmp_path, "b.csv")])
+  assert len(position_covariance(frame)) == 4
+  assert "true_x" in frame.columns

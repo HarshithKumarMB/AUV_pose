@@ -25,9 +25,25 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-__all__ = ["SOUNDING_COLUMNS", "load_soundings", "soundings_to_arrays"]
+__all__ = [
+  "COVARIANCE_COLUMNS",
+  "OPTIONAL_COLUMNS",
+  "SOUNDING_COLUMNS",
+  "load_soundings",
+  "position_covariance",
+  "soundings_to_arrays",
+]
 
 SOUNDING_COLUMNS = ("x", "y", "z")
+
+#: The sounding's own position uncertainty, as ``georeference.py`` derives it
+#: from the smoothed pose: the horizontal block's upper triangle, and vertical.
+COVARIANCE_COLUMNS = ("cov_xx", "cov_xy", "cov_yy", "cov_zz")
+
+#: Written by ``georeference.py`` and optional on read. ``ping`` groups the
+#: beams of one ping, which share the vehicle's error; ``true_`` is where the
+#: same range would have landed from the true pose -- scoring only.
+OPTIONAL_COLUMNS = (*COVARIANCE_COLUMNS, "ping", "true_x", "true_y", "true_z")
 
 
 def load_soundings(
@@ -42,7 +58,10 @@ def load_soundings(
           usable echo, and those rows must not reach the GP.
 
   Returns:
-      A frame with columns ``x, y, z``.
+      A frame with columns ``x, y, z``, plus whichever of
+      :data:`OPTIONAL_COLUMNS` every file carries. A column only some files
+      have is dropped, not filled: a covariance of zero would claim a
+      sounding was placed exactly.
 
   Raises:
       ValueError: If no paths are given, or a file lacks the expected columns.
@@ -57,9 +76,15 @@ def load_soundings(
     missing = set(SOUNDING_COLUMNS) - set(frame.columns)
     if missing:
       raise ValueError(f"{path} is missing column(s): {sorted(missing)}")
-    frames.append(frame[list(SOUNDING_COLUMNS)])
+    frames.append(frame)
 
-  combined = pd.concat(frames, ignore_index=True)
+  shared = [
+    column
+    for column in OPTIONAL_COLUMNS
+    if all(column in frame.columns for frame in frames)
+  ]
+  columns = [*SOUNDING_COLUMNS, *shared]
+  combined = pd.concat([frame[columns] for frame in frames], ignore_index=True)
 
   if drop_invalid:
     for column in SOUNDING_COLUMNS:
@@ -85,3 +110,24 @@ def soundings_to_arrays(
   X = frame[["x", "y"]].to_numpy(dtype=np.float32)
   y = frame["z"].to_numpy(dtype=np.float32)
   return X, y
+
+
+def position_covariance(frame: pd.DataFrame) -> NDArray[np.float64]:
+  """Each sounding's horizontal position covariance, ``(n, 2, 2)``.
+
+  Raises:
+      ValueError: If the frame lacks the covariance columns -- a survey placed
+          from ground truth, or one written before they existed. Regenerate it
+          with ``experiments/georeference.py --pose smoothed``.
+  """
+  missing = [c for c in COVARIANCE_COLUMNS if c not in frame.columns]
+  if missing:
+    raise ValueError(
+      f"soundings carry no position covariance (missing {', '.join(missing)}); "
+      "place them from a raw log with "
+      "`experiments/georeference.py --pose smoothed`"
+    )
+  xx, xy, yy = (
+    frame[c].to_numpy(np.float64) for c in ("cov_xx", "cov_xy", "cov_yy")
+  )
+  return np.stack([np.stack([xx, xy], -1), np.stack([xy, yy], -1)], -2)
