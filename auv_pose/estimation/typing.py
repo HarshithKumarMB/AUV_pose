@@ -11,19 +11,38 @@ function over it.
 
 from __future__ import annotations
 
-from typing import Generic, NamedTuple, TypeAlias, TypeVar
+from typing import Any, Generic, NamedTuple, Protocol, Self, TypeAlias, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
 
 NumpyArray: TypeAlias = NDArray[np.floating]
 
-#: A belief over the state. Any ``(mean, cov)`` pair will do -- the backward
-#: pass never looks inside the mean, it only hands it to a chart.
-Belief = TypeVar("Belief")
+
+class GaussianBelief(Protocol):
+  """What a belief must offer: a mean, a covariance, and a way to replace them.
+
+  Structural, so :class:`GaussianState` and
+  :class:`~auv_pose.estimation.manifold.ManifoldGaussian` both satisfy it
+  without inheriting from anything.
+  """
+
+  @property
+  def mean(self) -> Any: ...
+
+  @property
+  def cov(self) -> NumpyArray: ...
+
+  def _replace(self, *, mean: Any = ..., cov: Any = ...) -> Self: ...
+
+
+#: A belief over the state. Any ``(mean, cov)`` pair will do -- the estimators
+#: never look inside the mean, they only hand it to a chart.
+Belief = TypeVar("Belief", bound=GaussianBelief)
 
 __all__ = [
   "Belief",
+  "GaussianBelief",
   "GaussianState",
   "Measurement",
   "NumpyArray",

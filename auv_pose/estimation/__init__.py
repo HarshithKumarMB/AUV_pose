@@ -11,6 +11,9 @@ Organised by causality:
 ``filters``
     Causal recursive estimators. Consume observations in order, never look
     ahead, and record each cycle.
+``navigation``
+    The unscented forward pass on the state manifold: IMU prediction, and
+    DVL, depth and magnetometer updates. Records what the smoother needs.
 ``smoothers``
     Non-causal. Consume a completed record and use the future to improve the
     past.
@@ -56,6 +59,12 @@ from auv_pose.estimation.manifold import (
   covariance_transport,
   manifold_mean,
 )
+from auv_pose.estimation.navigation import (
+  Aiding,
+  inertial_step,
+  unscented_predict,
+  unscented_update,
+)
 from auv_pose.estimation.quaternion import (
   GRAVITY,
   GRAVITY_NED,
@@ -85,6 +94,7 @@ __all__ = [
   "GRAVITY",
   "GRAVITY_NED",
   "GRAVITY_NWU",
+  "Aiding",
   "ConstantVelocityEKF",
   "Filter",
   "GaussianState",
@@ -98,6 +108,7 @@ __all__ = [
   "boxplus",
   "covariance_transport",
   "gravity_trust",
+  "inertial_step",
   "manifold_mean",
   "position",
   "quat_angle",
@@ -112,6 +123,8 @@ __all__ = [
   "rts_smooth",
   "skew",
   "so3_right_jacobian",
+  "unscented_predict",
   "unscented_rts_smooth",
+  "unscented_update",
   "velocity",
 ]
