@@ -178,6 +178,56 @@ def lawnmower(
   return waypoints
 
 
+def figure_eight(
+  centre: tuple[float, float] = (-20.0, -10.0),
+  radius: float = 15.0,
+  depths: tuple[float, float] = (0.0, -30.0),
+  loop_points: int = 36,
+) -> list[list[float]]:
+  """A figure-eight test track: two tangent circles, each at its own depth.
+
+  Made to be flown *after* a survey, as a test set the map never saw: its
+  soundings land between the survey's, on every heading, from a navigation
+  run with its own drift. The two depths put the fan at two altitudes, so the
+  map is tested at two sounding densities.
+
+  Loop one is flown anticlockwise from the crossing at ``depths[0]``; the
+  vehicle then changes depth at the crossing and flies loop two clockwise at
+  ``depths[1]``, ending back where it started -- the crossing is where the
+  track overlaps itself at both altitudes.
+
+  Args:
+      centre: Where the loops touch, world ``(x, y)``.
+      radius: Radius of each loop, metres.
+      depths: World ``z`` of loop one and loop two.
+      loop_points: Waypoints per loop.
+
+  Returns:
+      Waypoints, ``(n, 3)`` as a list, starting at the crossing.
+  """
+  cx, cy = centre
+  first, second = depths
+  steps = 2.0 * np.pi * np.arange(1, loop_points + 1) / loop_points
+
+  # Loop one's centre is west of the crossing, so the crossing is at angle 0.
+  one = [
+    [cx - radius + radius * np.cos(a), cy + radius * np.sin(a), first]
+    for a in steps
+  ]
+  # Loop two's centre is east, so the crossing is at angle pi; clockwise.
+  two = [
+    [
+      cx + radius + radius * np.cos(np.pi - a),
+      cy + radius * np.sin(np.pi - a),
+      second,
+    ]
+    for a in steps
+  ]
+  start = [[cx, cy, first]]
+  descend = [[cx, cy, second]]
+  return [[float(v) for v in point] for point in start + one + descend + two]
+
+
 def initial_covariance() -> np.ndarray:
   """The initial belief's covariance, from :data:`INITIAL_SIGMA`."""
   sigma = np.concatenate(
@@ -248,6 +298,38 @@ def parse_args() -> argparse.Namespace:
       "at least -- and fit the map on all of them: a pipeline shadows the "
       "seabed behind it from one direction and not from another"
     ),
+  )
+  parser.add_argument(
+    "--route",
+    choices=("lawnmower", "figure8"),
+    default="lawnmower",
+    help=(
+      "lawnmower surveys --box; figure8 flies a test track the map is scored "
+      "on, two loops at --depths about --centre. Guidance holds the heading, "
+      "so the vehicle crabs around the loops rather than turning into them"
+    ),
+  )
+  parser.add_argument(
+    "--centre",
+    type=float,
+    nargs=2,
+    default=[-20.0, -10.0],
+    metavar=("X", "Y"),
+    help="figure8: where the loops touch",
+  )
+  parser.add_argument(
+    "--radius", type=float, default=15.0, help="figure8: loop radius, m"
+  )
+  parser.add_argument(
+    "--depths",
+    type=float,
+    nargs=2,
+    default=[0.0, -30.0],
+    metavar=("Z1", "Z2"),
+    help="figure8: world z of each loop",
+  )
+  parser.add_argument(
+    "--loop-points", type=int, default=36, help="figure8: waypoints per loop"
   )
   parser.add_argument(
     "--box",
@@ -349,13 +431,28 @@ def main() -> None:
   refuse_overwrite(args.out, args.force)
   configure_sdl(args.headless)
 
-  waypoints = lawnmower(
-    heading=args.yaw, box=tuple(args.box), spacing=args.spacing
-  )
-  track = np.asarray(waypoints)[:, :2]
+  if args.route == "figure8":
+    waypoints = figure_eight(
+      centre=tuple(args.centre),
+      radius=args.radius,
+      depths=tuple(args.depths),
+      loop_points=args.loop_points,
+    )
+    print(
+      f"figure eight about {tuple(args.centre)}: two {args.radius:g} m loops "
+      f"at z = {args.depths[0]:g} and {args.depths[1]:g} m, heading held at "
+      f"{args.yaw:.0f} deg"
+    )
+  else:
+    waypoints = lawnmower(
+      heading=args.yaw, box=tuple(args.box), spacing=args.spacing
+    )
+    print(
+      f"lawnmower, heading {args.yaw:.0f} deg, {args.spacing:.1f} m spacing"
+    )
+  track = np.asarray(waypoints)
   print(
-    f"{len(waypoints)} waypoints, heading {args.yaw:.0f} deg, "
-    f"{args.spacing:.1f} m line spacing, "
+    f"{len(waypoints)} waypoints, "
     f"{np.linalg.norm(np.diff(track, axis=0), axis=1).sum():.0f} m of track"
   )
 
@@ -427,6 +524,7 @@ def main() -> None:
     },
     "seed": args.seed,
     "yaw_deg": args.yaw,
+    "route": args.route,
     "box": list(args.box),
     "spacing": args.spacing,
     "waypoints": waypoints,
