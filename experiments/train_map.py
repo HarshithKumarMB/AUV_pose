@@ -92,6 +92,18 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--holdout-by",
+    choices=("cell", "ping"),
+    default="cell",
+    help=(
+      "what --holdout withholds. 'ping' holds out whole pings before "
+      "decimation and scores their raw soundings, which land between the "
+      "remaining pings' soundings -- where the smoother's own beams will "
+      "query the map. 'cell' withholds --holdout-cell squares, a gap-filling "
+      "test the smoother never poses. Needs the ping column for 'ping'"
+    ),
+  )
+  parser.add_argument(
     "--holdout-cell",
     type=float,
     default=8.0,
@@ -606,8 +618,34 @@ def main() -> None:
     truth = None if truth is None else truth[seabed]
     ping = None if ping is None else ping[seabed]
 
+  # Held-out pings leave before decimation, so none of their soundings is
+  # merged into a training cell: they stay raw, at their own positions.
+  held = None
+  if args.holdout > 0 and args.holdout_by == "ping":
+    if ping is None:
+      raise SystemExit("--holdout-by ping needs a ping column")
+    pings = np.unique(ping)
+    chosen = np.random.default_rng(args.seed).permutation(pings)[
+      : round(args.holdout * len(pings))
+    ]
+    out = np.isin(ping, chosen)
+    held = (
+      X[out],
+      y[out],
+      None if cov is None else cov[out],
+      None if truth is None else truth[out],
+    )
+    X, y = X[~out], y[~out]
+    cov = None if cov is None else cov[~out]
+    truth = None if truth is None else truth[~out]
+    ping = ping[~out]
+    print(
+      f"Held out {len(chosen)} of {len(pings)} pings: {int(out.sum())} soundings"
+    )
+
   if args.decimate_cell > 0:
-    if args.decimate_cell >= args.holdout_cell:
+    # Only a blocked split has cells for decimation to merge across.
+    if held is None and args.decimate_cell >= args.holdout_cell:
       raise SystemExit(
         f"--decimate-cell {args.decimate_cell} is not smaller than "
         f"--holdout-cell {args.holdout_cell}; decimation would merge "
@@ -630,7 +668,24 @@ def main() -> None:
       f"({before / max(len(X), 1):.1f}x) at {args.decimate_cell} m cells"
     )
 
-  if args.holdout > 0:
+  if held is not None:
+    held_X, held_y, held_cov, held_truth = held
+    train = np.concatenate([np.ones(len(X), bool), np.zeros(len(held_X), bool)])
+    test = ~train
+    X = np.concatenate([X, held_X.astype(X.dtype)])
+    y = np.concatenate([y, held_y.astype(y.dtype)])
+    if cov is not None and held_cov is not None:
+      cov = np.concatenate([cov, held_cov])
+    if truth is not None and held_truth is not None:
+      truth = np.concatenate([truth, held_truth])
+    from scipy.spatial import KDTree
+
+    gap = KDTree(X[train]).query(X[test])[0]
+    print(
+      "  held-out soundings from the nearest fitted one: median "
+      f"{np.median(gap):.2f} m, 90th {np.percentile(gap, 90):.2f} m"
+    )
+  elif args.holdout > 0:
     train, test = blocked_split(X, args.holdout, args.holdout_cell, args.seed)
   else:
     train = np.ones(len(X), dtype=bool)
