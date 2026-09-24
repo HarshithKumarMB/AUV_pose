@@ -321,3 +321,17 @@ def test_a_version_two_map_loads_with_one_scale(tmp_path, vecchia, queries):
   np.testing.assert_array_equal(
     loaded.predict(queries), vecchia.predict(queries)
   )
+
+
+def test_a_retired_spline_checkpoint_is_refused_not_misread(tmp_path, vecchia):
+  """Loading its coefficients against a plane would change every prediction."""
+  path = tmp_path / "spline.pkl"
+  save_vecchia_map(path, vecchia)
+  with open(path, "rb") as handle:
+    payload = pickle.load(handle)
+  payload["basis"] = {"kind": "spline", "degree": 3, "knots": 12}
+  with open(path, "wb") as handle:
+    pickle.dump(payload, handle)
+
+  with pytest.raises(ValueError, match="retired spline mean"):
+    load_map(path)

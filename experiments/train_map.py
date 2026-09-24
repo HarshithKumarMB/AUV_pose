@@ -1,17 +1,19 @@
 """Fit the Vecchia GP bathymetry map from survey soundings.
 
-    python experiments/train_map.py ~/data/auv_pose/surveys_v2/pass*.csv
+    python experiments/train_map.py ~/data/auv_pose/surveys_v4/pass*_smoothed.csv
 
-Reads the survey CSVs, fits the map, scores it against held-out soundings,
-writes the checkpoint, and renders the fitted seabed. The defaults are the
-configuration the map ships in: a 12x12 spline mean, ``m = 30``, 2000 steps,
-scored on an 8 m blocked holdout. ``--method both`` adds the SVGP baseline.
+Reads the survey CSVs, fits the map, writes the checkpoint, and renders the
+fitted seabed. The defaults are the configuration the map ships in: every
+sounding of every survey, no decimation, §3.2's plane mean, one Matérn-5/2
+term, ``m = 30``, 2000 steps. ``--method both`` adds the SVGP baseline.
 
-**Hold out whole cells, not random soundings.** Consecutive soundings along a
-survey track are about a centimetre apart, so a random split leaves every
-held-out point with a training point almost on top of it and reports something
-close to training error. Withholding whole cells makes the model interpolate
-across the gap between tracks, which is what a map is actually asked to do.
+**The shipped map holds nothing out.** How good it is is measured on an
+independently flown test track (``experiments/score_track.py``): soundings the
+map never saw, landing between the survey's, which is where the smoother will
+query it. The holdouts here remain for quick comparisons. ``--holdout-by ping``
+is the one that resembles use; the default blocked cells ask a gap-filling
+question the smoother never does, and a random split would leak, since
+consecutive soundings are about a centimetre apart.
 
 The score is printed beside the mean of the nearest few training soundings.
 That baseline is deliberately unflattering: a Gaussian process that loses to it
@@ -84,7 +86,7 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--holdout",
     type=float,
-    default=0.2,
+    default=0.0,
     help=(
       "fraction of spatial cells withheld for scoring. The checkpoint is "
       "fitted on the remainder, so the number reported describes the map that "
@@ -117,13 +119,13 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
     "--decimate-cell",
     type=float,
-    default=0.25,
+    default=0.0,
     help=(
-      "take the median sounding per cell of this side before splitting, "
-      "metres. A multibeam run produces millions of soundings; 0.25 m is "
-      "comparable to the across-track beam footprint, so it thins redundancy "
-      "rather than resolution. Must stay well below --holdout-cell or "
-      "decimation merges soundings across the split boundary. 0 disables it"
+      "take the median sounding per cell of this side, metres; 0, the "
+      "default, fits every sounding. Off in the shipped map: decimating "
+      "makes the fitted noise the scatter of a cell median rather than of one "
+      "sounding, which is what the smoother compares the map against. Must "
+      "stay well below --holdout-cell when a blocked holdout is used"
     ),
   )
   parser.add_argument(
@@ -217,18 +219,13 @@ def parse_args() -> argparse.Namespace:
   )
   parser.add_argument(
     "--mean",
-    default="spline",
-    choices=("linear", "quadratic", "cubic", "spline"),
+    default="linear",
+    choices=("linear", "quadratic", "cubic"),
     help=(
-      "mean basis. At 0.25 m cells and an 8 m holdout the spline scores "
-      "2.178 m against the linear mean's 3.900 m and 4-NN's 2.387 m"
+      "mean basis; §3.2's plane by default. Near data the kernel carries "
+      "the prediction, and on an independent track a spline mean scored the "
+      "same as the plane (0.820 against 0.818 m)"
     ),
-  )
-  parser.add_argument(
-    "--mean-knots",
-    type=int,
-    default=12,
-    help="knots per axis when --mean spline",
   )
   parser.add_argument(
     "--steps",
@@ -483,7 +480,7 @@ def score(
   return gp_rmse
 
 
-def describe(vecchia: VecchiaMap, mean: str) -> None:
+def describe(vecchia: VecchiaMap) -> None:
   """Print a fitted Vecchia map's convergence and hyperparameters."""
   print(f"  fitted on {vecchia.fit_device}")
   trace = vecchia.loglik_trace
@@ -510,10 +507,7 @@ def describe(vecchia: VecchiaMap, mean: str) -> None:
     print(
       f"  amplitude {hyper.amplitude:.3f} m^2, nugget {hyper.noise:.4f} m^2"
     )
-  if mean == "spline":
-    print(f"  mean: {vecchia.beta.size} spline coefficients")
-  else:
-    print(f"  mean coefficients {np.round(vecchia.beta, 4)}")
+  print(f"  mean coefficients {np.round(vecchia.beta, 4)}")
 
 
 def report_truth(
@@ -761,11 +755,7 @@ def main() -> None:
       if args.near is None
       else f"{args.near} nearest + {args.conditioning - args.near} spread"
     )
-    mean = (
-      f"{args.mean} mean, {args.mean_knots} knots/axis"
-      if args.mean == "spline"
-      else f"{args.mean} mean"
-    )
+    mean = f"{args.mean} mean"
     print(
       f"Fitting Vecchia on {int(train.sum())} soundings: "
       f"m={args.conditioning} ({split}), {mean}, {args.steps} steps"
@@ -776,7 +766,6 @@ def main() -> None:
       "device": args.device,
       "near": args.near,
       "mean": args.mean,
-      "mean_knots": args.mean_knots,
     }
     inflation = None
     if args.nigp_passes == 0 and args.short_lengthscale is not None:
@@ -786,7 +775,7 @@ def main() -> None:
         X[train].astype(np.float64), y[train].astype(np.float64), **options
       )
       print("  single scale:")
-      describe(single, args.mean)
+      describe(single)
       if test.any():
         score(single, X, y, train, test)
         if truth is not None:
@@ -831,7 +820,7 @@ def main() -> None:
         f"it by {np.abs(inflations[-1] - inflation).max():.4f} m^2 at most"
       )
 
-    describe(vecchia, args.mean)
+    describe(vecchia)
     if inflation is not None:
       # Whether NIGP had anything to do: an inflation far below the nugget
       # means the fit would have been the same without it.

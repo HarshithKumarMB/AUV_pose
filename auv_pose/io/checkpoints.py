@@ -165,46 +165,22 @@ def save_vecchia_map(path: str | Path, bathymetry: VecchiaMap) -> None:
     "basis": {
       "kind": bathymetry.basis.kind,
       "degree": int(bathymetry.basis.degree),
-      "knots": int(bathymetry.basis.knots),
-      "lower": (
-        None
-        if bathymetry.basis.lower is None
-        else [float(v) for v in bathymetry.basis.lower]
-      ),
-      "upper": (
-        None
-        if bathymetry.basis.upper is None
-        else [float(v) for v in bathymetry.basis.upper]
-      ),
-      "keep": (
-        None
-        if bathymetry.basis.keep is None
-        else [int(v) for v in bathymetry.basis.keep]
-      ),
-      "intercept": bool(bathymetry.basis.intercept),
     },
   }
   with open(path, "wb") as handle:
     pickle.dump(payload, handle)
 
 
-def _read_basis(stored: dict | None) -> MeanBasis:
+def _read_basis(stored: dict | None, path: Path) -> MeanBasis:
   """Rebuild the mean basis, defaulting to the linear one for version 1."""
   if stored is None:
     return LINEAR_MEAN
-  return MeanBasis(
-    kind=str(stored["kind"]),
-    degree=int(stored["degree"]),
-    knots=int(stored["knots"]),
-    lower=None if stored["lower"] is None else tuple(stored["lower"]),
-    upper=None if stored["upper"] is None else tuple(stored["upper"]),
-    keep=(
-      None
-      if stored.get("keep") is None
-      else tuple(int(v) for v in stored["keep"])
-    ),
-    intercept=bool(stored.get("intercept", False)),
-  )
+  if stored["kind"] != "polynomial":
+    raise ValueError(
+      f"{path} was fitted with the retired {stored['kind']} mean. Refit it "
+      "with experiments/train_map.py, whose mean is now a polynomial"
+    )
+  return MeanBasis(kind="polynomial", degree=int(stored["degree"]))
 
 
 def _load_vecchia(path: Path, checkpoint: dict) -> VecchiaMap:
@@ -255,7 +231,7 @@ def _load_vecchia(path: Path, checkpoint: dict) -> VecchiaMap:
     ),
     noise=np.asarray(checkpoint["noise"], dtype=np.float64),
     loglik_trace=list(checkpoint.get("loglik_trace", [])),
-    basis=_read_basis(checkpoint.get("basis")),
+    basis=_read_basis(checkpoint.get("basis"), path),
     fit_device=str(checkpoint.get("fit_device", "cpu")),
     information=(
       None
