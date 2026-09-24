@@ -205,7 +205,11 @@
 
       devShells.${system} = {
         default = pkgs.mkShell {
-          packages = [ pyEnv ];
+          # ffmpeg encodes the survey videos matplotlib renders frame by frame.
+          packages = [
+            pyEnv
+            pkgs.ffmpeg
+          ];
           shellHook = shellEnv;
         };
 
