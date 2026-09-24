@@ -305,8 +305,17 @@ def parse_args() -> argparse.Namespace:
     default="lawnmower",
     help=(
       "lawnmower surveys --box; figure8 flies a test track the map is scored "
-      "on, two loops at --depths about --centre. Guidance holds the heading, "
-      "so the vehicle crabs around the loops rather than turning into them"
+      "on, two loops at --depths about --centre. Without --turn the vehicle "
+      "crabs around the loops at its spawn heading"
+    ),
+  )
+  parser.add_argument(
+    "--turn",
+    action="store_true",
+    help=(
+      "point the bow along the direction of travel instead of crabbing at the "
+      "spawn heading, so the body-fixed fan turns with the track. The first "
+      "runs where the vehicle rotates at all"
     ),
   )
   parser.add_argument(
@@ -525,12 +534,13 @@ def main() -> None:
     "seed": args.seed,
     "yaw_deg": args.yaw,
     "route": args.route,
+    "turn": args.turn,
     "box": list(args.box),
     "spacing": args.spacing,
     "waypoints": waypoints,
   }
 
-  follower = WaypointFollower(waypoints, args.arrival_radius)
+  follower = WaypointFollower(waypoints, args.arrival_radius, turn=args.turn)
   ticks = 0
   pings = 0
   live_beams = 0

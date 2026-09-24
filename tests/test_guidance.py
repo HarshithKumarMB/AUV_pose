@@ -277,3 +277,84 @@ def test_heading_is_taken_from_the_body_x_axis():
     steer(follower, np.zeros(3), LEVEL),
     steer(reference, np.zeros(3), np.eye(3)),
   )
+
+
+# -- turning ----------------------------------------------------------------
+
+
+def test_a_pure_yaw_command_drives_thrusters_six_and_seven_against_each_other():
+  """The measured pattern: no vertical thrust, no surge or sway pair."""
+  command = thruster_command(np.zeros(3), yaw=5.0)
+  np.testing.assert_allclose(command, [0, 0, 0, 0, 0, 0, -5.0, 5.0])
+
+
+def test_turning_saturates_with_the_rest_of_the_command():
+  """One scale factor for everything, so a clipped turn leaves no stray moment."""
+  command = thruster_command(np.array([30.0, 10.0, 0.0]), yaw=15.0)
+  unscaled = np.array([0, 0, 0, 0, 40.0, 20.0, -5.0, 5.0])
+  np.testing.assert_allclose(command, unscaled * (20.0 / 40.0))
+
+
+def turning_part(follower, position, rotation):
+  """What turning adds to the command, against the same follower not turning."""
+  plain = WaypointFollower(follower.waypoints, follower.arrival_radius)
+  plain.index = follower.index
+  return steer(follower, position, rotation) - steer(plain, position, rotation)
+
+
+def test_a_target_to_port_turns_the_vehicle_anticlockwise():
+  """Heading 0, waypoint due north: turn left, which is positive yaw."""
+  follower = WaypointFollower([[0.0, 3.0, 0.0]], turn=True)
+  added = turning_part(follower, np.zeros(3), LEVEL)
+  assert added[6] < 0 < added[7]
+  np.testing.assert_allclose(added[:6], 0.0)
+
+
+def test_a_target_to_starboard_turns_it_clockwise():
+  follower = WaypointFollower([[0.0, -3.0, 0.0]], turn=True)
+  added = turning_part(follower, np.zeros(3), LEVEL)
+  assert added[7] < 0 < added[6]
+
+
+def test_the_heading_error_takes_the_short_way_round():
+  """Heading 170 degrees, target -170: a 20 degree turn left, not 340 right."""
+  follower = WaypointFollower([[-3.0, -0.53, 0.0]], turn=True)
+  added = turning_part(follower, np.zeros(3), yawed(170.0))
+  assert added[7] > 0
+
+
+def test_turning_is_damped_by_the_heading_rate():
+  """A heading already swinging toward the target is turned less hard."""
+  still = WaypointFollower([[0.0, 3.0, 0.0]], turn=True)
+  steer(still, np.zeros(3), yawed(10.0))
+  swinging = WaypointFollower([[0.0, 3.0, 0.0]], turn=True)
+  steer(swinging, np.zeros(3), yawed(0.0))
+
+  calm = steer(still, np.zeros(3), yawed(10.0))[7]
+  damped = steer(swinging, np.zeros(3), yawed(10.0))[7]
+  assert damped < calm
+
+
+def test_the_heading_target_is_held_close_to_a_waypoint():
+  """Arrival must not spin the vehicle toward a point it is sitting on."""
+  follower = WaypointFollower([[10.0, 0.0, 0.0]], turn=True, hold_within=1.5)
+  steer(follower, np.zeros(3), LEVEL)
+  steer(follower, np.array([9.5, 0.9, 0.0]), LEVEL)
+  assert follower._heading_target == pytest.approx(0.0)
+
+
+def test_without_turning_nothing_changes():
+  """Every run flown before turning existed is reproduced exactly."""
+  follower = WaypointFollower([[4.0, -2.0, 1.0]])
+  np.testing.assert_allclose(
+    steer(follower, np.zeros(3), yawed(30.0))[4:],
+    thruster_command(
+      np.array(
+        [
+          4.0 * np.cos(np.radians(30)) - 2.0 * np.sin(np.radians(30)),
+          -4.0 * np.sin(np.radians(30)) - 2.0 * np.cos(np.radians(30)),
+          1.0,
+        ]
+      )
+    )[4:],
+  )
