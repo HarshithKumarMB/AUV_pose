@@ -1,58 +1,33 @@
-"""Shared HoloOcean scenario fragments.
-
-Sensor configuration, not algorithms -- hence here rather than in ``auv_pose``.
-
-Note:
-    The original scripts configured the IMU with ``"AddNoise": True`` and
-    ``"GyroBiasSigma"``. Neither is a recognised ``IMUSensor`` option: ``AddNoise``
-    appears nowhere in ``holoocean/sensors.py``, and the angular-rate bias key is
-    ``AngVelBiasSigma``. Only ``AccelBiasSigma`` was taking effect, so those runs had
-    no gyro noise and no accelerometer measurement noise at all. The documented keys
-    are used below, which makes dead reckoning drift considerably more than before.
-"""
+"""HoloOcean sensor and scenario configuration."""
 
 from typing import Any
 
+import numpy as np
+
+from auv_pose.estimation.inertial import ImuNoise
+
 
 def imu_sensor(
-  name: str = "imu",
-  hz: int = 30,
-  accel_sigma: float = 0.05,
-  ang_vel_sigma: float = 0.01,
-  accel_bias_sigma: float = 6e-5,
-  ang_vel_bias_sigma: float = 5e-5,
-  return_bias: bool = False,
+  noise: ImuNoise, hz: int, name: str = "imu", return_bias: bool = False
 ) -> dict[str, Any]:
-  """An IMU with noise that actually takes effect. Returns ``[accel; ang_vel]``.
+  """An IMU with ``noise``, returning ``[accel; ang_vel]``.
 
-  With ``return_bias`` it returns ``[accel; ang_vel; accel_bias; ang_vel_bias]``
-  instead -- the true biases, for scoring an estimator against.
-
-  .. warning::
-
-     The two ``*_bias_sigma`` values are **per-sample random-walk increments**,
-     not standard deviations of a fixed bias. The bias grows as
-     ``sigma * sqrt(n)``, so a value that reads like a plausible IMU spec is
-     off by the square root of the run length. Measured with ``ReturnBias``
-     against a motionless vehicle, ``0.01`` reaches 14 deg/s of gyro bias and
-     0.35 m/s^2 of accelerometer bias after 300 samples at 30 Hz -- roughly
-     200x a real MEMS unit, and enough on its own to swing heading through 70
-     degrees in ten seconds.
-
-     Size them backwards from the bias you want at the end of a run:
-     ``sigma = bias_at_n / sqrt(n)``. The defaults here target about 0.05 deg/s
-     of gyro bias and 0.001 m/s^2 of accelerometer bias over a 300-sample run.
+  With ``return_bias`` it also returns the true ``[accel_bias; ang_vel_bias]``,
+  for scoring. HoloOcean takes per-sample values -- white-noise standard
+  deviations and random-walk increments -- so the densities are converted at
+  ``hz`` here.
   """
+  dt = 1.0 / hz
   return {
     "sensor_name": name,
     "sensor_type": "IMUSensor",
     "socket": "IMUSocket",
     "Hz": hz,
     "configuration": {
-      "AccelSigma": accel_sigma,
-      "AngVelSigma": ang_vel_sigma,
-      "AccelBiasSigma": accel_bias_sigma,
-      "AngVelBiasSigma": ang_vel_bias_sigma,
+      "AccelSigma": noise.accel / np.sqrt(dt),
+      "AngVelSigma": noise.gyro / np.sqrt(dt),
+      "AccelBiasSigma": noise.accel_bias * np.sqrt(dt),
+      "AngVelBiasSigma": noise.gyro_bias * np.sqrt(dt),
       "ReturnBias": return_bias,
     },
   }

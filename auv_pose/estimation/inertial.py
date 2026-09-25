@@ -91,50 +91,38 @@ class ImuSamples:
 
 @dataclass(frozen=True)
 class ImuNoise:
-  """Per-sample noise of the IMU.
+  """IMU noise as a datasheet states it: continuous-time densities.
 
-  .. warning::
-
-     Every one of these is a **per-sample** standard deviation, not a
-     continuous-time density, and the two bias terms are per-sample *increments
-     of a random walk* rather than the size of the bias itself. They are
-     written this way because that is what HoloOcean's ``IMUSensor`` takes --
-     see :func:`experiments.scenarios.imu_sensor`, whose warning is entirely
-     about this -- and because it keeps the recursion below free of any ``dt``
-     rescaling, which is the step most easily got wrong in either direction.
-
-     The consequence is that a bias grows as ``sigma * sqrt(k)`` over ``k``
-     samples. Size these backwards from the bias you want at the end of a run.
-
-  :param gyro: Angular-rate white noise, rad/s.
-  :param accel: Specific-force white noise, m/s^2.
-  :param gyro_bias: Gyro bias random-walk increment, rad/s per sample.
-  :param accel_bias: Accelerometer bias random-walk increment, m/s^2 per sample.
+  :param gyro: Angle random walk, rad/s/sqrt(Hz).
+  :param accel: Velocity random walk, m/s^2/sqrt(Hz).
+  :param gyro_bias: Gyro bias random walk, rad/s^2/sqrt(Hz).
+  :param accel_bias: Accelerometer bias random walk, m/s^3/sqrt(Hz).
   """
 
-  gyro: float = 0.01
-  accel: float = 0.05
-  gyro_bias: float = 5e-5
-  accel_bias: float = 6e-5
+  gyro: float = 1.8e-3
+  accel: float = 9e-3
+  gyro_bias: float = 2.7e-4
+  accel_bias: float = 3.3e-4
 
-  def covariance(self) -> NumpyArray:
-    """The driving-noise covariance ``Q``, shape ``(12, 12)``."""
+  def covariance(self, dt: float) -> NumpyArray:
+    """Driving-noise covariance of one sample of length ``dt``, ``(12, 12)``.
+
+    White noise averages down over a sample, ``sigma = density / sqrt(dt)``;
+    a random walk accumulates, ``sigma = density * sqrt(dt)``.
+    """
     return np.diag(
-      np.concatenate(
+      np.repeat(
         [
-          np.full(3, self.gyro**2),
-          np.full(3, self.accel**2),
-          np.full(3, self.gyro_bias**2),
-          np.full(3, self.accel_bias**2),
-        ]
+          self.gyro**2 / dt,
+          self.accel**2 / dt,
+          self.gyro_bias**2 * dt,
+          self.accel_bias**2 * dt,
+        ],
+        3,
       )
     )
 
 
-#: The IMU the experiments are configured with -- see
-#: :func:`experiments.scenarios.imu_sensor`. A module-level singleton rather
-#: than a default argument, which is evaluated once at import and reads like a
-#: fresh value.
 DEFAULT_NOISE = ImuNoise()
 
 
@@ -205,7 +193,7 @@ def imu_noise_covariance(
   :param state: State the samples are propagated from; supplies the attitude
       the trajectory is linearised about, and the bias estimates.
   :param samples: IMU samples for the step.
-  :param noise: Per-sample sensor noise.
+  :param noise: The IMU's noise densities.
   :return: Covariance contribution, shape ``(15, 15)``, symmetric PSD.
 
   Note:
@@ -224,7 +212,6 @@ def imu_noise_covariance(
           below the accelerometer noise.
   """
   covariance = np.zeros((DOF, DOF))
-  driving = noise.covariance()
   attitude = np.asarray(state.attitude, dtype=float)
 
   for gyro, accel, dt in zip(samples.gyro, samples.accel, samples.dt):
@@ -253,7 +240,8 @@ def imu_noise_covariance(
     gain[ACCEL_BIAS, _ACCEL_BIAS_WALK] = np.eye(3)
 
     covariance = (
-      transition @ covariance @ transition.T + gain @ driving @ gain.T
+      transition @ covariance @ transition.T
+      + gain @ noise.covariance(dt) @ gain.T
     )
 
     attitude = quat_normalize(quat_multiply(attitude, quat_exp(rate)))

@@ -11,6 +11,7 @@ from dataclasses import replace
 from itertools import pairwise
 
 import numpy as np
+import pytest
 
 from auv_pose.estimation.inertial import (
   GRAVITY,
@@ -185,60 +186,50 @@ def test_the_covariance_grows_with_every_sample():
   assert all(a < b for a, b in pairwise(traces))
 
 
-def test_the_bias_blocks_are_exactly_the_random_walk():
-  """Nothing feeds back into a bias, so its variance is ``sigma^2 k``."""
-  noise = ImuNoise()
+def level_samples(rate, duration=2.0):
+  """A level vehicle at rest, sampled at ``rate`` for ``duration`` seconds."""
   start = NavState.at_rest()
-  k = 17
-  cov = imu_noise_covariance(start, resting_samples(start, k=k), noise)
+  force = -quat_to_rotmat(start.attitude).T @ GRAVITY
+  k = round(rate * duration)
+  return start, ImuSamples.uniform(
+    np.zeros((k, 3)), np.tile(force, (k, 1)), 1 / rate
+  )
 
+
+@pytest.mark.parametrize("rate", [10.0, 30.0, 400.0])
+def test_the_bias_blocks_are_the_random_walk_whatever_the_rate(rate):
+  """Nothing feeds back into a bias: its variance is ``density^2 * time``."""
+  noise = ImuNoise()
+  start, samples = level_samples(rate)
+  cov = imu_noise_covariance(start, samples, noise)
   np.testing.assert_allclose(
-    cov[GYRO_BIAS, GYRO_BIAS], noise.gyro_bias**2 * k * np.eye(3), atol=1e-20
+    cov[GYRO_BIAS, GYRO_BIAS], noise.gyro_bias**2 * 2.0 * np.eye(3), rtol=1e-12
   )
   np.testing.assert_allclose(
     cov[ACCEL_BIAS, ACCEL_BIAS],
-    noise.accel_bias**2 * k * np.eye(3),
-    atol=1e-20,
+    noise.accel_bias**2 * 2.0 * np.eye(3),
+    rtol=1e-12,
   )
 
 
-def test_the_position_block_scales_as_dt_to_the_fourth():
-  """The check that the second-order position update reached the Jacobians.
-
-  Position picks up the accelerometer noise through a ``dt^2 / 2`` term, so its
-  variance goes as ``dt^4``. Leaving those Jacobian entries at zero -- the easy
-  mistake -- still runs, and merely reports a position it is too sure of.
-  """
-  start = NavState.at_rest()
+@pytest.mark.parametrize("rate", [10.0, 30.0, 400.0])
+def test_accelerometer_noise_walks_velocity_whatever_the_rate(rate):
+  """White noise integrated: velocity variance ``density^2 * time``, exactly."""
   noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
-
-  def position_variance(dt):
-    force = -quat_to_rotmat(start.attitude).T @ GRAVITY
-    samples = ImuSamples.uniform(np.zeros(3), force, dt)
-    return np.trace(
-      imu_noise_covariance(start, samples, noise)[POSITION, POSITION]
-    )
-
-  base = position_variance(1e-3)
-  doubled = position_variance(2e-3)
-
-  assert base > 0.0
-  np.testing.assert_allclose(doubled / base, 16.0, rtol=1e-9)
-
-
-def test_the_velocity_block_scales_as_dt_squared():
-  start = NavState.at_rest()
-  noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
-
-  def velocity_variance(dt):
-    force = -quat_to_rotmat(start.attitude).T @ GRAVITY
-    samples = ImuSamples.uniform(np.zeros(3), force, dt)
-    return np.trace(
-      imu_noise_covariance(start, samples, noise)[VELOCITY, VELOCITY]
-    )
-
+  start, samples = level_samples(rate)
+  cov = imu_noise_covariance(start, samples, noise)
   np.testing.assert_allclose(
-    velocity_variance(2e-3) / velocity_variance(1e-3), 4.0, rtol=1e-9
+    cov[VELOCITY, VELOCITY], 0.05**2 * 2.0 * np.eye(3), rtol=1e-12
+  )
+
+
+def test_position_variance_approaches_the_continuous_limit():
+  """``density^2 T^3 / 3``: the second-order position update reached the Jacobians."""
+  noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
+  start, samples = level_samples(1000.0)
+  cov = imu_noise_covariance(start, samples, noise)
+  np.testing.assert_allclose(
+    np.diag(cov[POSITION, POSITION]), 0.05**2 * 2.0**3 / 3, rtol=1e-3
   )
 
 
@@ -329,8 +320,9 @@ def sample_errors(state, samples, noise, rng, trials):
   accel_bias = np.tile(state.accel_bias, (trials, 1))
 
   for gyro, accel, dt in zip(samples.gyro, samples.accel, samples.dt):
-    eta_gyro = rng.normal(scale=noise.gyro, size=(trials, 3))
-    eta_accel = rng.normal(scale=noise.accel, size=(trials, 3))
+    sigma = np.sqrt(np.diag(noise.covariance(dt)))
+    eta_gyro = rng.normal(scale=sigma[0:3], size=(trials, 3))
+    eta_accel = rng.normal(scale=sigma[3:6], size=(trials, 3))
 
     force = accel - accel_bias - eta_accel
     acceleration = np.einsum("nij,nj->ni", rotation, force) + GRAVITY
@@ -339,10 +331,8 @@ def sample_errors(state, samples, noise, rng, trials):
     velocity = velocity + dt * acceleration
     rotation = rotation @ batch_exp((gyro - gyro_bias - eta_gyro) * dt)
 
-    gyro_bias = gyro_bias + rng.normal(scale=noise.gyro_bias, size=(trials, 3))
-    accel_bias = accel_bias + rng.normal(
-      scale=noise.accel_bias, size=(trials, 3)
-    )
+    gyro_bias = gyro_bias + rng.normal(scale=sigma[6:9], size=(trials, 3))
+    accel_bias = accel_bias + rng.normal(scale=sigma[9:12], size=(trials, 3))
 
   nominal = propagate(state, samples)
   nominal_rotation = quat_to_rotmat(nominal.attitude)
@@ -356,6 +346,14 @@ def sample_errors(state, samples, noise, rng, trials):
       accel_bias - nominal.accel_bias,
     ],
     axis=-1,
+  )
+
+
+def per_sample(gyro, accel, gyro_bias, accel_bias, dt=DT):
+  """The densities whose per-sample values at ``dt`` are the ones given."""
+  root = np.sqrt(dt)
+  return ImuNoise(
+    gyro * root, accel * root, gyro_bias / root, accel_bias / root
   )
 
 
@@ -396,7 +394,7 @@ def test_the_covariance_matches_the_noise_it_claims_to_model():
   above it passing and fails here.
   """
   rng = np.random.default_rng(7)
-  noise = ImuNoise(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
+  noise = per_sample(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
   start, samples = turning_case()
 
   errors = sample_errors(start, samples, noise, rng, trials=20000)
@@ -412,7 +410,7 @@ def test_the_covariance_matches_the_noise_it_claims_to_model():
 def test_the_sampled_error_is_centred():
   """A biased propagation would make the covariance above meaningless."""
   rng = np.random.default_rng(8)
-  noise = ImuNoise(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
+  noise = per_sample(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
   start, samples = turning_case()
 
   errors = sample_errors(start, samples, noise, rng, trials=20000)
@@ -429,7 +427,7 @@ def test_the_rotation_block_alone_matches_sampling():
   variance here, so the comparison is against the attitude Jacobians alone.
   """
   rng = np.random.default_rng(9)
-  noise = ImuNoise(gyro=0.05, accel=0.0, gyro_bias=5e-3, accel_bias=0.0)
+  noise = per_sample(gyro=0.05, accel=0.0, gyro_bias=5e-3, accel_bias=0.0)
 
   start = NavState.at_rest(attitude=quat_exp(np.array([0.2, -0.4, 0.9])))
   k = 30

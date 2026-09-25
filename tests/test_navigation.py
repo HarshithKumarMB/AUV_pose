@@ -214,8 +214,10 @@ def test_the_magnetometer_bounds_heading_and_the_gyro_does_not():
 # -- consistency against simulated truth ------------------------------------
 
 
-NOISE = ImuNoise()
 DT = 1.0 / 30.0
+NOISE = ImuNoise()
+#: Per-sample standard deviations of NOISE at the test's tick.
+SIGMA = np.sqrt(np.diag(NOISE.covariance(DT)))
 SAMPLES_PER_STEP = 6
 DVL_NOISE = dvl_noise_covariance(0.02, 22.5)
 DEPTH_NOISE = np.eye(1) * 0.05**2
@@ -242,12 +244,11 @@ def simulate(rng, prior, steps):
       truth = propagate(truth, clean)
       truth = replace(
         truth,
-        gyro_bias=truth.gyro_bias + rng.normal(scale=NOISE.gyro_bias, size=3),
-        accel_bias=truth.accel_bias
-        + rng.normal(scale=NOISE.accel_bias, size=3),
+        gyro_bias=truth.gyro_bias + rng.normal(scale=SIGMA[6:9]),
+        accel_bias=truth.accel_bias + rng.normal(scale=SIGMA[9:12]),
       )
-      gyro.append(clean.gyro[0] + rng.normal(scale=NOISE.gyro, size=3))
-      accel.append(clean.accel[0] + rng.normal(scale=NOISE.accel, size=3))
+      gyro.append(clean.gyro[0] + rng.normal(scale=SIGMA[0:3]))
+      accel.append(clean.accel[0] + rng.normal(scale=SIGMA[3:6]))
 
     aiding = [
       Aiding(
@@ -376,8 +377,8 @@ def ticks(rng, n):
     aided = index % SAMPLES_PER_STEP == SAMPLES_PER_STEP - 1
     yield {
       "index": index,
-      "gyro": rng.normal(scale=NOISE.gyro, size=3),
-      "accel": -GRAVITY + rng.normal(scale=NOISE.accel, size=3),
+      "gyro": rng.normal(scale=SIGMA[0:3]),
+      "accel": -GRAVITY + rng.normal(scale=SIGMA[3:6]),
       "dvl": np.array([1.0, 0.0, 0.0]) if aided else None,
       "depth": -60.0 if aided else None,
       "magnetometer": MAGNETIC_NORTH if aided else None,

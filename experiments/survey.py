@@ -75,13 +75,11 @@ DVL_ELEVATION = 22.5
 DEPTH_SIGMA = 0.05
 COMPASS_SIGMA = 0.03
 
-#: IMU noise for a survey. The white-noise terms are the scenarios' defaults;
-#: the bias random walks are sized for a *pass*, not for the 300-sample runs
-#: :func:`~experiments.scenarios.imu_sensor`'s defaults target. A diagonal pass
-#: is about 25,000 ticks, over which those defaults would grow the gyro bias to
-#: 0.45 deg/s. These give about 0.01 deg/s and 1e-3 m/s^2 by the end, which is
-#: a tactical-grade MEMS unit.
-SURVEY_IMU = ImuNoise(gyro=0.01, accel=0.05, gyro_bias=1e-6, accel_bias=6e-6)
+#: The survey IMU, as densities. Over a 15-minute pass the biases walk to about
+#: 0.01 deg/s and 1e-3 m/s^2: a tactical-grade MEMS unit.
+SURVEY_IMU = ImuNoise(
+  gyro=1.8e-3, accel=9e-3, gyro_bias=5.5e-6, accel_bias=3.3e-5
+)
 
 #: Spread of the belief navigation starts from, around the true start pose:
 #: position as from a surface GNSS fix, attitude as from a levelled AHRS, and
@@ -209,15 +207,7 @@ def build_scenario(
       # orientation_sensor's docstring.
       pose_sensor(),
       orientation_sensor(),
-      imu_sensor(
-        "imu",
-        hz=TICK_RATE_HZ,
-        accel_sigma=SURVEY_IMU.accel,
-        ang_vel_sigma=SURVEY_IMU.gyro,
-        accel_bias_sigma=SURVEY_IMU.accel_bias,
-        ang_vel_bias_sigma=SURVEY_IMU.gyro_bias,
-        return_bias=True,
-      ),
+      imu_sensor(SURVEY_IMU, hz=TICK_RATE_HZ, return_bias=True),
       dvl_sensor(
         hz=AIDING_HZ, vel_sigma=DVL_BEAM_SIGMA, elevation=DVL_ELEVATION
       ),

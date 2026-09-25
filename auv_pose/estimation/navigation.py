@@ -267,7 +267,7 @@ def inertial_step(
   :param belief: Posterior at the end of the previous cycle.
   :param samples: The IMU samples covering this cycle.
   :param aiding: Measurements taken at the end of the cycle, applied in order.
-  :param noise: The IMU's per-sample noise.
+  :param noise: The IMU's noise densities.
   :param rule: Sigma-point placement and weighting.
   :return: The recorded step, and one :class:`Update` per aiding measurement.
   """
@@ -326,7 +326,7 @@ class InertialNavigator:
   :param initial: Belief at the tick before the first sample.
   :param dt: IMU sample interval, seconds.
   :param aiding_noise: Noise of the DVL, depth and magnetometer readings.
-  :param imu_noise: The IMU's per-sample noise.
+  :param imu_noise: The IMU's noise densities.
   :param field: World vector the magnetometer measures.
   """
 
