@@ -1,22 +1,22 @@
 """Writing run logs as CSV with a fixed schema."""
 
-from __future__ import annotations
-
 import csv
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Self
 
-__all__ = ["CsvLogger"]
+__all__ = ["CsvWriter"]
 
 
-class CsvLogger:
-  """Append rows to a CSV with a fixed header.
+class CsvWriter:
+  """Write rows to a CSV with a fixed header, refusing any that do not match.
 
   Use as a context manager::
 
-      with CsvLogger("navigation.csv", NAVIGATION_COLUMNS) as log:
+      with CsvWriter("navigation.csv", NAVIGATION_COLUMNS) as log:
           log.write(step=0, x=1.0, ...)
+
+  Line-buffered, so a run killed partway leaves every finished row on disk.
   """
 
   def __init__(self, path: str | Path, columns: Sequence[str]) -> None:
@@ -26,28 +26,22 @@ class CsvLogger:
     self._writer = None
 
   def __enter__(self) -> Self:
-    self._handle = open(self.path, "w", newline="")
-    self._writer = csv.writer(self._handle)
-    self._writer.writerow(self.columns)
+    self._handle = open(self.path, "w", newline="", buffering=1)
+    self._writer = csv.DictWriter(self._handle, self.columns)
+    self._writer.writeheader()
     return self
 
   def __exit__(self, *exc_info) -> None:
     if self._handle is not None:
       self._handle.close()
-      self._handle = None
-      self._writer = None
+    self._handle = self._writer = None
 
   def write(self, **values) -> None:
     """Write one row. Every column must be supplied, and no extras."""
     if self._writer is None:
-      raise RuntimeError("CsvLogger must be used as a context manager")
-
+      raise RuntimeError("CsvWriter must be used as a context manager")
+    # DictWriter refuses extras itself, but fills a missing column with "".
     missing = set(self.columns) - set(values)
-    extra = set(values) - set(self.columns)
-    if missing or extra:
-      raise ValueError(
-        f"row does not match schema; missing={sorted(missing)} "
-        f"unexpected={sorted(extra)}"
-      )
-
-    self._writer.writerow([values[column] for column in self.columns])
+    if missing:
+      raise ValueError(f"row lacks {sorted(missing)}")
+    self._writer.writerow(values)

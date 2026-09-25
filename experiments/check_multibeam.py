@@ -27,8 +27,6 @@ two captures over different ground produced three wrong conclusions in a row,
 which is the whole reason these are arguments rather than edits.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 

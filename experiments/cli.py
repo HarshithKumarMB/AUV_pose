@@ -1,7 +1,5 @@
 """Argument and environment helpers shared by the drivers."""
 
-from __future__ import annotations
-
 import argparse
 import os
 from pathlib import Path

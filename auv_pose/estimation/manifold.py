@@ -22,10 +22,8 @@ Frames and signs are as :mod:`auv_pose.estimation` documents them: a z-up world,
 attitude as a scalar-first quaternion rotating body into world.
 """
 
-from __future__ import annotations
-
 from collections.abc import Sequence
-from typing import NamedTuple
+from typing import NamedTuple, Self
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -99,7 +97,7 @@ class NavState(NamedTuple):
     position: ArrayLike = (0.0, 0.0, 0.0),
     attitude: ArrayLike = _IDENTITY_QUAT,
     velocity: ArrayLike = (0.0, 0.0, 0.0),
-  ) -> NavState:
+  ) -> Self:
     """A state with both biases zero, for starting a run or a test."""
     return cls(
       position=np.asarray(position, dtype=float),

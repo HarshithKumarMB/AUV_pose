@@ -4,9 +4,7 @@ The Dam seabed carries pipelines and a valve manifold: 4-5 m tall, about 10 m
 across, and sharp-edged. A bathymetric map should not be asked to fit them.
 Its smooth mean spreads each edge over a wide ramp, so a misplaced sounding
 costs almost nothing over most of the ramp and far more than the slope predicts
-at the edge. That breaks the first-order input-noise model the map's NIGP fit
-relies on: measured on a navigated pass, the typical sounding's input noise was
-overstated about 3x, while 11% landed beyond 3 sigma.
+at the edge -- errors no smooth map can explain, and which dominate its rmse.
 
 So objects are a separate class, found the way ground is separated from
 buildings in airborne LiDAR: a morphological **opening** (erosion, then
@@ -27,8 +25,6 @@ reaches a pipe's sides without swallowing a mound beside it.
 Nothing here reads a reference surface or the simulator, so it runs on
 hardware data as it does on simulated.
 """
-
-from __future__ import annotations
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray

@@ -9,8 +9,6 @@ a run's history is then just a list of values and the backward pass is a pure
 function over it.
 """
 
-from __future__ import annotations
-
 from typing import Any, Generic, NamedTuple, Protocol, Self, TypeAlias, TypeVar
 
 import numpy as np

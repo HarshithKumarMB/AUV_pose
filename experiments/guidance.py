@@ -5,8 +5,6 @@ thruster mixing is a fact about this hull and HoloOcean's control scheme 0, not 
 algorithm.
 """
 
-from __future__ import annotations
-
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 

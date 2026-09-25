@@ -18,8 +18,6 @@ coordinate or arrival ordering instead conditions each point on a set lying
 entirely to one side of it, which is a poor summary of its surroundings.
 """
 
-from __future__ import annotations
-
 import heapq
 
 import numpy as np

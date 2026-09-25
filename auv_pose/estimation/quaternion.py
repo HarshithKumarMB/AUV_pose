@@ -4,8 +4,6 @@ Quaternions are scalar-first ``[w, x, y, z]``, unit norm, and rotate body vector
 into the world frame. See :mod:`auv_pose.estimation` for the frame conventions.
 """
 
-from __future__ import annotations
-
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 

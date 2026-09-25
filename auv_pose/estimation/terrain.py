@@ -19,8 +19,6 @@ as thirty independent constraints on the pose; without them the filter is
 confidently wrong rather than approximately right.
 """
 
-from __future__ import annotations
-
 from typing import Protocol, runtime_checkable
 
 from numpy.typing import ArrayLike

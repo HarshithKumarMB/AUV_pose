@@ -19,8 +19,6 @@ about a metre, as separate dives' fixes do -- and the map carries that as
 disagreement where passes overlap.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
@@ -62,14 +60,6 @@ def parse_args() -> argparse.Namespace:
   return parser.parse_args()
 
 
-def start_offset(log: RawSurvey) -> np.ndarray:
-  """A flight's map frame minus the world, horizontally: its surface-fix error."""
-  meta = log.meta
-  return np.asarray(meta["initial_mean"]["position"][:2], float) - np.asarray(
-    meta["initial_truth"]["position"][:2], float
-  )
-
-
 def loop_of_each_ping(log: RawSurvey) -> np.ndarray:
   """Which loop a ping was taken on, from the vehicle's true depth.
 
@@ -88,14 +78,12 @@ def main() -> None:
   track = pd.read_csv(args.track)
   track_log = load_raw_survey(args.track_log.expanduser())
   survey_offset = np.mean(
-    [
-      start_offset(load_raw_survey(log.expanduser())) for log in args.survey_log
-    ],
+    [load_raw_survey(log.expanduser()).start_offset for log in args.survey_log],
     axis=0,
   )
 
   # Track truth is in the track's frame; the maps are in the survey's.
-  shift = survey_offset - start_offset(track_log)
+  shift = survey_offset - track_log.start_offset
   where = track[["true_x", "true_y"]].to_numpy(float) + shift
   depth = track["true_z"].to_numpy(float)
 

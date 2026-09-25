@@ -17,8 +17,6 @@ fabricated returns across half its fan, on the strength of a flat-ground test
 applied to ground that was not flat.
 """
 
-from __future__ import annotations
-
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 

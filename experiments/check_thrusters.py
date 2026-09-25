@@ -14,8 +14,6 @@ Control scheme 0 takes eight thrusts: four vertical, then the four angled
 horizontal ones, indices 4-7.
 """
 
-from __future__ import annotations
-
 import argparse
 
 import holoocean

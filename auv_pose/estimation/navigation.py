@@ -26,8 +26,6 @@ with the vehicle holding one attitude for a whole survey, the gyro alone gives
 heading no reference at all.
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable, Sequence
 from typing import Any, Generic, NamedTuple
 

@@ -5,8 +5,6 @@ The non-causal counterpart lives in :mod:`auv_pose.estimation.smoothers`, which
 consumes the history a filter records here.
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 

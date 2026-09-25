@@ -20,8 +20,6 @@ position, are what distinguish the two: a sensor defect holds its angular width
 and follows the vehicle, an object holds its physical width and stays put.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 

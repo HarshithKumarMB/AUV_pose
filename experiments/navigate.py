@@ -35,8 +35,6 @@ flag that deliberately breaks that rule to isolate attitude error, and which
 announces itself loudly when used.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
@@ -60,7 +58,7 @@ from auv_pose.estimation.quaternion import (
 from auv_pose.estimation.strapdown import StrapdownIntegrator
 from auv_pose.estimation.typing import Measurement
 from auv_pose.io.checkpoints import load_map
-from auv_pose.io.logs import CsvLogger
+from auv_pose.io.logs import CsvWriter
 from auv_pose.mapping.sonar import (
   azimuth_angles,
   bottom_return_ranges,
@@ -496,7 +494,7 @@ def main() -> None:
 
   follower = WaypointFollower(WAYPOINTS, args.arrival_radius)
 
-  with CsvLogger(args.out, COLUMNS) as log:
+  with CsvWriter(args.out, COLUMNS) as log:
     for step in range(args.max_steps):
       state = env.step(command)
 

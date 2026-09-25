@@ -9,32 +9,23 @@ Replays the log's ticks through the same
 :class:`~auv_pose.estimation.navigation.InertialNavigator` the vehicle steered
 on, smooths the record with
 :func:`~auv_pose.estimation.smoothers.unscented_rts_smooth`, and places every
-beam from the pose at its ping. Each sounding carries its own position
-covariance (:func:`~auv_pose.mapping.sonar.sounding_covariance`) -- the input
-uncertainty the map's NIGP step feeds on -- and where the same range would have
-landed from the true pose, for scoring.
+beam from the pose at its ping. Each sounding also records where the same range
+would have landed from the true pose, for scoring.
 
-**The covariance is relative to the start.** Nothing observes horizontal
-position, so the surface fix's error is carried unchanged to the end of the
-run: one offset, shared by every sounding, which moves the whole map rigidly
-and distorts none of it. Left in, it swamps each sounding's covariance --
-measured on a trial flight, a 1.43 m predicted sigma against a 0.25 m actual
-placement error -- and the map's input-noise correction, which treats every
-sounding's noise as its own, would read one shared error as thousands of
-independent ones. So the replay pins the start's horizontal position, and the
-shared offset is reported apart: it belongs to the map's frame, not to any
-sounding in it.
+**Errors are relative to the start.** Nothing observes horizontal position, so
+the surface fix's error is carried unchanged to the end of the run: one offset,
+shared by every sounding, which moves the whole map rigidly and distorts none
+of it. It belongs to the map's frame, not to any sounding, so it is reported
+apart (:attr:`~auv_pose.io.raw_survey.RawSurvey.start_offset`) and the pose's
+honesty is scored against the error that remains.
 
-``--pose truth`` is the control: the same pings, placed exactly, with zero
-covariance. Fitting a map to both separates "the map is distorted by
+``--pose truth`` is the control: the same pings, placed exactly. Fitting a map to both separates "the map is distorted by
 navigation" from everything else.
 
 The replay is checked against the flight: it must reproduce the filter's own
 innovations, which it does exactly when nothing in the navigation has changed
 since the survey was flown.
 """
-
-from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -59,7 +50,7 @@ from auv_pose.estimation.quaternion import quat_normalize, quat_to_rotmat
 from auv_pose.estimation.smoothers import unscented_rts_smooth
 from auv_pose.io.raw_survey import RawSurvey, load_raw_survey
 from auv_pose.io.soundings import OPTIONAL_COLUMNS, SOUNDING_COLUMNS
-from auv_pose.mapping.sonar import seabed_points, sounding_covariance
+from auv_pose.mapping.sonar import seabed_points
 from experiments.cli import refuse_overwrite
 
 #: The six tangent coordinates a sounding's placement depends on.
@@ -79,15 +70,6 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument("--out", type=Path, required=True)
-  parser.add_argument(
-    "--sigma-range",
-    type=float,
-    default=0.0,
-    help=(
-      "range noise, metres, added along each beam. Zero by default: the "
-      "simulated multibeam is quantised at 0.0995 m and otherwise exact"
-    ),
-  )
   parser.add_argument("--force", action="store_true")
   return parser.parse_args()
 
@@ -162,18 +144,6 @@ def replay(survey: RawSurvey, anchored: bool = True) -> InertialNavigator:
   return navigator
 
 
-def start_truth(survey: RawSurvey) -> np.ndarray:
-  """True horizontal position where navigation started.
-
-  Logs from before it was recorded fall back to the first tick's truth, one
-  tick later -- a few centimetres at survey speed.
-  """
-  recorded = survey.meta.get("initial_truth")
-  if recorded is not None:
-    return np.asarray(recorded["position"][:2], float)
-  return survey.ticks[["true_x", "true_y"]].to_numpy(float)[0]
-
-
 def truth_at(survey: RawSurvey) -> dict[int, NavState]:
   """The logged true pose at each ping tick."""
   frame = survey.ticks.set_index("tick").loc[survey.ping_ticks]
@@ -195,7 +165,7 @@ def main() -> None:
   swath, nadir = meta["swath_axis"], meta["nadir_axis"]
   truth = truth_at(survey)
   # The start's own horizontal error, and its spread: shared by every sounding.
-  start = initial_belief(meta).mean.position[:2] - start_truth(survey)
+  start = survey.start_offset
   sigma0 = np.sqrt(np.diag(initial_belief(meta).cov)[:2])
   map_frame = np.zeros(2) if args.pose == "truth" else start
 
@@ -249,15 +219,6 @@ def main() -> None:
     points = seabed_points(
       belief.mean.position, rotation, ranges, bearings, swath, nadir
     )
-    cov = sounding_covariance(
-      belief.cov[np.ix_(POSE, POSE)],
-      rotation,
-      ranges,
-      bearings,
-      swath,
-      nadir,
-      sigma_range=args.sigma_range,
-    )
     true = truth[int(tick)]
     true_points = seabed_points(
       true.position, true.rotation, ranges, bearings, swath, nadir
@@ -273,12 +234,6 @@ def main() -> None:
           "x": points[finite, 0],
           "y": points[finite, 1],
           "z": points[finite, 2],
-          "cov_xx": cov[finite, 0, 0],
-          "cov_xy": cov[finite, 0, 1],
-          "cov_xz": cov[finite, 0, 2],
-          "cov_yy": cov[finite, 1, 1],
-          "cov_yz": cov[finite, 1, 2],
-          "cov_zz": cov[finite, 2, 2],
           "ping": ping,
           "true_x": true_points[finite, 0],
           "true_y": true_points[finite, 1],
@@ -295,19 +250,16 @@ def main() -> None:
   )
 
   if args.pose != "truth":
-    # Truth is already in the map's frame, so this is relative to the start,
-    # like the covariance it is compared with.
+    # Truth is already in the map's frame, so this is relative to the start.
     offset = (
       soundings[["x", "y"]].to_numpy()
       - soundings[["true_x", "true_y"]].to_numpy()
     )
     distance = np.linalg.norm(offset, axis=1)
-    sigma = np.sqrt(soundings["cov_xx"] + soundings["cov_yy"]).to_numpy()
     print(
       f"  placement error relative to the start median "
       f"{np.median(distance):.2f} m, "
-      f"95th {np.percentile(distance, 95):.2f} m; "
-      f"predicted 1-sigma median {np.median(sigma):.2f} m"
+      f"95th {np.percentile(distance, 95):.2f} m"
     )
 
 

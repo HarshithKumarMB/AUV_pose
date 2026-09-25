@@ -19,8 +19,6 @@ survey rather than about the seabed. See :class:`~auv_pose.mapping.svgp.SVGPMode
 whose docstring records the fit that discovered this.
 """
 
-from __future__ import annotations
-
 import math
 
 import torch
@@ -71,18 +69,6 @@ def _scaled_offsets(
   return difference / (lengthscale * lengthscale), radius
 
 
-def _summed(
-  kernel, a, b, log_amplitude: Tensor, log_lengthscale: Tensor
-) -> Tensor:
-  """``kernel`` summed over stacked components, on the inputs' own device."""
-  total = kernel(a, b, log_amplitude[0], log_lengthscale[0])
-  for component in range(1, len(log_amplitude)):
-    total = total + kernel(
-      a, b, log_amplitude[component], log_lengthscale[component]
-    )
-  return total
-
-
 def matern52(
   a: Tensor,
   b: Tensor,
@@ -96,21 +82,11 @@ def matern52(
 
   :param a: Positions, shape ``(..., p, d)``, metres.
   :param b: Positions, shape ``(..., q, d)``, metres.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar -- or shape ``(C,)`` for a
-      **sum** of ``C`` Matérn-5/2 terms, one per component.
+  :param log_amplitude: ``log(sigma_f^2)``, scalar.
   :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(d,)``,
-      metres -- or ``(C, d)``, one row per component.
+      metres.
   :return: Covariances, shape ``(..., p, q)``.
-
-  Note:
-      The sum is what lets one map follow two scales at once: the natural
-      seabed at its own lengthscale, and the steep flanks of objects placed on
-      it at about the sonar footprint. A sum of Matérn-5/2 terms is still
-      twice differentiable, so the map's gradient stays well defined on those
-      flanks.
   """
-  if log_amplitude.ndim == 1:
-    return _summed(matern52, a, b, log_amplitude, log_lengthscale)
   _, radius = _scaled_offsets(a, b, log_lengthscale)
   root5r = _SQRT5 * radius
 
@@ -134,10 +110,8 @@ def matern52_gradient(
 
   :param a: Positions to differentiate at, shape ``(..., p, d)``, metres.
   :param b: The other positions, shape ``(..., q, d)``, metres.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar, or ``(C,)`` for a sum of
-      components; see :func:`matern52`.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(d,)``,
-      or ``(C, d)``.
+  :param log_amplitude: ``log(sigma_f^2)``, scalar.
+  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(d,)``.
   :return: Gradients, shape ``(..., p, q, d)``, covariance per metre.
 
   Note:
@@ -153,8 +127,6 @@ def matern52_gradient(
       ``filterwarnings = ["error::RuntimeWarning"]``, so the uncancelled form
       does not return a NaN to be noticed later -- it fails the test suite.
   """
-  if log_amplitude.ndim == 1:
-    return _summed(matern52_gradient, a, b, log_amplitude, log_lengthscale)
   offsets, radius = _scaled_offsets(a, b, log_lengthscale)
   root5r = _SQRT5 * radius
 

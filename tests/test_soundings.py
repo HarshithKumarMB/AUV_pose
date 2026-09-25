@@ -4,11 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from auv_pose.io.soundings import (
-  load_soundings,
-  placement_covariance,
-  soundings_to_arrays,
-)
+from auv_pose.io.soundings import load_soundings, soundings_to_arrays
 
 
 @pytest.fixture
@@ -100,7 +96,7 @@ def test_rejects_an_empty_file_list():
     load_soundings([])
 
 
-def test_round_trips_a_survey_written_by_the_logger(survey):
+def test_round_trips_a_survey_as_georeference_writes_it(survey):
   """What the writer emits is what the GP reads."""
   path = survey("a.csv", [[0.0, 0.0, -70.3], [1.0, -2.0, -69.8]])
   frame = load_soundings([path])
@@ -111,54 +107,57 @@ def test_round_trips_a_survey_written_by_the_logger(survey):
   assert np.all(y < 0)  # the seabed is below the surface
 
 
-# -- the optional covariance columns ----------------------------------------
+# -- the optional columns ---------------------------------------------------
 
 
-def placed(tmp_path, name, cov_xy=0.1):
-  """A georeferenced survey: two soundings with covariance and truth."""
+def placed(tmp_path, name):
+  """A georeferenced survey: two soundings with their ping and truth."""
   path = tmp_path / name
   pd.DataFrame(
     {
       "x": [0.0, 1.0],
       "y": [0.0, 2.0],
       "z": [-70.0, -69.5],
-      "cov_xx": [0.5, 0.6],
-      "cov_xy": [cov_xy, cov_xy],
-      "cov_xz": [0.02, 0.02],
-      "cov_yy": [0.7, 0.8],
-      "cov_yz": [0.03, 0.03],
-      "cov_zz": [0.01, 0.01],
       "ping": [0, 0],
       "true_x": [0.1, 1.1],
       "true_y": [0.0, 2.0],
       "true_z": [-70.0, -69.5],
+      "unknown": [1.0, 2.0],
     }
   ).to_csv(path, index=False)
   return path
 
 
-def test_the_covariance_reads_back_as_three_by_three(tmp_path):
+def test_optional_columns_ride_along_and_unknown_ones_do_not(tmp_path):
   frame = load_soundings([placed(tmp_path, "a.csv")])
-  cov = placement_covariance(frame)
-
-  assert cov.shape == (2, 3, 3)
-  np.testing.assert_array_equal(
-    cov[1], [[0.6, 0.1, 0.02], [0.1, 0.8, 0.03], [0.02, 0.03, 0.01]]
-  )
+  assert list(frame.columns) == [
+    "x",
+    "y",
+    "z",
+    "ping",
+    "true_x",
+    "true_y",
+    "true_z",
+  ]
 
 
 def test_a_column_only_some_files_carry_is_dropped(survey, tmp_path):
-  """Filling it with zero would claim the other survey was placed exactly."""
+  """Filling it with a made-up value would pair soundings with fake truth."""
   frame = load_soundings(
     [placed(tmp_path, "a.csv"), survey("b.csv", [[5.0, 5.0, -68.0]])]
   )
-
   assert list(frame.columns) == ["x", "y", "z"]
-  with pytest.raises(ValueError, match="georeference.py --pose smoothed"):
-    placement_covariance(frame)
+  assert len(frame) == 3
 
 
-def test_files_that_all_carry_it_keep_it(tmp_path):
-  frame = load_soundings([placed(tmp_path, "a.csv"), placed(tmp_path, "b.csv")])
-  assert len(placement_covariance(frame)) == 4
-  assert "true_x" in frame.columns
+def test_optional_columns_stay_aligned_with_their_rows(tmp_path):
+  """Rows dropped for having no echo take their truth with them."""
+  path = placed(tmp_path, "a.csv")
+  frame = pd.read_csv(path)
+  frame.loc[0, "z"] = np.nan
+  frame.to_csv(path, index=False)
+
+  loaded = load_soundings([path, placed(tmp_path, "b.csv")])
+  assert len(loaded) == 3
+  np.testing.assert_array_equal(loaded["true_x"], [1.1, 0.1, 1.1])
+  np.testing.assert_array_equal(loaded["x"], [1.0, 0.0, 1.0])

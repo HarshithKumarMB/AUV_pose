@@ -19,22 +19,3 @@ absent from it, so the sonar returns 4-5 m short of it over them and is right to
 Changing ``octree_max`` leaves the returns bit-identical, which says the sonar
 does not consult it at all. A disagreement is a question, not a verdict.
 """
-
-from auv_pose.mapping.octree import load_surface, top_surface
-from auv_pose.mapping.raycast import Heightfield, raycast
-from auv_pose.mapping.sonar import range_bins
-from auv_pose.mapping.svgp import BathymetryMap, SVGPModel, fit_svgp
-from auv_pose.mapping.vecchia import VecchiaMap, fit_vecchia
-
-__all__ = [
-  "BathymetryMap",
-  "Heightfield",
-  "SVGPModel",
-  "VecchiaMap",
-  "fit_svgp",
-  "fit_vecchia",
-  "load_surface",
-  "range_bins",
-  "raycast",
-  "top_surface",
-]

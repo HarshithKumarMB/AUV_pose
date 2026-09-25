@@ -5,8 +5,6 @@ python experiments/predict_depth.py -19.41 -9.42
 python experiments/predict_depth.py 0 0 10 5 --std
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 

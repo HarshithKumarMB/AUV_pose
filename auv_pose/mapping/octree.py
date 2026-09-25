@@ -22,8 +22,6 @@ Note:
     :func:`tile_paths` filters by filename so only the tiles you need are opened.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import os

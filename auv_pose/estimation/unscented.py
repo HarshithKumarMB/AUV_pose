@@ -16,8 +16,6 @@ See Hauberg et al. for the transform on a manifold, and Barfoot section 4.2.9
 for the filter built on it.
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable, Sequence
 from typing import NamedTuple, TypeVar
 

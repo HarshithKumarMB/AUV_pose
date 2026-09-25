@@ -8,8 +8,6 @@ This is the open-loop baseline that terrain-aided navigation corrects: it drifts
 because integrating noisy acceleration twice accumulates error quadratically.
 """
 
-from __future__ import annotations
-
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 

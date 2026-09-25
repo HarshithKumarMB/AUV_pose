@@ -7,8 +7,6 @@ live apart: this module imports no filter, only the shared types, so it will
 smooth a run recorded by any of them -- or steps built by hand from a log.
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable, Sequence
 
 import numpy as np

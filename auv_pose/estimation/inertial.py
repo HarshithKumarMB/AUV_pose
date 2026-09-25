@@ -20,9 +20,7 @@ See :mod:`auv_pose.estimation` for frames and signs. The world is z-up, so
 ``gravity`` defaults to :data:`~auv_pose.estimation.quaternion.GRAVITY_NWU`.
 """
 
-from __future__ import annotations
-
-from typing import NamedTuple
+from typing import NamedTuple, Self
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -78,7 +76,7 @@ class ImuSamples(NamedTuple):
   dt: NumpyArray
 
   @classmethod
-  def uniform(cls, gyro: ArrayLike, accel: ArrayLike, dt: float) -> ImuSamples:
+  def uniform(cls, gyro: ArrayLike, accel: ArrayLike, dt: float) -> Self:
     """Samples at a fixed rate, which is the usual case.
 
     :param gyro: Shape ``(k, 3)``, or ``(3,)`` for a single sample.

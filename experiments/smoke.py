@@ -11,8 +11,6 @@ start" from "the estimator is wrong", which are otherwise easy to confuse.
 Exits non-zero on failure, so it works as a gate in a shell script.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import sys

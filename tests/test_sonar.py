@@ -3,12 +3,10 @@
 import numpy as np
 import pytest
 
-from auv_pose.estimation.quaternion import quat_exp, quat_to_rotmat
 from auv_pose.mapping.sonar import (
   bottom_return_ranges,
   range_bins,
   seabed_points,
-  sounding_covariance,
 )
 
 RANGES = range_bins(0.5, 100.0, 1000)
@@ -70,94 +68,68 @@ def test_rejects_mismatched_range_bins():
     bottom_return_ranges(np.zeros((10, 4)), RANGES)
 
 
-# -- sounding covariance ----------------------------------------------------
+# -- placing the beams --------------------------------------------------------
 
-BEARINGS = np.radians(np.linspace(-30.0, 30.0, 7))
-SWATH, NADIR = (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
-# IMUSocket at rest, yawed 30 degrees: a non-trivial body-to-world rotation.
-YAW = np.radians(30.0)
-ROTATION = np.array(
-  [
-    [np.cos(YAW), np.sin(YAW), 0.0],
-    [np.sin(YAW), -np.cos(YAW), 0.0],
-    [0.0, 0.0, -1.0],
-  ]
+BEARINGS = np.radians(np.linspace(-60.0, 60.0, 9))
+
+
+def rotation(yaw, pitch=0.0, roll=0.0):
+  cz, sz = np.cos(yaw), np.sin(yaw)
+  cy, sy = np.cos(pitch), np.sin(pitch)
+  cx, sx = np.cos(roll), np.sin(roll)
+  Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+  Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+  Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+  return Rz @ Ry @ Rx
+
+
+@pytest.mark.parametrize(
+  "attitude", [(0, 0, 0), (0.7, 0.1, -0.2), (3.0, -0.3, 0.4)]
 )
-
-
-def pose_covariance(rng):
-  """Correlated, with metres of position and about a degree of attitude."""
-  root = np.array([0.5] * 3 + [0.01] * 3)[:, None] * rng.normal(size=(6, 6))
-  return root @ root.T
-
-
-def test_the_covariance_matches_monte_carlo_through_seabed_points():
-  """Push pose draws through the real geometry and compare the scatter."""
-  rng = np.random.default_rng(0)
-  cov = pose_covariance(rng)
-  ranges = np.full(BEARINGS.shape, 75.0)
-  position = np.array([3.0, -2.0, -0.4])
-
-  predicted = sounding_covariance(cov, ROTATION, ranges, BEARINGS, SWATH, NADIR)
-
-  draws = rng.multivariate_normal(np.zeros(6), cov, size=20_000)
-  points = np.stack(
-    [
-      seabed_points(
-        position + draw[:3],
-        ROTATION @ quat_to_rotmat(quat_exp(draw[3:])),
-        ranges,
-        BEARINGS,
-        SWATH,
-        NADIR,
-      )
-      for draw in draws
-    ]
-  )
-  for beam in range(len(BEARINGS)):
-    empirical = np.cov(points[:, beam].T)
-    np.testing.assert_allclose(
-      predicted[beam], empirical, atol=0.03 * np.abs(predicted[beam]).max()
-    )
-
-
-def test_without_attitude_error_every_beam_inherits_the_position_covariance():
-  cov = np.zeros((6, 6))
-  cov[:3, :3] = np.diag([1.0, 2.0, 0.5])
-  predicted = sounding_covariance(
-    cov, ROTATION, np.full(BEARINGS.shape, 70.0), BEARINGS, SWATH, NADIR
-  )
-  np.testing.assert_allclose(predicted, np.broadcast_to(cov[:3, :3], (7, 3, 3)))
-
-
-def test_heading_error_moves_outer_beams_further_than_nadir():
-  cov = np.zeros((6, 6))
-  cov[5, 5] = np.radians(1.0) ** 2
-  predicted = sounding_covariance(
-    cov, ROTATION, np.full(BEARINGS.shape, 70.0), BEARINGS, SWATH, NADIR
-  )
-  horizontal = np.trace(predicted[:, :2, :2], axis1=1, axis2=2)
-  assert horizontal[0] > 100 * horizontal[3]
-  # One degree at the edge of a 70 m, 30 degree fan: 35 m out, 0.61 m moved.
-  assert np.sqrt(horizontal[0]) == pytest.approx(
-    70.0 * np.sin(np.radians(30.0)) * np.radians(1.0), rel=1e-6
+def test_every_beam_lands_its_range_from_the_vehicle(attitude):
+  position = np.array([5.0, -3.0, -10.0])
+  ranges = np.linspace(20.0, 90.0, BEARINGS.size)
+  points = seabed_points(position, rotation(*attitude), ranges, BEARINGS)
+  np.testing.assert_allclose(
+    np.linalg.norm(points - position, axis=1), ranges, rtol=1e-12
   )
 
 
-def test_range_noise_lies_along_the_beam():
-  predicted = sounding_covariance(
-    np.zeros((6, 6)),
-    ROTATION,
-    np.full(BEARINGS.shape, 70.0),
-    BEARINGS,
-    SWATH,
-    NADIR,
-    sigma_range=0.1,
+def test_the_nadir_beam_lands_along_the_rotated_nadir_axis():
+  R = rotation(0.7, 0.1, -0.2)
+  points = seabed_points(np.zeros(3), R, [50.0], [0.0])
+  np.testing.assert_allclose(points[0], 50.0 * R[:, 2], atol=1e-12)
+
+
+def test_mirrored_bearings_land_mirrored_across_the_track():
+  """At level attitude the fan is symmetric about the vertical plane of travel."""
+  R = rotation(1.2)
+  ranges = np.full(BEARINGS.size, 40.0)
+  points = seabed_points(np.zeros(3), R, ranges, BEARINGS)
+  np.testing.assert_allclose(points[:, 2], points[::-1, 2], atol=1e-12)
+  across = points @ R[:, 1]
+  np.testing.assert_allclose(across, -across[::-1], atol=1e-12)
+  np.testing.assert_allclose(across, 40.0 * np.sin(BEARINGS), atol=1e-12)
+
+
+def test_heading_turns_the_fan_but_not_the_depths():
+  ranges = np.linspace(30.0, 60.0, BEARINGS.size)
+  a = seabed_points(np.zeros(3), rotation(0.0), ranges, BEARINGS)
+  b = seabed_points(np.zeros(3), rotation(2.0), ranges, BEARINGS)
+  np.testing.assert_allclose(a[:, 2], b[:, 2], atol=1e-12)
+  np.testing.assert_allclose(
+    np.linalg.norm(a[:, :2], axis=1), np.linalg.norm(b[:, :2], axis=1)
   )
-  direction = seabed_points(
-    np.zeros(3), ROTATION, np.ones_like(BEARINGS), BEARINGS, SWATH, NADIR
-  )
-  for beam, along in enumerate(direction):
-    np.testing.assert_allclose(
-      predicted[beam] @ along, 0.01 * along, atol=1e-12
-    )
+
+
+def test_a_beam_without_an_echo_stays_missing_and_alone():
+  ranges = np.full(BEARINGS.size, 40.0)
+  ranges[3] = np.nan
+  points = seabed_points(np.zeros(3), rotation(0.3), ranges, BEARINGS)
+  assert np.isnan(points[3]).all()
+  assert np.isfinite(np.delete(points, 3, axis=0)).all()
+
+
+def test_mismatched_ranges_and_bearings_are_refused():
+  with pytest.raises(ValueError, match="must match"):
+    seabed_points(np.zeros(3), np.eye(3), [1.0, 2.0], BEARINGS)

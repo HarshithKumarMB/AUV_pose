@@ -16,8 +16,6 @@ GP models it directly with no sign flip.
    was not recorded.
 """
 
-from __future__ import annotations
-
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -26,36 +24,20 @@ import pandas as pd
 from numpy.typing import NDArray
 
 __all__ = [
-  "COVARIANCE_COLUMNS",
   "OPTIONAL_COLUMNS",
   "SOUNDING_COLUMNS",
   "load_soundings",
-  "placement_covariance",
   "soundings_to_arrays",
 ]
 
 SOUNDING_COLUMNS = ("x", "y", "z")
 
-#: The sounding's own placement uncertainty, as ``georeference.py`` derives it
-#: from the smoothed pose: the upper triangle of its full ``(3, 3)`` covariance.
-#: The vertical terms are not optional extras. A roll error moves an outer beam
-#: mostly *vertically*, and the depth error a misplacement causes is
-#: ``e_z - g' e_xy``, whose variance needs every entry.
-COVARIANCE_COLUMNS = (
-  "cov_xx",
-  "cov_xy",
-  "cov_xz",
-  "cov_yy",
-  "cov_yz",
-  "cov_zz",
-)
-
 #: Written by ``georeference.py`` and optional on read. ``ping`` groups the
-#: beams of one ping, which share the vehicle's error; ``true_`` is where the
+#: beams of one ping; ``true_`` is where the
 #: same range would have landed from the true pose, **in the map's frame** --
 #: shifted by the survey's shared start offset, so it can be compared with the
 #: map directly. Scoring only.
-OPTIONAL_COLUMNS = (*COVARIANCE_COLUMNS, "ping", "true_x", "true_y", "true_z")
+OPTIONAL_COLUMNS = ("ping", "true_x", "true_y", "true_z")
 
 
 def load_soundings(
@@ -72,8 +54,7 @@ def load_soundings(
   Returns:
       A frame with columns ``x, y, z``, plus whichever of
       :data:`OPTIONAL_COLUMNS` every file carries. A column only some files
-      have is dropped, not filled: a covariance of zero would claim a
-      sounding was placed exactly.
+      have is dropped, not filled with a made-up value.
 
   Raises:
       ValueError: If no paths are given, or a file lacks the expected columns.
@@ -122,31 +103,3 @@ def soundings_to_arrays(
   X = frame[["x", "y"]].to_numpy(dtype=np.float32)
   y = frame["z"].to_numpy(dtype=np.float32)
   return X, y
-
-
-def placement_covariance(frame: pd.DataFrame) -> NDArray[np.float64]:
-  """Each sounding's placement covariance, ``(n, 3, 3)``, world frame.
-
-  Raises:
-      ValueError: If the frame lacks the covariance columns -- a survey placed
-          from ground truth, or one written before they existed. Regenerate it
-          with ``experiments/georeference.py --pose smoothed``.
-  """
-  missing = [c for c in COVARIANCE_COLUMNS if c not in frame.columns]
-  if missing:
-    raise ValueError(
-      f"soundings carry no position covariance (missing {', '.join(missing)}); "
-      "place them from a raw log with "
-      "`experiments/georeference.py --pose smoothed`"
-    )
-  xx, xy, xz, yy, yz, zz = (
-    frame[c].to_numpy(np.float64) for c in COVARIANCE_COLUMNS
-  )
-  return np.stack(
-    [
-      np.stack([xx, xy, xz], -1),
-      np.stack([xy, yy, yz], -1),
-      np.stack([xz, yz, zz], -1),
-    ],
-    -2,
-  )

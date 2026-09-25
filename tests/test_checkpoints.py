@@ -8,7 +8,6 @@ says what is wrong with it.
 """
 
 import pickle
-import warnings
 
 import numpy as np
 import pytest
@@ -22,11 +21,7 @@ from auv_pose.io.checkpoints import (
   save_vecchia_map,
 )
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
-from auv_pose.mapping.vecchia import (
-  MergedScalesWarning,
-  VecchiaMap,
-  fit_vecchia,
-)
+from auv_pose.mapping.vecchia import VecchiaMap, fit_vecchia
 
 
 @pytest.fixture
@@ -269,55 +264,59 @@ def test_a_version_one_checkpoint_loads_as_a_linear_mean(tmp_path):
   )
 
 
-# -- the two-scale kernel ---------------------------------------------------
+# -- retired formats ---------------------------------------------------------
 
 
-@pytest.fixture
-def two_scale():
-  rng = np.random.default_rng(2)
-  points = rng.uniform(-20.0, 20.0, size=(300, 2))
-  depth = -60.0 + 0.1 * points[:, 0] + rng.normal(scale=0.3, size=300)
-  # A plane plus white noise has no short scale, so the terms merge and the
-  # fit says so. The round trip is what is under test here, not the seabed.
-  with warnings.catch_warnings():
-    warnings.simplefilter("ignore", MergedScalesWarning)
-    return fit_vecchia(
-      points, depth, m=20, steps=20, device="cpu", short_lengthscale=1.0
-    )
-
-
-def test_a_two_scale_map_survives_a_round_trip_exactly(
-  tmp_path, two_scale, queries
-):
-  path = tmp_path / "two.pkl"
-  save_vecchia_map(path, two_scale)
-  loaded = load_map(path)
-
-  assert isinstance(loaded, VecchiaMap)
-  assert loaded.hyper == two_scale.hyper
-  assert loaded.hyper.two_scale
-  np.testing.assert_array_equal(
-    loaded.predict(queries), two_scale.predict(queries)
-  )
-  np.testing.assert_array_equal(
-    loaded.mean_gradient(queries), two_scale.mean_gradient(queries)
-  )
-
-
-def test_a_version_two_map_loads_with_one_scale(tmp_path, vecchia, queries):
-  """The single-scale baselines were written before the short term existed."""
-  path = tmp_path / "v2.pkl"
-  save_vecchia_map(path, vecchia)
+def rewrite(path, edit):
   with open(path, "rb") as handle:
     payload = pickle.load(handle)
-  payload["version"] = 2
-  del payload["short_log_amplitude"], payload["short_log_lengthscale"]
+  edit(payload)
   with open(path, "wb") as handle:
     pickle.dump(payload, handle)
 
+
+def test_a_version_two_map_loads_unchanged(tmp_path, vecchia, queries):
+  path = tmp_path / "v2.pkl"
+  save_vecchia_map(path, vecchia)
+  rewrite(path, lambda payload: payload.update(version=2))
+
   loaded = load_map(path)
   assert isinstance(loaded, VecchiaMap)
-  assert not loaded.hyper.two_scale
+  np.testing.assert_array_equal(
+    loaded.predict(queries), vecchia.predict(queries)
+  )
+
+
+def test_a_two_scale_checkpoint_is_refused_not_half_read(tmp_path, vecchia):
+  """Dropping the second term would change every prediction silently."""
+  path = tmp_path / "two.pkl"
+  save_vecchia_map(path, vecchia)
+  rewrite(
+    path,
+    lambda payload: payload.update(
+      short_log_amplitude=-1.0, short_log_lengthscale=[0.0, 0.0]
+    ),
+  )
+
+  with pytest.raises(ValueError, match="two-scale"):
+    load_map(path)
+
+
+def test_a_version_three_map_with_an_empty_short_term_loads(
+  tmp_path, vecchia, queries
+):
+  """Single-scale maps written while the short term existed carry ``None``."""
+  path = tmp_path / "v3.pkl"
+  save_vecchia_map(path, vecchia)
+  rewrite(
+    path,
+    lambda payload: payload.update(
+      short_log_amplitude=None, short_log_lengthscale=None
+    ),
+  )
+
+  loaded = load_map(path)
+  assert isinstance(loaded, VecchiaMap)
   np.testing.assert_array_equal(
     loaded.predict(queries), vecchia.predict(queries)
   )
@@ -327,11 +326,12 @@ def test_a_retired_spline_checkpoint_is_refused_not_misread(tmp_path, vecchia):
   """Loading its coefficients against a plane would change every prediction."""
   path = tmp_path / "spline.pkl"
   save_vecchia_map(path, vecchia)
-  with open(path, "rb") as handle:
-    payload = pickle.load(handle)
-  payload["basis"] = {"kind": "spline", "degree": 3, "knots": 12}
-  with open(path, "wb") as handle:
-    pickle.dump(payload, handle)
+  rewrite(
+    path,
+    lambda payload: payload.update(
+      basis={"kind": "spline", "degree": 3, "knots": 12}
+    ),
+  )
 
   with pytest.raises(ValueError, match="retired spline mean"):
     load_map(path)

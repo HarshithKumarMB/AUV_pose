@@ -21,8 +21,6 @@ survey altitude. Sonar and aiding sensors all run at 5 Hz, so every filter
 cycle closes on a ping tick and the smoothed pose lands exactly on it.
 """
 
-from __future__ import annotations
-
 import argparse
 import subprocess
 from pathlib import Path

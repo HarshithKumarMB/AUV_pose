@@ -23,8 +23,6 @@ Both CSVs are streamed row by row, so a run that dies partway keeps everything
 up to that point.
 """
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +32,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 
-from auv_pose.io.logs import CsvLogger
+from auv_pose.io.logs import CsvWriter
 
 __all__ = [
   "TICK_COLUMNS",
@@ -75,7 +73,7 @@ TICK_COLUMNS = (
   "true_accel_bias_z",
 )
 
-_FILES = ("ticks.csv", "pings.csv", "meta.json")
+TICKS, PINGS, META = "ticks.csv", "pings.csv", "meta.json"
 
 
 def ping_columns(n_beams: int) -> tuple[str, ...]:
@@ -107,12 +105,12 @@ class RawSurveyWriter:
     self.directory = Path(directory)
     self.n_beams = n_beams
     self.meta = meta
-    self._ticks = CsvLogger(self.directory / "ticks.csv", TICK_COLUMNS)
-    self._pings = CsvLogger(self.directory / "pings.csv", ping_columns(n_beams))
+    self._ticks = CsvWriter(self.directory / TICKS, TICK_COLUMNS)
+    self._pings = CsvWriter(self.directory / PINGS, ping_columns(n_beams))
 
   def __enter__(self) -> Self:
     self.directory.mkdir(parents=True, exist_ok=True)
-    (self.directory / "meta.json").write_text(json.dumps(self.meta, indent=2))
+    (self.directory / META).write_text(json.dumps(self.meta, indent=2))
     self._ticks.__enter__()
     self._pings.__enter__()
     return self
@@ -180,6 +178,21 @@ class RawSurvey:
   ranges: NDArray[np.float64]
   meta: dict[str, Any]
 
+  @property
+  def start_offset(self) -> NDArray[np.float64]:
+    """The flight's horizontal surface-fix error: believed start minus true.
+
+    Nothing below the surface observes horizontal position, so this one error
+    shifts every sounding the flight places: it is the offset of the flight's
+    map frame from the world. Logs from before the true start was recorded
+    fall back to the first tick's truth, one tick later -- centimetres.
+    """
+    believed = np.asarray(self.meta["initial_mean"]["position"][:2], float)
+    recorded = self.meta.get("initial_truth")
+    if recorded is not None:
+      return believed - np.asarray(recorded["position"][:2], float)
+    return believed - self.ticks[["true_x", "true_y"]].to_numpy(float)[0]
+
   def readings(self, prefix: str) -> NDArray[np.float64]:
     """An ``(n_ticks, 3)`` block of one sensor, ``nan`` where it was silent."""
     return self.ticks[[f"{prefix}_{axis}" for axis in "xyz"]].to_numpy(float)
@@ -192,22 +205,24 @@ def load_raw_survey(directory: str | Path) -> RawSurvey:
       most likely a soundings CSV passed where a raw log was expected.
   """
   directory = Path(directory)
-  missing = [name for name in _FILES if not (directory / name).exists()]
+  missing = [
+    name for name in (TICKS, PINGS, META) if not (directory / name).exists()
+  ]
   if missing:
     raise FileNotFoundError(
       f"{directory} is not a raw survey log: missing {', '.join(missing)}. "
       "Raw logs are directories written by experiments/survey.py"
     )
 
-  ticks = pd.read_csv(directory / "ticks.csv")
+  ticks = pd.read_csv(directory / TICKS)
   absent = set(TICK_COLUMNS) - set(ticks.columns)
   if absent:
-    raise ValueError(f"{directory}/ticks.csv lacks {sorted(absent)}")
+    raise ValueError(f"{directory / TICKS} lacks {sorted(absent)}")
 
-  pings = pd.read_csv(directory / "pings.csv")
+  pings = pd.read_csv(directory / PINGS)
   return RawSurvey(
     ticks=ticks,
     ping_ticks=pings["tick"].to_numpy(np.int64),
     ranges=pings.drop(columns="tick").to_numpy(float),
-    meta=json.loads((directory / "meta.json").read_text()),
+    meta=json.loads((directory / META).read_text()),
   )

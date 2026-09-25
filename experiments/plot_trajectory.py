@@ -5,8 +5,6 @@
 Reads the CSV written by ``navigate.py``.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 

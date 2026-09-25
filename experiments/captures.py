@@ -12,11 +12,9 @@ previously written in two places and unpacked in two more, with the sonar
 settings re-derived by hand each time and nothing to disagree with.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 from numpy.typing import NDArray
@@ -86,7 +84,7 @@ class Capture:
     )
 
   @classmethod
-  def load(cls, path: str | Path) -> Capture:
+  def load(cls, path: str | Path) -> Self:
     """Read a capture and decode its geometry.
 
     Raises:

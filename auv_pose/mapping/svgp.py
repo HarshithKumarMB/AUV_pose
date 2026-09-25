@@ -5,8 +5,6 @@ inference is cubic in that. A sparse variational GP with a few hundred inducing
 points is.
 """
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 from typing import Literal, cast, overload
 

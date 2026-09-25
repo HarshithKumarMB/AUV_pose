@@ -21,7 +21,6 @@ if the definition itself had been transcribed wrongly.
 """
 
 import math
-from dataclasses import replace
 from itertools import pairwise
 
 import numpy as np
@@ -33,20 +32,15 @@ from auv_pose.mapping.kernels import matern52, matern52_gradient
 from auv_pose.mapping.ordering import ordered_neighbours
 from auv_pose.mapping.vecchia import (
   LINEAR_MEAN,
-  SEPARATION,
   MeanBasis,
-  MergedScalesWarning,
   VecchiaHyperparameters,
   VecchiaMap,
   VecchiaStructure,
-  _check_separation,
   build_structure,
   design_matrix,
   draw,
   fit_vecchia,
-  fit_vecchia_nigp,
   initial_hyperparameters,
-  input_noise_variance,
   sparse_factor,
   vecchia_loglik,
   vecchia_reml,
@@ -175,7 +169,7 @@ def test_a_wholly_dense_head_reproduces_a_dense_gp():
 
 
 def test_exactness_holds_for_per_sounding_noise():
-  """The NIGP step makes the noise a vector; the exactness must survive it."""
+  """A noise per sounding must keep the exactness too."""
   n = 30
   points, residual = survey(n, seed=2)
   noise = np.random.default_rng(3).uniform(0.1, 2.0, size=n)
@@ -556,21 +550,10 @@ def test_the_initial_guess_comes_from_the_data():
   np.testing.assert_allclose(start.noise, 0.01 * residual.var(), rtol=1e-12)
 
 
-def test_the_noise_is_per_sounding_once_inflated():
+def test_every_sounding_carries_the_fitted_nugget():
   points, depth = survey(200, seed=30)
-  inflation = np.linspace(0.0, 5.0, 200)
-
-  fitted = fit_vecchia(
-    points, depth, m=10, steps=20, noise_inflation=inflation, device="cpu"
-  )
-
-  assert fitted.noise.shape == (200,)
-  # Stored in the structure's order, and still the nugget plus the inflation.
-  np.testing.assert_allclose(
-    fitted.noise,
-    fitted.hyper.noise + inflation[fitted.structure.order],
-    rtol=1e-12,
-  )
+  fitted = fit_vecchia(points, depth, m=10, steps=20, device="cpu")
+  np.testing.assert_array_equal(fitted.noise, np.full(200, fitted.hyper.noise))
 
 
 def test_it_rejects_mismatched_inputs():
@@ -1462,251 +1445,3 @@ def test_it_rejects_an_unknown_basis():
     assert "fourier" in str(error)
     return
   raise AssertionError("expected a ValueError")
-
-
-def misplaced_survey(seed=30, n=700):
-  """A known field sampled at true positions, recorded at jittered ones.
-
-  Each sounding's position covariance grows with a stand-in for its offset
-  across the swath, as the heading term makes it.
-  """
-  rng = np.random.default_rng(seed)
-  truth = rng.uniform(-40, 40, size=(n, 2))
-  depth = gp_draw(
-    truth,
-    torch.tensor(math.log(9.0), dtype=torch.float64),
-    torch.log(torch.tensor([6.0, 6.0], dtype=torch.float64)),
-    0.04,
-    seed=seed + 1,
-  )
-  spread = rng.uniform(0.05, 1.2, size=n)
-  cov = spread[:, None, None] ** 2 * np.diag([1.0, 1.0, 0.0])
-  recorded = truth + spread[:, None] * rng.normal(size=(n, 2))
-  return recorded, depth, cov
-
-
-def test_nigp_gives_the_position_error_back_to_the_positions():
-  """Plain, the nugget absorbs the misplacement; with NIGP it need not."""
-  points, depth, cov = misplaced_survey()
-  kwargs = {"m": 20, "steps": 300, "device": "cpu"}
-
-  plain = fit_vecchia(points, depth, **kwargs)
-  nigp, _ = fit_vecchia_nigp(points, depth, cov, passes=2, **kwargs)
-
-  assert nigp.hyper.noise < 0.5 * plain.hyper.noise, (
-    nigp.hyper.noise,
-    plain.hyper.noise,
-  )
-
-
-def test_the_nigp_inflation_settles_across_passes():
-  points, depth, cov = misplaced_survey(seed=32)
-  _, inflations = fit_vecchia_nigp(
-    points, depth, cov, passes=3, m=20, steps=300, device="cpu"
-  )
-
-  first = np.abs(inflations[1] - inflations[0]).max()
-  second = np.abs(inflations[2] - inflations[1]).max()
-  assert second < first, (first, second)
-
-
-def test_nigp_refuses_a_covariance_of_the_wrong_shape():
-  points, depth, cov = misplaced_survey(n=40)
-  with pytest.raises(ValueError, match="placement covariance"):
-    fit_vecchia_nigp(points, depth, cov[:-1], m=5, steps=1, device="cpu")
-
-
-def test_nigp_refuses_a_single_pass():
-  """One pass has no inflation yet: it would be a plain fit under NIGP's name."""
-  points, depth, cov = misplaced_survey(n=40)
-  with pytest.raises(ValueError, match="at least two passes"):
-    fit_vecchia_nigp(points, depth, cov, passes=1, m=5, steps=1, device="cpu")
-
-
-def test_input_noise_on_flat_seabed_is_the_vertical_error():
-  """Zero slope: horizontal misplacement is harmless, vertical is not."""
-  cov = np.array([[[4.0, 0.0, 0.5], [0.0, 4.0, 0.5], [0.5, 0.5, 0.09]]])
-  assert input_noise_variance(np.zeros((1, 2)), cov) == pytest.approx([0.09])
-
-
-def test_input_noise_without_vertical_error_is_the_nigp_term():
-  g = np.array([[0.3, -0.4]])
-  horizontal = np.array([[2.0, 0.5], [0.5, 1.0]])
-  cov = np.zeros((1, 3, 3))
-  cov[0, :2, :2] = horizontal
-  assert input_noise_variance(g, cov) == pytest.approx(
-    [g[0] @ horizontal @ g[0]]
-  )
-
-
-def test_a_sounding_moved_along_the_slope_reads_no_depth_error():
-  """e_z = g' e_xy exactly: the sounding slid along the seabed, so f(x) fits it."""
-  g = np.array([0.5, 0.2])
-  horizontal = np.array([[1.0, 0.3], [0.3, 2.0]])
-  jacobian = np.vstack([np.eye(2), g])  # e = J e_xy
-  cov = (jacobian @ horizontal @ jacobian.T)[None]
-  assert input_noise_variance(g[None], cov) == pytest.approx([0.0], abs=1e-12)
-
-
-# -- two scales -------------------------------------------------------------
-
-
-TWO_SCALE = VecchiaHyperparameters(
-  log_amplitude=math.log(4.0),
-  log_lengthscale=(math.log(6.0), math.log(11.0)),
-  log_noise=math.log(0.05),
-  short_log_amplitude=math.log(1.5),
-  short_log_lengthscale=(math.log(0.8), math.log(1.2)),
-)
-
-
-def pinned(points, depth, hyper, m, n0=None):
-  """A map with the given hyperparameters and no fitting, like fitted_at."""
-  structure = build_structure(points, m=m, n0=n0)
-  basis = design_matrix(structure.points)
-  ordered_depth = depth[structure.order]
-  log_amplitude, log_lengthscale = hyper.kernel_tensors()
-  noise = torch.tensor(hyper.noise, dtype=torch.float64)
-
-  _, beta = vecchia_reml(
-    structure,
-    torch.tensor(ordered_depth),
-    torch.tensor(basis),
-    log_amplitude,
-    log_lengthscale,
-    noise,
-    jitter=0.0,
-  )
-  beta = beta.numpy()
-  return VecchiaMap(
-    structure=structure,
-    residual=ordered_depth - basis @ beta,
-    beta=beta,
-    hyper=hyper,
-    noise=np.full(len(points), hyper.noise),
-    loglik_trace=[],
-  )
-
-
-def clustered_survey(n, seed):
-  """Soundings in tight clumps, so the short term's scale is actually seen."""
-  rng = np.random.default_rng(seed)
-  centres = rng.uniform(-15, 15, size=(n // 5, 2))
-  points = centres[:, None, :] + rng.normal(scale=0.6, size=(n // 5, 5, 2))
-  points = points.reshape(-1, 2)
-  return points, rng.normal(scale=2.0, size=len(points))
-
-
-def test_a_two_scale_kernel_is_still_exact_at_full_conditioning():
-  log_amplitude, log_lengthscale = TWO_SCALE.kernel_tensors()
-  for n in (20, 40):
-    points, residual = clustered_survey(n, seed=n)
-    structure = build_structure(points, m=n - 1, n0=n - 1)
-    ordered = torch.tensor(structure.points)
-    ordered_residual = residual[structure.order]
-
-    approximate = vecchia_loglik(
-      structure,
-      torch.tensor(ordered_residual),
-      log_amplitude,
-      log_lengthscale,
-      torch.tensor(TWO_SCALE.noise, dtype=torch.float64),
-      jitter=0.0,
-    )
-
-    kernel = matern52(ordered, ordered, log_amplitude, log_lengthscale).numpy()
-    kernel += TWO_SCALE.noise * np.eye(n)
-    factor = np.linalg.cholesky(kernel)
-    solved = np.linalg.solve(factor, ordered_residual)
-    exact = (
-      -0.5 * n * math.log(2 * math.pi)
-      - np.log(np.diag(factor)).sum()
-      - 0.5 * solved @ solved
-    )
-    np.testing.assert_allclose(float(approximate), exact, rtol=1e-11)
-
-
-def test_the_two_scale_gradient_matches_central_differences():
-  """Hand-written derivatives: both terms must be in the slope, not just the long.
-
-  Queried within a footprint of soundings, where the short term dominates the
-  local shape, and at full conditioning, where the mean really is smooth.
-  """
-  points, depth = clustered_survey(40, seed=7)
-  fitted = pinned(points, depth, TWO_SCALE, m=40, n0=40)
-  queries = points[:6] + 0.3
-
-  step = 1e-5
-  analytic = fitted.mean_gradient(queries, jitter=0.0)
-  numeric = np.empty_like(analytic)
-  for axis in range(2):
-    offset = np.zeros(2)
-    offset[axis] = step
-    numeric[:, axis] = (
-      fitted.predict(queries + offset, jitter=0.0)
-      - fitted.predict(queries - offset, jitter=0.0)
-    ) / (2 * step)
-
-  np.testing.assert_allclose(analytic, numeric, rtol=1e-5, atol=1e-7)
-
-
-def test_the_short_term_changes_the_slope():
-  """Dropping the short term from the gradient would pass a shape test; not this."""
-  points, depth = clustered_survey(40, seed=8)
-  two = pinned(points, depth, TWO_SCALE, m=40, n0=40)
-  long_only = replace(
-    two,
-    hyper=replace(
-      TWO_SCALE, short_log_amplitude=None, short_log_lengthscale=None
-    ),
-  )
-  queries = points[:6] + 0.3
-  difference = two.mean_gradient(queries) - long_only.mean_gradient(queries)
-  assert np.abs(difference).max() > 0.1
-
-
-def test_merged_scales_are_reported():
-  merged = replace(
-    TWO_SCALE, short_log_lengthscale=(math.log(4.0), math.log(9.0))
-  )
-  with pytest.warns(MergedScalesWarning, match="merged"):
-    _check_separation(merged)
-
-
-def test_separated_scales_are_not_reported():
-  import warnings
-
-  with warnings.catch_warnings():
-    warnings.simplefilter("error", MergedScalesWarning)
-    _check_separation(TWO_SCALE)
-
-
-def test_a_two_scale_draw_comes_back_as_two_scales():
-  """The recovery check: a field with both scales, fitted from scratch.
-
-  Soundings clustered at footprint spacing, so the short term is identifiable.
-  The fit starts its long term from its own single-scale fit.
-  """
-  points, _ = clustered_survey(700, seed=40)
-  log_amplitude = torch.log(torch.tensor([4.0, 1.0], dtype=torch.float64))
-  log_lengthscale = torch.log(
-    torch.tensor([[8.0, 8.0], [0.7, 0.7]], dtype=torch.float64)
-  )
-  depth = gp_draw(points, log_amplitude, log_lengthscale, 0.01, seed=41)
-
-  fitted = fit_vecchia(
-    points,
-    depth,
-    m=20,
-    steps=300,
-    device="cpu",
-    short_lengthscale=1.0,
-  )
-
-  short = fitted.hyper.short_lengthscale
-  assert short is not None
-  assert np.all(fitted.lengthscale / short > SEPARATION), (
-    fitted.lengthscale,
-    short,
-  )
-  assert np.all((short > 0.7 / 3) & (short < 0.7 * 3)), short

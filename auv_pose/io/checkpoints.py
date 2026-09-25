@@ -20,8 +20,6 @@ that map fits in metres.
    once already.
 """
 
-from __future__ import annotations
-
 import pickle
 from pathlib import Path
 from typing import Any
@@ -47,10 +45,8 @@ VECCHIA_VERSION = 3
 
 #: Versions this build can still read. Version 1 predates the mean basis being
 #: stored; every such map was fitted with the linear mean, so it loads as one.
-#: Version 2 predates the two-scale kernel; every such map has one scale.
-#: Version 3 adds the short term, and is bumped so a build that knows only
-#: one scale refuses a two-scale map rather than silently dropping half its
-#: kernel.
+#: Version 3 briefly carried a second kernel term, since retired; a map that
+#: has one is refused rather than loaded with half its kernel.
 VECCHIA_READABLE = (1, 2, 3)
 
 _REQUIRED_KEYS = frozenset(
@@ -147,12 +143,6 @@ def save_vecchia_map(path: str | Path, bathymetry: VecchiaMap) -> None:
     "log_amplitude": float(bathymetry.hyper.log_amplitude),
     "log_lengthscale": [float(v) for v in bathymetry.hyper.log_lengthscale],
     "log_noise": float(bathymetry.hyper.log_noise),
-    "short_log_amplitude": bathymetry.hyper.short_log_amplitude,
-    "short_log_lengthscale": (
-      None
-      if bathymetry.hyper.short_log_lengthscale is None
-      else [float(v) for v in bathymetry.hyper.short_log_lengthscale]
-    ),
     "information": (
       None
       if bathymetry.information is None
@@ -205,15 +195,11 @@ def _load_vecchia(path: Path, checkpoint: dict) -> VecchiaMap:
     n0=int(checkpoint["n0"]),
   )
 
-  # Absent before version 3, where every map had one scale.
-  raw_amplitude = checkpoint.get("short_log_amplitude")
-  raw_lengthscale = checkpoint.get("short_log_lengthscale")
-  short_amplitude = None if raw_amplitude is None else float(raw_amplitude)
-  short_lengthscale = (
-    None
-    if raw_lengthscale is None
-    else (float(raw_lengthscale[0]), float(raw_lengthscale[1]))
-  )
+  if checkpoint.get("short_log_amplitude") is not None:
+    raise ValueError(
+      f"{path} is a two-scale map; the second kernel term was retired. Refit "
+      "it with experiments/train_map.py"
+    )
 
   return VecchiaMap(
     structure=structure,
@@ -226,8 +212,6 @@ def _load_vecchia(path: Path, checkpoint: dict) -> VecchiaMap:
         float(checkpoint["log_lengthscale"][1]),
       ),
       log_noise=float(checkpoint["log_noise"]),
-      short_log_amplitude=short_amplitude,
-      short_log_lengthscale=short_lengthscale,
     ),
     noise=np.asarray(checkpoint["noise"], dtype=np.float64),
     loglik_trace=list(checkpoint.get("loglik_trace", [])),

@@ -11,8 +11,6 @@ Note:
     are used below, which makes dead reckoning drift considerably more than before.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 __all__ = [

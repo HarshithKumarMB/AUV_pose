@@ -4,60 +4,43 @@
 
 Reads the survey CSVs, fits the map, writes the checkpoint, and renders the
 fitted seabed. The defaults are the configuration the map ships in: every
-sounding of every survey, no decimation, §3.2's plane mean, one Matérn-5/2
-term, ``m = 30``, 2000 steps. ``--method both`` adds the SVGP baseline.
+sounding of every survey, §3.2's plane mean, one Matérn-5/2 term, ``m = 30``,
+2000 steps. ``--method both`` adds the SVGP baseline.
 
 **The shipped map holds nothing out.** How good it is is measured on an
 independently flown test track (``experiments/score_track.py``): soundings the
 map never saw, landing between the survey's, which is where the smoother will
-query it. The holdouts here remain for quick comparisons. ``--holdout-by ping``
-is the one that resembles use; the default blocked cells ask a gap-filling
-question the smoother never does, and a random split would leak, since
-consecutive soundings are about a centimetre apart.
+query it. The holdouts here are for quick comparisons. ``--holdout-by ping``
+resembles use; blocked cells ask a gap-filling question the smoother never
+does, and a random split would leak, since consecutive soundings are about a
+centimetre apart.
 
-The score is printed beside the mean of the nearest few training soundings.
-That baseline is deliberately unflattering: a Gaussian process that loses to it
-is not earning its complexity, and until this reported anything, one that did
-went unnoticed.
+Scores are printed beside the mean of the nearest few training soundings. A
+Gaussian process that loses to that is not earning its complexity.
 """
 
-from __future__ import annotations
-
 import argparse
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Self
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from scipy.spatial import KDTree
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from auv_pose.io.checkpoints import save_map, save_vecchia_map
-from auv_pose.io.soundings import (
-  COVARIANCE_COLUMNS,
-  load_soundings,
-  placement_covariance,
-  soundings_to_arrays,
-)
-from auv_pose.mapping.cleaning import object_soundings
+from auv_pose.io.soundings import load_soundings, soundings_to_arrays
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
-from auv_pose.mapping.vecchia import (
-  VecchiaMap,
-  fit_vecchia,
-  fit_vecchia_nigp,
-  input_noise_variance,
-)
+from auv_pose.mapping.vecchia import VecchiaMap, fit_vecchia
 from experiments.cli import refuse_overwrite
 
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument(
-    "surveys",
-    nargs="+",
-    type=Path,
-    help="survey CSVs to fit",
-  )
+  parser.add_argument("surveys", nargs="+", type=Path, help="survey CSVs")
   parser.add_argument(
     "--out",
     type=Path,
@@ -73,36 +56,21 @@ def parse_args() -> argparse.Namespace:
     nargs=4,
     metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
     default=None,
-    help=(
-      "restrict the fit to this box, metres. Worth setting once the swath is "
-      "across-track: at 70 m altitude a 60 degree fan reaches 40 m either side "
-      "of the line, so a survey of a 40x20 m box returns soundings over "
-      "several times that area and the inducing points spread out over ground "
-      "nothing will ever be navigated across"
-    ),
+    help="restrict the fit to this box, metres",
   )
-  parser.add_argument("--inducing", type=int, default=500)
-  parser.add_argument("--epochs", type=int, default=200)
   parser.add_argument(
     "--holdout",
     type=float,
     default=0.0,
-    help=(
-      "fraction of spatial cells withheld for scoring. The checkpoint is "
-      "fitted on the remainder, so the number reported describes the map that "
-      "is actually written. 0 fits everything and reports nothing"
-    ),
+    help="fraction withheld for scoring; 0, the default, fits everything",
   )
   parser.add_argument(
     "--holdout-by",
     choices=("cell", "ping"),
     default="cell",
     help=(
-      "what --holdout withholds. 'ping' holds out whole pings before "
-      "decimation and scores their raw soundings, which land between the "
-      "remaining pings' soundings -- where the smoother's own beams will "
-      "query the map. 'cell' withholds --holdout-cell squares, a gap-filling "
-      "test the smoother never poses. Needs the ping column for 'ping'"
+      "what --holdout withholds: whole pings, whose soundings land between "
+      "the rest as the smoother's beams will, or --holdout-cell squares"
     ),
   )
   parser.add_argument(
@@ -110,10 +78,8 @@ def parse_args() -> argparse.Namespace:
     type=float,
     default=8.0,
     help=(
-      "side of the cells the holdout is blocked by, metres. **State it beside "
-      "every rmse**: at 1 m a held-out sounding sits a median 0.31 m from "
-      "training data and the test barely asks for interpolation; at 8 m it is "
-      "1.55 m, and the Vecchia-versus-4-NN verdict reverses between the two"
+      "side of the withheld squares, metres. State it beside every rmse: at "
+      "1 m a held-out sounding sits a median 0.31 m from data, at 8 m 1.55 m"
     ),
   )
   parser.add_argument(
@@ -121,11 +87,9 @@ def parse_args() -> argparse.Namespace:
     type=float,
     default=0.0,
     help=(
-      "take the median sounding per cell of this side, metres; 0, the "
-      "default, fits every sounding. Off in the shipped map: decimating "
-      "makes the fitted noise the scatter of a cell median rather than of one "
-      "sounding, which is what the smoother compares the map against. Must "
-      "stay well below --holdout-cell when a blocked holdout is used"
+      "median sounding per cell of this side, metres; 0, the default, fits "
+      "every sounding. Decimating makes the fitted noise the scatter of a "
+      "cell median rather than of the one sounding the smoother compares"
     ),
   )
   parser.add_argument(
@@ -133,76 +97,26 @@ def parse_args() -> argparse.Namespace:
     type=float,
     default=None,
     metavar="Z",
-    help=(
-      "drop soundings shallower than Z metres, for rejecting water-column "
-      "echoes. The corrected surveys need none: the 5%% shallow tail once seen "
-      "here was the swath-sign mirror, not echoes"
-    ),
+    help="drop soundings shallower than Z metres (water-column echoes)",
   )
   parser.add_argument(
     "--place-by",
     choices=("recorded", "truth"),
     default="recorded",
     help=(
-      "which positions and depths the map is fitted to. 'truth' is the "
-      "control for a navigated survey: every selection -- bounds, objects, "
-      "decimation cells, holdout blocks -- is still made on the recorded "
-      "positions, and only then are the true ones swapped in, so the two maps "
-      "are fitted and scored on the same soundings. Needs true_x/y/z"
-    ),
-  )
-  parser.add_argument(
-    "--decimate-per-line",
-    action="store_true",
-    help=(
-      "keep one point per cell per survey line, told apart by a jump in "
-      "ping index, rather than one per cell. Soundings of one line share its "
-      "drift, so their covariance averages honestly; soundings of different "
-      "lines do not. Needs the ping column"
-    ),
-  )
-  parser.add_argument(
-    "--drop-objects",
-    action="store_true",
-    help=(
-      "leave out soundings standing on objects -- the Dam's pipelines -- found "
-      "by a morphological opening of the soundings themselves, so a real "
-      "survey can use it too. A bathymetric map should not fit a pipe, and "
-      "the map's input-noise correction cannot: its first-order slope is "
-      "wrong at a sharp edge"
-    ),
-  )
-  parser.add_argument(
-    "--object-window",
-    type=float,
-    default=15.0,
-    help="opening window, metres; must exceed the widest object (~10 m here)",
-  )
-  parser.add_argument(
-    "--object-core",
-    type=float,
-    default=3.5,
-    help=(
-      "height above the opened seabed that makes a sounding an object on its "
-      "own, m: above the Dam's ~3 m mounds, below its 4-6 m pipes"
+      "'truth' fits the true positions and depths of the same soundings -- "
+      "every selection is still made on the recorded ones -- so a navigated "
+      "map and its control are scored on identical soundings"
     ),
   )
   parser.add_argument(
     "--method",
     choices=("vecchia", "svgp", "both"),
     default="vecchia",
-    help=(
-      "which map to fit. 'both' fits each and scores them side by side, which "
-      "is how the claim that local conditioning beats inducing points gets a "
-      "number on this seabed rather than only a citation"
-    ),
+    help="which map to fit; 'both' scores the SVGP baseline beside it",
   )
   parser.add_argument(
-    "--conditioning",
-    type=int,
-    default=30,
-    metavar="M",
-    help="Vecchia conditioning-set size; the paper's m",
+    "--conditioning", type=int, default=30, metavar="M", help="the paper's m"
   )
   parser.add_argument(
     "--near",
@@ -211,661 +125,326 @@ def parse_args() -> argparse.Namespace:
     metavar="M_NEAR",
     help=(
       "how many of --conditioning are nearest neighbours; the rest are "
-      "spread across the ordering. Default is all nearest. Stein, Chi and "
-      "Welty (2004) find all-nearest the worst design for estimating a range "
-      "parameter under a linear mean. At 2 m cells with the linear mean, 22 "
-      "nearest + 8 spread made no measurable difference"
+      "spread across the ordering. Default all nearest; see fit_vecchia"
     ),
   )
   parser.add_argument(
-    "--mean",
-    default="linear",
-    choices=("linear", "quadratic", "cubic"),
-    help=(
-      "mean basis; §3.2's plane by default. Near data the kernel carries "
-      "the prediction, and on an independent track a spline mean scored the "
-      "same as the plane (0.820 against 0.818 m)"
-    ),
+    "--mean", default="linear", choices=("linear", "quadratic", "cubic")
   )
   parser.add_argument(
-    "--steps",
-    type=int,
-    default=2000,
-    help=(
-      "Vecchia optimiser steps, run in full. The objective reaches float64 "
-      "round-off by about 1500 on the four-heading survey"
-    ),
+    "--steps", type=int, default=2000, help="optimiser steps, run in full"
   )
-  parser.add_argument(
-    "--short-lengthscale",
-    type=float,
-    default=None,
-    metavar="METRES",
-    help=(
-      "add a second Matern-5/2 term starting at this length -- about the "
-      "sonar footprint -- so the map can follow objects' steep flanks as "
-      "well as the natural seabed. The single-scale fit is run first, scored, "
-      "saved beside --out as *_single, and used as the long term's start"
-    ),
-  )
-  parser.add_argument(
-    "--nigp-passes",
-    type=int,
-    default=0,
-    metavar="N",
-    help=(
-      "carry each sounding's position covariance into its noise over N "
-      "fits (McHutchon and Rasmussen's NIGP; the paper's procedure is 2). "
-      "Needs soundings placed by georeference.py --pose smoothed. 0 is off; "
-      "1 would be one fit with no inflation, so it is refused"
-    ),
-  )
-  parser.add_argument("--batch-size", type=int, default=5000)
-  parser.add_argument(
-    "--grid", type=int, default=200, help="plot resolution per axis"
-  )
+  parser.add_argument("--inducing", type=int, default=500, help="SVGP only")
+  parser.add_argument("--epochs", type=int, default=200, help="SVGP only")
+  parser.add_argument("--batch-size", type=int, default=5000, help="SVGP only")
+  parser.add_argument("--grid", type=int, default=200, help="plot resolution")
   parser.add_argument("--seed", type=int, default=0)
   parser.add_argument(
-    "--device",
-    default=None,
-    help=(
-      "torch device to fit on; defaults to cuda when available. The reported "
-      "device is printed, because a fit that silently fell back to the CPU "
-      "looks identical to one that did not"
-    ),
+    "--device", default=None, help="torch device; cuda when available"
   )
   parser.add_argument("--no-plot", action="store_true")
   parser.add_argument(
-    "--force",
-    action="store_true",
-    help="overwrite --out / --plot if they exist",
+    "--force", action="store_true", help="overwrite --out / --plot"
   )
   return parser.parse_args()
 
 
-def decimate(
-  X: np.ndarray, y: np.ndarray, cell: float
-) -> tuple[np.ndarray, np.ndarray]:
-  """Take the median sounding per horizontal cell.
+@dataclass(frozen=True)
+class Soundings:
+  """Positions and depths, with whatever optional columns rode along.
 
-  A multibeam survey produces a few hundred soundings per ping and millions per
-  run, which is far more than the GP needs and far more than it can afford.
+  Every selection -- bounds, elevation, a ping holdout -- masks all of them
+  together, so a column can never fall out of step with the positions.
+  """
+
+  X: np.ndarray
+  y: np.ndarray
+  ping: np.ndarray | None = None
+  truth: np.ndarray | None = None
+
+  def __len__(self) -> int:
+    return len(self.y)
+
+  def where(self, mask: np.ndarray) -> Self:
+    return type(self)(
+      self.X[mask],
+      self.y[mask],
+      None if self.ping is None else self.ping[mask],
+      None if self.truth is None else self.truth[mask],
+    )
+
+  def then(self, other: Self) -> Self:
+    """These soundings followed by ``other``'s."""
+
+    def join(a, b):
+      return None if a is None or b is None else np.concatenate([a, b])
+
+    return type(self)(
+      np.concatenate([self.X, other.X]),
+      np.concatenate([self.y, other.y]),
+      join(self.ping, other.ping),
+      join(self.truth, other.truth),
+    )
+
+
+def decimate(data: Soundings, cell: float) -> Soundings:
+  """Median of every column per horizontal cell.
 
   **Median, not mean.** A strongest-return picker occasionally lands on the
-  wrong feature, and those errors are one-sided rather than symmetric, so a mean
-  drags the cell toward them. The median simply ignores a minority of bad beams.
-
-  Keep ``cell`` well below the holdout cell, or decimation merges soundings
-  across the boundary the split is meant to hold shut.
-
-  :param X: Sounding positions, ``(n, 2)``.
-  :param y: Seabed elevation, ``(n,)``.
-  :param cell: Cell side in metres.
-  :return: ``(X, y)`` reduced to one point per occupied cell, at the cell's
-      median position and elevation.
+  wrong feature, and those errors are one-sided, so a mean drags the cell
+  toward them. The median ignores a minority of bad beams.
   """
-  groups = cell_groups(X, cell)
-  return (
-    np.asarray([np.median(X[g], axis=0) for g in groups], dtype=X.dtype),
-    np.asarray([np.median(y[g]) for g in groups], dtype=y.dtype),
-  )
-
-
-def cell_groups(X: np.ndarray, cell: float) -> list[np.ndarray]:
-  """Indices of the soundings in each occupied horizontal cell.
-
-  In the order :func:`decimate` emits its cells, so anything aggregated over
-  these groups lines up with its output row for row.
-
-  :param X: Sounding positions, ``(n, 2)``.
-  :param cell: Cell side in metres.
-  """
-  key = np.floor(X / cell).astype(np.int64)
+  key = np.floor(data.X / cell).astype(np.int64)
   _, inverse = np.unique(key, axis=0, return_inverse=True)
   order = np.argsort(inverse.ravel(), kind="stable")
-  return np.split(order, np.cumsum(np.bincount(inverse.ravel()))[:-1])
+  groups = np.split(order, np.cumsum(np.bincount(inverse.ravel()))[:-1])
 
+  def median(values: np.ndarray) -> np.ndarray:
+    return np.stack([np.median(values[g], axis=0) for g in groups])
 
-def line_groups(
-  X: np.ndarray, ping: np.ndarray, cell: float, gap: int = 50
-) -> list[np.ndarray]:
-  """Like :func:`cell_groups`, but a cell is split by survey line.
-
-  One pass of the vehicle reaches a cell over a few consecutive pings; another
-  line reaches it hundreds of pings later. So within each cell the soundings
-  are ordered by ping and split wherever the ping index jumps by more than
-  ``gap``. Every group then holds one line's soundings, which share that
-  line's drift -- the case in which averaging their covariance is right.
-
-  :param X: Sounding positions, ``(n, 2)``.
-  :param ping: Ping index of each sounding, ``(n,)``.
-  :param cell: Cell side in metres.
-  :param gap: Ping jump that starts a new line.
-  """
-  key = np.floor(X / cell).astype(np.int64)
-  order = np.lexsort((ping, key[:, 1], key[:, 0]))
-  key, ping = key[order], np.asarray(ping)[order]
-  new_cell = np.any(np.diff(key, axis=0) != 0, axis=1)
-  new_line = np.diff(ping) > gap
-  starts = np.flatnonzero(np.concatenate([[True], new_cell | new_line]))
-  return np.split(order, starts[1:])
-
-
-def aggregate_covariance(
-  cov: np.ndarray, groups: list[np.ndarray]
-) -> np.ndarray:
-  """Position covariance of each decimated cell: the **mean** of its members'.
-
-  The one place :func:`decimate`'s median convention has to break. A cell's
-  soundings are mostly beams of the same ping, and they share the vehicle's
-  whole position error -- so the cell is no better placed than any one of
-  them, and dividing by the count would treat correlated beams as independent
-  fixes. The mean rather than the median because a mean of positive
-  semi-definite matrices is one, and an element-wise median need not be.
-
-  :param cov: Per-sounding covariance, ``(n, 2, 2)``.
-  :param groups: From :func:`cell_groups`.
-  :return: ``(n_cells, 2, 2)``.
-  """
-  return np.stack([cov[group].mean(axis=0) for group in groups])
+  return Soundings(
+    median(data.X).astype(data.X.dtype),
+    median(data.y).astype(data.y.dtype),
+    None,
+    None if data.truth is None else median(data.truth),
+  )
 
 
 def blocked_split(
   X: np.ndarray, fraction: float, cell: float, seed: int
 ) -> tuple[np.ndarray, np.ndarray]:
-  """Split by withholding whole spatial cells.
-
-  :param X: Sounding positions, ``(n, 2)``.
-  :param fraction: Fraction of occupied cells to withhold.
-  :param cell: Cell side in metres.
-  :param seed: Seed for choosing cells.
-  :return: Boolean ``(train, test)`` masks over the soundings.
-  """
+  """Withhold whole square cells: boolean ``(train, test)`` masks."""
   _, index = np.unique(
     np.floor(X / cell).astype(np.int64), axis=0, return_inverse=True
   )
-  n_cells = int(index.max()) + 1
-  chosen = np.random.default_rng(seed).permutation(n_cells)[
-    : round(fraction * n_cells)
-  ]
-  test = np.isin(index, chosen)
+  chosen = np.random.default_rng(seed).permutation(int(index.max()) + 1)
+  test = np.isin(index, chosen[: round(fraction * len(chosen))])
   return ~test, test
 
 
-def calibration(bathymetry, X, y, test, input_variance=None) -> float:
+def ping_split(
+  ping: np.ndarray, fraction: float, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+  """Withhold whole pings: boolean ``(train, test)`` masks."""
+  pings = np.unique(ping)
+  chosen = np.random.default_rng(seed).permutation(pings)
+  test = np.isin(ping, chosen[: round(fraction * len(pings))])
+  return ~test, test
+
+
+def calibration(bathymetry, X, y, test) -> float:
   """Fraction of held-out soundings inside the map's own 95% interval.
 
-  Accuracy alone cannot tell whether a map's uncertainty is worth propagating
-  into a filter. This can: the paper's claim is that ``cov_M`` is the survey's
-  posterior uncertainty rather than a tuning parameter, which makes it
-  falsifiable. A map reporting 60% coverage is overconfident by exactly the
-  amount that would make the smoother's update too sure of itself.
-
-  :param input_variance: Each held-out sounding's own input noise,
-      from :func:`input_noise`, for a survey placed by navigation. A held-out sounding
-      is misplaced like any other, so its interval must allow for that too;
-      leaving it out scores a navigated map as overconfident when it is only
-      being compared against misplaced truth.
+  The smoother trusts the map by its uncertainty, so an overconfident map --
+  60% coverage, say -- makes every update too sure of itself.
   """
   predicted, spread = bathymetry.predict(
     X[test], with_std=True, observation_noise=True
   )
-  if input_variance is not None:
-    spread = np.sqrt(spread**2 + input_variance)
   return float((np.abs(predicted - y[test]) <= 1.96 * spread).mean())
 
 
-def input_noise(bathymetry, X, cov, test) -> np.ndarray:
-  """Placement-induced depth variance at each held-out sounding.
-
-  :func:`~auv_pose.mapping.vecchia.input_noise_variance` at the map's own slope.
-  """
-  slope = bathymetry.mean_gradient(X[test].astype(np.float64))
-  return input_noise_variance(slope, cov[test])
-
-
-def score(
-  bathymetry, X, y, train, test, neighbours: int = 4, input_variance=None
-) -> float:
-  """Print held-out error beside a nearest-neighbour baseline.
-
-  :return: The map's held-out rmse, so callers comparing two maps need not
-      re-predict.
-  """
+def score(bathymetry, X, y, train, test, neighbours: int = 4) -> float:
+  """Print held-out error beside a nearest-neighbour baseline; return rmse."""
   predicted = bathymetry.predict(X[test])
   gp_rmse = float(np.sqrt(((predicted - y[test]) ** 2).mean()))
 
   finder = NearestNeighbors(n_neighbors=neighbours).fit(X[train])
   _, nearest = finder.kneighbors(X[test])
-  knn_rmse = float(
-    np.sqrt(((y[train][nearest].mean(axis=1) - y[test]) ** 2).mean())
-  )
+  knn = y[train][nearest].mean(axis=1)
+  knn_rmse = float(np.sqrt(((knn - y[test]) ** 2).mean()))
+  flat_rmse = float(np.sqrt(((y[train].mean() - y[test]) ** 2).mean()))
 
-  print(f"  held out {test.sum()} soundings in whole cells")
+  print(f"  held out {test.sum()} soundings")
   print(f"  GP rmse                      {gp_rmse:7.3f} m")
   print(f"  mean of {neighbours} nearest soundings  {knn_rmse:7.3f} m")
+  print(f"  predicting the mean depth    {flat_rmse:7.3f} m")
   print(
-    f"  predicting the mean depth    {float(np.sqrt(((y[train].mean() - y[test]) ** 2).mean())):7.3f} m"
+    f"  inside its own 95% interval  {calibration(bathymetry, X, y, test):7.1%}"
   )
-  print(
-    "  inside its own 95% interval  "
-    f"{calibration(bathymetry, X, y, test, input_variance):7.1%}"
-  )
-  # Where the coverage fails says which term is wrong: on low input noise it is
-  # the nugget, on high it is the NIGP inflation. Nothing to split for a survey
-  # placed from truth, whose input noise is zero throughout.
-  if input_variance is not None and np.ptp(input_variance) > 0.0:
-    edges = np.quantile(input_variance, [0.0, 1 / 3, 2 / 3, 1.0])
-    thirds = np.digitize(input_variance, edges[1:-1])
-    indices = np.flatnonzero(test)
-    parts = []
-    for third in range(3):
-      if not np.any(thirds == third):
-        continue
-      subset = np.zeros_like(test)
-      subset[indices[thirds == third]] = True
-      coverage = calibration(
-        bathymetry, X, y, subset, input_variance[thirds == third]
-      )
-      parts.append(f"{coverage:.1%} below {edges[third + 1]:.3g} m^2")
-    print(f"  by input noise, in thirds      {'; '.join(parts)}")
   if gp_rmse > knn_rmse:
-    print(
-      "  *** worse than averaging its neighbours. Either the fit has not "
-      "converged -- check the ELBO trace above -- or the soundings carry "
-      "structure finer than the survey resolves, which no model recovers. "
-      "Fitting a known analytic surface at the same sounding positions tells "
-      "the two apart ***"
-    )
+    print("  *** worse than averaging its neighbours ***")
   return gp_rmse
 
 
-def describe(vecchia: VecchiaMap) -> None:
-  """Print a fitted Vecchia map's convergence and hyperparameters."""
-  print(f"  fitted on {vecchia.fit_device}")
-  trace = vecchia.loglik_trace
-  earlier = trace[max(-len(trace), -(len(trace) // 10) - 1)]
-  print(
-    f"  restricted log likelihood {trace[0]:.1f} -> {trace[-1]:.1f}; "
-    f"last tenth improved by {trace[-1] - earlier:.3f} "
-    "(near zero means converged)"
+def last_tenth(trace: list[float]) -> float:
+  """How much the objective moved over the last tenth of the run."""
+  step = max(1, len(trace) // 10)
+  return trace[-1] - trace[max(0, len(trace) - 1 - step)]
+
+
+def fit_svgp_map(X, y, args) -> tuple[BathymetryMap, tuple]:
+  """The SVGP baseline, and what :func:`save_map` needs to write it."""
+  x_scaler = StandardScaler().fit(X)
+  y_mean, y_std = float(y.mean()), float(y.std())
+  model, likelihood, inducing = fit_svgp(
+    torch.tensor(x_scaler.transform(X), dtype=torch.float32),
+    torch.tensor((y - y_mean) / y_std, dtype=torch.float32),
+    n_inducing=args.inducing,
+    epochs=args.epochs,
+    batch_size=args.batch_size,
+    seed=args.seed,
+    device=args.device,
   )
-  hyper = vecchia.hyper
-  short = hyper.short_lengthscale
-  if short is not None:
-    print(
-      f"  long term:  lengthscales {np.round(hyper.lengthscale, 2)} m, "
-      f"amplitude {hyper.amplitude:.3f} m^2"
-    )
-    print(
-      f"  short term: lengthscales {np.round(short, 2)} m, "
-      f"amplitude {hyper.short_amplitude:.3f} m^2"
-    )
-    print(f"  nugget {hyper.noise:.4f} m^2")
-  else:
-    print(f"  lengthscales {np.round(vecchia.lengthscale, 2)} m")
-    print(
-      f"  amplitude {hyper.amplitude:.3f} m^2, nugget {hyper.noise:.4f} m^2"
-    )
-  print(f"  mean coefficients {np.round(vecchia.beta, 4)}")
+  lengthscale = (
+    model.covar_module.base_kernel.lengthscale.detach().numpy().ravel()
+    * x_scaler.scale_
+  )
+  print(
+    f"  fitted on {model.fit_device}; negative ELBO last tenth improved by "
+    f"{-last_tenth(model.elbo_trace):.4f}; lengthscales "
+    f"{np.round(lengthscale, 2)} m"
+  )
+  bathymetry = BathymetryMap(
+    model, likelihood, x_scaler, y_mean, y_std, device=model.fit_device
+  )
+  return bathymetry, (model, likelihood, inducing, x_scaler, y_mean, y_std)
 
 
-def report_truth(
-  vecchia: VecchiaMap, truth: np.ndarray, test: np.ndarray
-) -> None:
-  """Score against where the held-out soundings truly lie.
-
-  They are misplaced too, horizontally and in depth, so scoring against them
-  measures self-consistency. Against their true position and depth it
-  measures the map.
-  """
-  at_truth = vecchia.predict(truth[test, :2])
-  error = np.sqrt(np.mean((at_truth - truth[test, 2]) ** 2))
-  print(f"  rmse at the true positions      {error:.3f} m")
+def fit_vecchia_map(X, y, args) -> VecchiaMap:
+  fitted = fit_vecchia(
+    X.astype(np.float64),
+    y.astype(np.float64),
+    m=args.conditioning,
+    steps=args.steps,
+    device=args.device,
+    near=args.near,
+    mean=args.mean,
+  )
+  trace = fitted.loglik_trace
+  print(
+    f"  fitted on {fitted.fit_device}; restricted log likelihood "
+    f"{trace[0]:.1f} -> {trace[-1]:.1f}, last tenth improved by "
+    f"{last_tenth(trace):.3f}"
+  )
+  print(
+    f"  lengthscales {np.round(fitted.lengthscale, 2)} m, amplitude "
+    f"{fitted.hyper.amplitude:.3f} m^2, nugget {fitted.hyper.noise:.4f} m^2"
+  )
+  return fitted
 
 
 def main() -> None:
   args = parse_args()
-  if args.place_by == "truth" and args.nigp_passes > 0:
-    raise SystemExit(
-      "--place-by truth has no placement error for NIGP to model"
-    )
-  if args.nigp_passes == 1:
-    raise SystemExit(
-      "--nigp-passes 1 is a plain fit: the first pass has no inflation yet. "
-      "Use 0 for off, or 2 for the paper's procedure"
-    )
   if args.out is None:
-    primary = "svgp" if args.method == "svgp" else "vecchia"
-    args.out = Path(f"{primary}_bathymetry.pkl")
-
+    args.out = Path(
+      f"{'svgp' if args.method == 'svgp' else 'vecchia'}_bathymetry.pkl"
+    )
   refuse_overwrite(args.out, args.force)
   if not args.no_plot:
     refuse_overwrite(args.plot, args.force)
 
   frame = load_soundings(args.surveys)
   X, y = soundings_to_arrays(frame)
-  # Both ride along with X through every filter below, row for row. The
-  # covariance is read whenever the survey carries it, so a map fitted without
-  # NIGP is still scored against its misplaced holdout fairly.
-  cov = (
-    placement_covariance(frame)
-    if args.nigp_passes > 0 or set(COVARIANCE_COLUMNS) <= set(frame.columns)
-    else None
-  )
-  ping = frame["ping"].to_numpy() if "ping" in frame.columns else None
-  if args.decimate_per_line and ping is None:
-    raise SystemExit("--decimate-per-line needs a ping column")
-  truth = (
+  data = Soundings(
+    X,
+    y,
+    frame["ping"].to_numpy() if "ping" in frame.columns else None,
     frame[["true_x", "true_y", "true_z"]].to_numpy(np.float64)
     if {"true_x", "true_y", "true_z"} <= set(frame.columns)
-    else None
+    else None,
   )
-  print(
-    f"Loaded {len(X)} soundings from {', '.join(str(p) for p in args.surveys)}"
-  )
+  print(f"Loaded {len(data)} soundings from {len(args.surveys)} surveys")
 
   if args.bounds is not None:
-    x_min, x_max, y_min, y_max = args.bounds
+    x0, x1, y0, y1 = args.bounds
     inside = (
-      (X[:, 0] >= x_min)
-      & (X[:, 0] <= x_max)
-      & (X[:, 1] >= y_min)
-      & (X[:, 1] <= y_max)
+      (data.X[:, 0] >= x0)
+      & (data.X[:, 0] <= x1)
+      & (data.X[:, 1] >= y0)
+      & (data.X[:, 1] <= y1)
     )
-    print(
-      f"Kept {int(inside.sum())} soundings inside {args.bounds} "
-      f"({100 * inside.mean():.1f}%)"
-    )
-    if not inside.any():
-      raise SystemExit("no soundings inside --bounds")
-    X, y = X[inside], y[inside]
-    cov = None if cov is None else cov[inside]
-    truth = None if truth is None else truth[inside]
-    ping = None if ping is None else ping[inside]
-
+    data = data.where(inside)
+    print(f"Kept {len(data)} soundings inside {args.bounds}")
   if args.max_elevation is not None:
-    deep = y <= args.max_elevation
-    print(
-      f"Kept {int(deep.sum())} soundings at or below {args.max_elevation} m "
-      f"({100 * deep.mean():.1f}%); dropped {int((~deep).sum())} shallow returns"
-    )
-    if not deep.any():
-      raise SystemExit("no soundings below --max-elevation")
-    X, y = X[deep], y[deep]
-    cov = None if cov is None else cov[deep]
-    truth = None if truth is None else truth[deep]
-    ping = None if ping is None else ping[deep]
-
-  if args.drop_objects:
-    objects = object_soundings(
-      X, y, window=args.object_window, core=args.object_core
-    )
-    print(
-      f"Dropped {int(objects.sum())} object soundings "
-      f"({100 * objects.mean():.1f}%): cores over {args.object_core} m above a "
-      f"{args.object_window} m opening of the seabed, and their flanks"
-    )
-    seabed = ~objects
-    X, y = X[seabed], y[seabed]
-    cov = None if cov is None else cov[seabed]
-    truth = None if truth is None else truth[seabed]
-    ping = None if ping is None else ping[seabed]
+    data = data.where(data.y <= args.max_elevation)
+    print(f"Kept {len(data)} soundings at or below {args.max_elevation} m")
+  if not len(data):
+    raise SystemExit("no soundings left to fit")
 
   # Held-out pings leave before decimation, so none of their soundings is
-  # merged into a training cell: they stay raw, at their own positions.
+  # merged into a training cell: they are scored raw, where they landed.
   held = None
   if args.holdout > 0 and args.holdout_by == "ping":
-    if ping is None:
+    if data.ping is None:
       raise SystemExit("--holdout-by ping needs a ping column")
-    pings = np.unique(ping)
-    chosen = np.random.default_rng(args.seed).permutation(pings)[
-      : round(args.holdout * len(pings))
-    ]
-    out = np.isin(ping, chosen)
-    held = (
-      X[out],
-      y[out],
-      None if cov is None else cov[out],
-      None if truth is None else truth[out],
-    )
-    X, y = X[~out], y[~out]
-    cov = None if cov is None else cov[~out]
-    truth = None if truth is None else truth[~out]
-    ping = ping[~out]
-    print(
-      f"Held out {len(chosen)} of {len(pings)} pings: {int(out.sum())} soundings"
-    )
+    keep, out = ping_split(data.ping, args.holdout, args.seed)
+    held, data = data.where(out), data.where(keep)
 
   if args.decimate_cell > 0:
-    # Only a blocked split has cells for decimation to merge across.
-    if held is None and args.decimate_cell >= args.holdout_cell:
+    blocked = held is None and args.holdout > 0
+    if blocked and args.decimate_cell >= args.holdout_cell:
       raise SystemExit(
-        f"--decimate-cell {args.decimate_cell} is not smaller than "
-        f"--holdout-cell {args.holdout_cell}; decimation would merge "
-        "soundings across the boundary the blocked split relies on"
+        "--decimate-cell must be well below --holdout-cell, or decimation "
+        "merges soundings across the split"
       )
-    before = len(X)
-    if args.decimate_per_line:
-      assert ping is not None  # checked on load
-      groups = line_groups(X, ping, args.decimate_cell)
-    else:
-      groups = cell_groups(X, args.decimate_cell)
-    if cov is not None:
-      cov = aggregate_covariance(cov, groups)
-    if truth is not None:
-      truth = np.stack([np.median(truth[g], axis=0) for g in groups])
-    X = np.stack([np.median(X[g], axis=0) for g in groups]).astype(X.dtype)
-    y = np.asarray([np.median(y[g]) for g in groups], dtype=y.dtype)
-    print(
-      f"Decimated to {len(X)} soundings "
-      f"({before / max(len(X), 1):.1f}x) at {args.decimate_cell} m cells"
-    )
+    before = len(data)
+    data = decimate(data, args.decimate_cell)
+    print(f"Decimated {before} soundings to {len(data)}")
 
   if held is not None:
-    held_X, held_y, held_cov, held_truth = held
-    train = np.concatenate([np.ones(len(X), bool), np.zeros(len(held_X), bool)])
-    test = ~train
-    X = np.concatenate([X, held_X.astype(X.dtype)])
-    y = np.concatenate([y, held_y.astype(y.dtype)])
-    if cov is not None and held_cov is not None:
-      cov = np.concatenate([cov, held_cov])
-    if truth is not None and held_truth is not None:
-      truth = np.concatenate([truth, held_truth])
-    from scipy.spatial import KDTree
-
-    gap = KDTree(X[train]).query(X[test])[0]
+    train = np.arange(len(data) + len(held)) < len(data)
+    data = data.then(held)
+    gap = KDTree(data.X[train]).query(data.X[~train])[0]
     print(
-      "  held-out soundings from the nearest fitted one: median "
-      f"{np.median(gap):.2f} m, 90th {np.percentile(gap, 90):.2f} m"
+      f"Held out {len(held)} soundings of whole pings, a median "
+      f"{np.median(gap):.2f} m from the nearest fitted one"
     )
   elif args.holdout > 0:
-    train, test = blocked_split(X, args.holdout, args.holdout_cell, args.seed)
+    train, _ = blocked_split(data.X, args.holdout, args.holdout_cell, args.seed)
   else:
-    train = np.ones(len(X), dtype=bool)
-    test = np.zeros(len(X), dtype=bool)
+    train = np.ones(len(data), dtype=bool)
+  test = ~train
 
   if args.place_by == "truth":
     # After every selection, never before: selections made on true positions
-    # would hand the control a different set of soundings, and a comparison of
-    # two maps on different soundings is not a comparison.
-    if truth is None:
+    # would hand the control different soundings from the map it controls.
+    if data.truth is None:
       raise SystemExit("--place-by truth needs true_x, true_y, true_z columns")
-    X, y = truth[:, :2], truth[:, 2]
-    cov = None
+    data = replace(data, X=data.truth[:, :2], y=data.truth[:, 2])
     print("Fitting the true positions and depths of the same soundings")
 
+  X, y = data.X, data.y
   fitted: dict[str, BathymetryMap | VecchiaMap] = {}
-  # What save_map needs, and only exists once the SVGP has been fitted.
-  svgp_checkpoint: tuple | None = None
-  rmse: dict[str, float] = {}
-
+  svgp_checkpoint = None
   if args.method in ("svgp", "both"):
-    x_scaler = StandardScaler().fit(X[train])
-    y_mean, y_std = float(y[train].mean()), float(y[train].std())
-
-    train_x = torch.tensor(x_scaler.transform(X[train]), dtype=torch.float32)
-    train_y = torch.tensor((y[train] - y_mean) / y_std, dtype=torch.float32)
-
-    print(
-      f"Fitting SVGP on {int(train.sum())} soundings: "
-      f"{args.inducing} inducing points, {args.epochs} epochs"
-    )
-    model, likelihood, inducing_points = fit_svgp(
-      train_x,
-      train_y,
-      n_inducing=args.inducing,
-      epochs=args.epochs,
-      batch_size=args.batch_size,
-      seed=args.seed,
-      device=args.device,
-    )
-
-    print(f"  fitted on {model.fit_device}")
-    trace = model.elbo_trace
-    print(
-      f"  negative ELBO {trace[0]:.4f} -> {trace[-1]:.4f}; "
-      f"last tenth improved by {trace[max(-len(trace), -(len(trace) // 10) - 1)] - trace[-1]:.4f} "
-      "(near zero means converged)"
-    )
-    lengthscale = (
-      model.covar_module.base_kernel.lengthscale.detach().numpy().ravel()
-      * x_scaler.scale_
-    )
-    print(f"  lengthscales {np.round(lengthscale, 2)} m")
-
-    svgp = BathymetryMap(
-      model, likelihood, x_scaler, y_mean, y_std, device=model.fit_device
-    )
-    svgp_checkpoint = (
-      model,
-      likelihood,
-      inducing_points,
-      x_scaler,
-      y_mean,
-      y_std,
-    )
-    fitted["svgp"] = svgp
-    if test.any():
-      rmse["svgp"] = score(svgp, X, y, train, test)
-
+    print(f"Fitting SVGP on {int(train.sum())} soundings")
+    fitted["svgp"], svgp_checkpoint = fit_svgp_map(X[train], y[train], args)
   if args.method in ("vecchia", "both"):
     split = (
       "all nearest"
       if args.near is None
       else f"{args.near} nearest + {args.conditioning - args.near} spread"
     )
-    mean = f"{args.mean} mean"
     print(
       f"Fitting Vecchia on {int(train.sum())} soundings: "
-      f"m={args.conditioning} ({split}), {mean}, {args.steps} steps"
+      f"m={args.conditioning} ({split}), {args.mean} mean"
     )
-    options = {
-      "m": args.conditioning,
-      "steps": args.steps,
-      "device": args.device,
-      "near": args.near,
-      "mean": args.mean,
-    }
-    inflation = None
-    if args.nigp_passes == 0 and args.short_lengthscale is not None:
-      # The single-scale fit is both the two-scale fit's starting point and
-      # the baseline it has to beat, so it is scored and kept too.
-      single = fit_vecchia(
-        X[train].astype(np.float64), y[train].astype(np.float64), **options
-      )
-      print("  single scale:")
-      describe(single)
-      if test.any():
-        score(single, X, y, train, test)
-        if truth is not None:
-          report_truth(single, truth, test)
-      single_path = args.out.with_name(
-        f"{args.out.stem}_single{args.out.suffix}"
-      )
-      save_vecchia_map(single_path, single)
-      print(f"  wrote {single_path}")
+    fitted["vecchia"] = fit_vecchia_map(X[train], y[train], args)
 
-      print(
-        f"  two scales, short term from {args.short_lengthscale} m, long from "
-        "the single-scale fit:"
-      )
-      vecchia = fit_vecchia(
-        X[train].astype(np.float64),
-        y[train].astype(np.float64),
-        short_lengthscale=args.short_lengthscale,
-        initial=single.hyper,
-        **options,
-      )
-    elif args.nigp_passes == 0:
-      vecchia = fit_vecchia(
-        X[train].astype(np.float64), y[train].astype(np.float64), **options
-      )
-    else:
-      vecchia, inflations = fit_vecchia_nigp(
-        X[train].astype(np.float64),
-        y[train].astype(np.float64),
-        np.asarray(cov)[train],
-        passes=args.nigp_passes,
-        short_lengthscale=args.short_lengthscale,
-        **options,
-      )
-      # The last fit used inflations[-2]; inflations[-1] is what a further
-      # pass would use, so their difference is whether it has settled.
-      inflation = inflations[-2]
-      print(
-        f"  NIGP, {args.nigp_passes} passes: input-noise variance used, median "
-        f"{np.median(inflation):.4f}, 95th "
-        f"{np.percentile(inflation, 95):.4f} m^2; a further pass would change "
-        f"it by {np.abs(inflations[-1] - inflation).max():.4f} m^2 at most"
-      )
+  if test.any():
+    for name, bathymetry in fitted.items():
+      print(f"\n{name}")
+      score(bathymetry, X, y, train, test)
+      if data.truth is not None:
+        # Held-out soundings are misplaced like any other; against where they
+        # truly lie, the score measures the map rather than self-consistency.
+        at_truth = bathymetry.predict(data.truth[test, :2])
+        error = np.sqrt(np.mean((at_truth - data.truth[test, 2]) ** 2))
+        print(f"  rmse at the true positions   {error:7.3f} m")
 
-    describe(vecchia)
-    if inflation is not None:
-      # Whether NIGP had anything to do: an inflation far below the nugget
-      # means the fit would have been the same without it.
-      print(
-        "  median input noise / nugget "
-        f"{np.median(inflation) / vecchia.hyper.noise:.3f}"
-      )
-    fitted["vecchia"] = vecchia
-    if test.any():
-      rmse["vecchia"] = score(
-        vecchia,
-        X,
-        y,
-        train,
-        test,
-        input_variance=None
-        if cov is None
-        else input_noise(vecchia, X, cov, test),
-      )
-      if truth is not None:
-        report_truth(vecchia, truth, test)
-
-  if len(rmse) == 2:
-    better, worse = sorted(rmse, key=lambda name: rmse[name])
-    margin = 100 * (1 - rmse[better] / rmse[worse])
-    print(
-      f"\n{better} wins by {margin:.1f}% on held-out rmse "
-      f"({rmse[better]:.3f} m against {rmse[worse]:.3f} m)"
-    )
-
-  primary = "vecchia" if "vecchia" in fitted else "svgp"
-  bathymetry = fitted[primary]
-
+  bathymetry = fitted.get("vecchia", fitted.get("svgp"))
+  assert bathymetry is not None
   if isinstance(bathymetry, VecchiaMap):
     save_vecchia_map(args.out, bathymetry)
   else:
-    assert svgp_checkpoint is not None  # set wherever an SVGP was fitted
+    assert svgp_checkpoint is not None
     save_map(args.out, *svgp_checkpoint)
   print(f"Wrote {args.out}")
 
-  if args.no_plot:
-    return
-
-  render_surface(bathymetry, frame, args.grid, args.plot)
-  print(f"Wrote {args.plot}")
+  if not args.no_plot:
+    render_surface(bathymetry, frame, args.grid, args.plot)
+    print(f"Wrote {args.plot}")
 
 
 def render_surface(bathymetry, frame, resolution: int, path: Path) -> None:
@@ -875,26 +454,16 @@ def render_surface(bathymetry, frame, resolution: int, path: Path) -> None:
     np.linspace(frame["y"].min(), frame["y"].max(), resolution),
   )
   elevation = bathymetry.predict(np.column_stack([xx.ravel(), yy.ravel()]))
-
   figure = plt.figure(figsize=(14, 10))
   axes = figure.add_subplot(111, projection="3d")
   surface = axes.plot_surface(
-    xx,
-    yy,
-    elevation.reshape(xx.shape),
-    cmap="viridis",
-    linewidth=0,
-    antialiased=True,
+    xx, yy, elevation.reshape(xx.shape), cmap="viridis", linewidth=0
   )
   figure.colorbar(surface, shrink=0.6, aspect=15, label="Seabed z (m)")
-
   axes.set_xlabel("X (m)")
   axes.set_ylabel("Y (m)")
   axes.set_zlabel("Seabed z (m)")
   axes.set_title("Gaussian process bathymetry surface")
-  # The map now stores upward elevation rather than downward depth, so the axis
-  # is no longer inverted -- doing both would flip the seabed twice.
-
   figure.tight_layout()
   figure.savefig(path, dpi=300, bbox_inches="tight")
   plt.close(figure)

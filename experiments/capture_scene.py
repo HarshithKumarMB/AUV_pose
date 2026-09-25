@@ -22,8 +22,6 @@ surface, so the render can be compared against the measurement rather than
 eyeballed.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 

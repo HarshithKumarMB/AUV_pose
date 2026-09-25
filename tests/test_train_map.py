@@ -1,111 +1,190 @@
-"""Decimation and the blocked split that guard the GP's training data."""
+"""The selections that decide what the map is fitted on and scored against."""
 
 import numpy as np
 import pytest
 
 from experiments.train_map import (
-  aggregate_covariance,
+  Soundings,
   blocked_split,
   calibration,
-  cell_groups,
   decimate,
-  line_groups,
+  last_tenth,
+  ping_split,
   score,
 )
 
 
-def test_decimate_collapses_a_cell_to_one_point():
-  X = np.array([[0.0, 0.0], [0.05, 0.05], [0.06, 0.0]])
-  y = np.array([-70.0, -70.2, -69.8])
-
-  reduced_x, reduced_y = decimate(X, y, cell=0.25)
-  assert len(reduced_x) == 1
-  assert reduced_y[0] == pytest.approx(-70.0)
-
-
-def test_decimate_keeps_separate_cells_separate():
-  X = np.array([[0.0, 0.0], [5.0, 5.0]])
-  y = np.array([-70.0, -65.0])
-
-  reduced_x, reduced_y = decimate(X, y, cell=0.25)
-  assert len(reduced_x) == 2
-  assert sorted(reduced_y) == pytest.approx([-70.0, -65.0])
+def survey(n=500, seed=0, pings=50):
+  """Soundings with every optional column, truth a known function of X."""
+  rng = np.random.default_rng(seed)
+  X = rng.uniform(-10.0, 10.0, size=(n, 2))
+  y = rng.normal(-70.0, 1.0, size=n)
+  ping = np.sort(rng.integers(0, pings, size=n))
+  truth = np.column_stack([X + 0.5, y - 1.0])
+  return Soundings(X, y, ping, truth)
 
 
-def test_decimate_rejects_a_minority_of_bad_beams():
-  """Why median and not mean.
-
-  A strongest-return picker occasionally lands on the wrong feature, and those
-  errors are one-sided. A mean would drag the cell 2.5 m toward the outlier;
-  the median ignores it.
-  """
-  X = np.zeros((5, 2))
-  y = np.array([-70.0, -70.1, -69.9, -70.0, -60.0])
-
-  _, reduced_y = decimate(X, y, cell=0.25)
-  assert reduced_y[0] == pytest.approx(-70.0)
-  assert np.mean(y) == pytest.approx(-68.0)
+# -- keeping the columns together -------------------------------------------
 
 
-def test_decimate_places_the_point_at_the_cell_median():
-  X = np.array([[0.10, 0.20], [0.12, 0.22], [0.14, 0.24]])
-  y = np.array([-70.0, -70.0, -70.0])
+def test_a_selection_keeps_every_column_in_step():
+  data = survey()
+  mask = data.X[:, 0] > 0
+  kept = data.where(mask)
 
-  reduced_x, _ = decimate(X, y, cell=1.0)
-  assert reduced_x[0] == pytest.approx([0.12, 0.22])
-
-
-def test_decimate_preserves_dtype():
-  """The GP is fitted in single precision; a silent upcast wastes memory."""
-  X = np.zeros((3, 2), dtype=np.float32)
-  y = np.zeros(3, dtype=np.float32)
-
-  reduced_x, reduced_y = decimate(X, y, cell=0.25)
-  assert reduced_x.dtype == np.float32
-  assert reduced_y.dtype == np.float32
+  assert kept.ping is not None and kept.truth is not None
+  assert len(kept.X) == len(kept.y) == len(kept.ping) == len(kept.truth)
+  np.testing.assert_array_equal(kept.truth[:, :2], kept.X + 0.5)
+  np.testing.assert_array_equal(kept.truth[:, 2], kept.y - 1.0)
 
 
-def test_decimate_does_not_fold_across_zero():
-  """The survey box is negative in x and y, so this must floor, not truncate.
-
-  Truncation maps -0.1 and +0.1 to the same cell 0, silently averaging two
-  soundings 0.2 m apart across the origin.
-  """
-  X = np.array([[-0.1, 0.0], [0.1, 0.0]])
-  y = np.array([-70.0, -68.0])
-
-  reduced_x, reduced_y = decimate(X, y, cell=0.25)
-  assert len(reduced_x) == 2
-  assert sorted(reduced_y) == pytest.approx([-70.0, -68.0])
+def test_an_empty_selection_is_empty_not_an_error():
+  kept = survey().where(np.zeros(500, dtype=bool))
+  assert len(kept) == 0
+  assert kept.truth is not None and kept.truth.shape == (0, 3)
 
 
-def test_decimate_groups_within_a_negative_cell():
-  X = np.array([[-10.1, -5.1], [-10.15, -5.15], [-10.6, -5.1]])
-  y = np.array([-70.0, -70.0, -68.0])
+def test_joining_puts_the_other_soundings_after():
+  data = survey()
+  first, second = data.where(data.y < -70), data.where(data.y >= -70)
+  joined = first.then(second)
 
-  reduced_x, _ = decimate(X, y, cell=0.25)
-  assert len(reduced_x) == 2
+  assert len(joined) == len(data)
+  np.testing.assert_array_equal(joined.y[: len(first)], first.y)
+  np.testing.assert_array_equal(joined.y[len(first) :], second.y)
+
+
+def test_a_column_one_side_lacks_is_dropped_not_padded():
+  data = survey()
+  joined = Soundings(data.X, data.y).then(data)
+  assert joined.ping is None and joined.truth is None
+
+
+# -- decimation -------------------------------------------------------------
+
+
+def test_decimate_takes_the_median_per_cell():
+  """Median, not mean: a mean would drag the cell 2 m toward the bad beam."""
+  X = np.array([[0.10, 0.20], [0.12, 0.22], [0.14, 0.24], [0.0, 0.0]])
+  y = np.array([-70.0, -70.1, -60.0, -69.9])
+  reduced = decimate(Soundings(X, y), cell=1.0)
+
+  assert len(reduced) == 1
+  assert reduced.y[0] == pytest.approx(-69.95)
+  np.testing.assert_allclose(reduced.X[0], [0.11, 0.21])
+
+
+def test_decimate_floors_rather_than_truncates_across_zero():
+  """Truncation would put -0.1 and +0.1 in one cell and average them."""
+  X = np.array([[-0.1, 0.0], [0.1, 0.0], [-0.1, -0.1], [0.1, -0.1]])
+  y = np.array([-70.0, -68.0, -66.0, -64.0])
+  reduced = decimate(Soundings(X, y), cell=0.25)
+  assert sorted(reduced.y) == pytest.approx(sorted(y))
+
+
+def test_decimate_groups_every_column_by_the_same_cells():
+  """Each point's truth is its own cell's truth, not a neighbour's."""
+  data = survey(n=2000)
+  reduced = decimate(data, cell=2.0)
+
+  assert reduced.truth is not None
+  np.testing.assert_allclose(reduced.truth[:, :2], reduced.X + 0.5)
+  np.testing.assert_allclose(reduced.truth[:, 2], reduced.y - 1.0)
+
+
+def test_decimate_does_not_depend_on_the_input_order():
+  data = survey(n=2000)
+  shuffled = data.where(np.random.default_rng(1).permutation(len(data)))
+  a, b = decimate(data, 1.0), decimate(shuffled, 1.0)
+  np.testing.assert_array_equal(a.X, b.X)
+  np.testing.assert_array_equal(a.y, b.y)
+
+
+def test_decimate_leaves_one_point_per_occupied_cell():
+  data = survey(n=2000)
+  reduced = decimate(data, cell=1.0)
+  occupied = {tuple(c) for c in np.floor(data.X)}
+  assert len(reduced) == len(occupied)
+  assert {tuple(c) for c in np.floor(reduced.X)} == occupied
+
+
+def test_decimate_preserves_dtype_and_drops_the_ping():
+  """A cell median mixes pings, so no ping number describes it."""
+  data = survey()
+  single = Soundings(
+    data.X.astype(np.float32), data.y.astype(np.float32), data.ping
+  )
+  reduced = decimate(single, cell=0.5)
+  assert reduced.X.dtype == reduced.y.dtype == np.float32
+  assert reduced.ping is None
+
+
+def test_decimate_leaves_a_lone_sounding_untouched():
+  data = survey(n=1)
+  reduced = decimate(data, cell=0.25)
+  np.testing.assert_array_equal(reduced.X, data.X)
+  np.testing.assert_array_equal(reduced.y, data.y)
+
+
+# -- the holdouts -----------------------------------------------------------
+
+
+def test_a_ping_is_held_out_whole_or_not_at_all():
+  data = survey(n=5000, pings=200)
+  assert data.ping is not None
+  train, test = ping_split(data.ping, fraction=0.3, seed=0)
+
+  assert np.all(train ^ test)
+  assert not set(data.ping[train]) & set(data.ping[test])
+  assert len(set(data.ping[test])) == 60
+
+
+def test_the_ping_split_is_reproducible_and_seeded():
+  ping = survey(n=5000, pings=200).ping
+  assert ping is not None
+  a, _ = ping_split(ping, 0.3, seed=0)
+  b, _ = ping_split(ping, 0.3, seed=0)
+  c, _ = ping_split(ping, 0.3, seed=1)
+  np.testing.assert_array_equal(a, b)
+  assert np.any(a != c)
+
+
+def test_ping_numbers_need_not_be_contiguous():
+  ping = np.array([7, 7, 1000, 1000, 1000, -3])
+  train, test = ping_split(ping, fraction=1 / 3, seed=0)
+  assert len(set(ping[test])) == 1
+  assert not set(ping[train]) & set(ping[test])
+
+
+@pytest.mark.parametrize("fraction", [0.0, 1.0])
+def test_the_ping_split_extremes(fraction):
+  ping = np.arange(20) // 4
+  _, test = ping_split(ping, fraction, seed=0)
+  assert test.all() if fraction else not test.any()
+
+
+def test_a_held_out_cell_holds_no_training_sounding():
+  X = survey(n=5000).X
+  train, test = blocked_split(X, fraction=0.2, cell=2.0, seed=0)
+
+  assert np.all(train ^ test)
+  cells_train = {tuple(c) for c in np.floor(X[train] / 2.0)}
+  cells_test = {tuple(c) for c in np.floor(X[test] / 2.0)}
+  assert cells_train and cells_test
+  assert not cells_train & cells_test
 
 
 def test_decimation_finer_than_the_holdout_cell_keeps_the_split_shut():
-  """The constraint train_map enforces: cells must not straddle the boundary.
+  """The constraint train_map enforces before it decimates.
 
-  Decimating at a cell coarser than the holdout would merge a training and a
-  held-out sounding into one point, leaking the answer across the split.
+  Decimating coarser than the holdout would merge a training and a held-out
+  sounding into one point, leaking the answer across the split.
   """
-  rng = np.random.default_rng(0)
-  X = rng.uniform(-10.0, 10.0, size=(2000, 2))
-  y = rng.normal(-70.0, 1.0, size=2000)
-
-  reduced_x, _ = decimate(X, y, cell=0.25)
-  train, test = blocked_split(reduced_x, fraction=0.2, cell=1.0, seed=0)
-
-  assert train.sum() and test.sum()
-  # No decimated point may fall in a holdout cell and a training cell at once,
-  # which is guaranteed if every point sits in exactly one 1 m cell.
-  cells_train = {tuple(c) for c in np.floor(reduced_x[train] / 1.0)}
-  cells_test = {tuple(c) for c in np.floor(reduced_x[test] / 1.0)}
-  assert not (cells_train & cells_test)
+  reduced = decimate(survey(n=5000), cell=0.25)
+  train, test = blocked_split(reduced.X, fraction=0.2, cell=1.0, seed=0)
+  cells_train = {tuple(c) for c in np.floor(reduced.X[train])}
+  cells_test = {tuple(c) for c in np.floor(reduced.X[test])}
+  assert not cells_train & cells_test
 
 
 # -- scoring ----------------------------------------------------------------
@@ -125,127 +204,48 @@ class _Calibrated:
     return elevation, np.full(len(points), self.spread)
 
 
-def test_calibration_counts_what_lands_inside_the_interval():
-  points = np.zeros((1000, 2))
-  truth = np.random.default_rng(0).normal(size=1000)
-  test = np.ones(1000, dtype=bool)
-
-  # Spread matching the truth's own: about 95% should land inside 1.96 sigma.
-  honest = calibration(_Calibrated(0.0, 1.0), points, truth, test)
-  assert 0.93 < honest < 0.97, honest
-
-
-def test_calibration_exposes_an_overconfident_map():
-  """The failure the measure exists to catch.
-
-  A map that understates its spread scores well on rmse and badly here, which
-  is the combination that would make a filter trusting it too sure of itself.
-  """
-  points = np.zeros((1000, 2))
-  truth = np.random.default_rng(1).normal(size=1000)
-  test = np.ones(1000, dtype=bool)
-
-  assert calibration(_Calibrated(0.0, 0.25), points, truth, test) < 0.6
+@pytest.mark.parametrize(
+  ("spread", "low", "high"),
+  [(1.0, 0.93, 0.97), (0.25, 0.0, 0.6), (8.0, 0.99, 1.0)],
+  ids=["honest", "overconfident", "underconfident"],
+)
+def test_calibration_is_the_coverage_of_the_95_percent_interval(
+  spread, low, high
+):
+  truth = np.random.default_rng(0).normal(size=2000)
+  test = np.ones(2000, dtype=bool)
+  covered = calibration(
+    _Calibrated(0.0, spread), np.zeros((2000, 2)), truth, test
+  )
+  assert low <= covered <= high
 
 
-def test_calibration_exposes_an_underconfident_map():
-  points = np.zeros((500, 2))
-  truth = np.random.default_rng(2).normal(size=500)
-  test = np.ones(500, dtype=bool)
-
-  assert calibration(_Calibrated(0.0, 8.0), points, truth, test) > 0.99
+def test_calibration_counts_only_the_held_out_soundings():
+  y = np.array([0.0, 100.0, 0.0])
+  test = np.array([True, False, True])
+  assert calibration(_Calibrated(0.0, 1.0), np.zeros((3, 2)), y, test) == 1.0
 
 
 def test_score_returns_the_rmse_it_printed(capsys):
   """So a caller comparing two maps need not predict all over again."""
-  rng = np.random.default_rng(3)
-  points = rng.uniform(-10.0, 10.0, size=(200, 2))
-  truth = np.full(200, -60.0)
+  points = np.random.default_rng(3).uniform(-10.0, 10.0, size=(200, 2))
+  y = np.full(200, -60.0)
+  y[150:] += np.array([3.0, -3.0] * 25)
+  train = np.arange(200) < 150
 
-  train = np.zeros(200, dtype=bool)
-  train[:150] = True
-  test = ~train
+  returned = score(_Calibrated(-60.0, 1.0), points, y, train, ~train)
 
-  returned = score(_Calibrated(-60.0, 1.0), points, truth, train, test)
-
-  assert returned == pytest.approx(0.0, abs=1e-12)
+  assert returned == pytest.approx(3.0)
   assert "held out 50 soundings" in capsys.readouterr().out
 
 
-def test_cell_groups_line_up_with_decimate():
-  rng = np.random.default_rng(0)
-  X = rng.uniform(0, 3, size=(200, 2)).astype(np.float32)
-  y = rng.normal(size=200).astype(np.float32)
-
-  reduced_x, reduced_y = decimate(X, y, cell=1.0)
-  groups = cell_groups(X, cell=1.0)
-
-  assert len(groups) == len(reduced_x)
-  for group, point, depth in zip(groups, reduced_x, reduced_y):
-    np.testing.assert_allclose(point, np.median(X[group], axis=0))
-    assert depth == pytest.approx(np.median(y[group]))
+# -- convergence diagnostic ---------------------------------------------------
 
 
-def test_a_cell_is_placed_no_better_than_its_members():
-  """Beams of one ping share its error: the mean, not the mean over count."""
-  X = np.array([[0.1, 0.1], [0.2, 0.2], [0.3, 0.3]])
-  cov = np.stack([np.eye(2) * v for v in (1.0, 2.0, 3.0)])
-
-  aggregated = aggregate_covariance(cov, cell_groups(X, cell=1.0))
-
-  np.testing.assert_allclose(aggregated, [np.eye(2) * 2.0])
+def test_last_tenth_spans_a_tenth_of_the_steps():
+  assert last_tenth(list(map(float, range(101)))) == 10.0
 
 
-def test_the_aggregate_stays_positive_semi_definite():
-  """An element-wise median of PSD matrices need not be PSD; a mean is."""
-  rng = np.random.default_rng(1)
-  roots = rng.normal(size=(5, 2, 2))
-  cov = roots @ roots.transpose(0, 2, 1)
-  X = np.full((5, 2), 0.5)
-
-  aggregated = aggregate_covariance(cov, cell_groups(X, cell=1.0))
-
-  assert np.linalg.eigvalsh(aggregated[0]).min() >= 0.0
-
-
-def test_calibration_allows_for_a_held_out_soundings_own_misplacement():
-  """A navigated holdout is misplaced too; its interval must say so."""
-  rng = np.random.default_rng(3)
-  points = rng.uniform(0, 10, size=(4000, 2))
-  truth = rng.normal(scale=np.sqrt(1.0 + 3.0), size=4000)
-  test = np.ones(4000, dtype=bool)
-  map_only = _Calibrated(0.0, 1.0)
-
-  assert calibration(map_only, points, truth, test) < 0.8
-  honest = calibration(
-    map_only, points, truth, test, input_variance=np.full(4000, 3.0)
-  )
-  assert honest == pytest.approx(0.95, abs=0.015)
-
-
-def test_score_survives_a_survey_placed_from_truth(capsys):
-  """Zero input noise everywhere has no thirds to split into."""
-  rng = np.random.default_rng(4)
-  X = rng.uniform(0, 10, size=(200, 2))
-  y = rng.normal(size=200)
-  train = np.arange(200) < 150
-  score(_Calibrated(0.0, 1.0), X, y, train, ~train, input_variance=np.zeros(50))
-  assert "by input noise" not in capsys.readouterr().out
-
-
-def test_line_groups_split_a_cell_by_survey_line():
-  X = np.array([[0.1, 0.1], [0.2, 0.2], [0.3, 0.3], [0.4, 0.4], [5.0, 5.0]])
-  ping = np.array([10, 11, 400, 401, 12])
-  groups = line_groups(X, ping, cell=1.0)
-  assert sorted(map(sorted, map(list, groups))) == [[0, 1], [2, 3], [4]]
-
-
-def test_line_groups_without_a_second_line_match_cell_groups():
-  rng = np.random.default_rng(5)
-  X = rng.uniform(0, 5, size=(300, 2))
-  ping = np.arange(300) // 10
-  by_line = sorted(
-    tuple(sorted(g)) for g in line_groups(X, ping, 1.0, gap=10**6)
-  )
-  by_cell = sorted(tuple(sorted(g)) for g in cell_groups(X, 1.0))
-  assert by_line == by_cell
+@pytest.mark.parametrize("trace", [[5.0], [5.0, 7.0], [1.0] * 9])
+def test_last_tenth_of_a_short_run_is_at_most_one_step(trace):
+  assert last_tenth(trace) == trace[-1] - trace[max(0, len(trace) - 2)]

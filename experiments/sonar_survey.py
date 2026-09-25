@@ -8,8 +8,6 @@ With ``--dead-reckon`` it also integrates the IMU and reports drift against grou
 truth.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
