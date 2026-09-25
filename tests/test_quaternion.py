@@ -6,7 +6,7 @@ import pytest
 from auv_pose.estimation.quaternion import (
   quat_angle,
   quat_conjugate,
-  quat_from_gyro,
+  quat_exp,
   quat_multiply,
   quat_normalize,
   quat_to_rotmat,
@@ -82,33 +82,33 @@ def test_composition_matches_matrix_product(q):
   )
 
 
-def test_gyro_zero_rate_is_identity():
-  np.testing.assert_array_equal(quat_from_gyro(np.zeros(3), 0.1), IDENTITY)
+def test_exp_of_zero_is_identity():
+  np.testing.assert_array_equal(quat_exp(np.zeros(3) * 0.1), IDENTITY)
 
 
-def test_gyro_below_threshold_is_the_small_rotation_not_the_identity():
+def test_exp_of_a_tiny_vector_is_the_small_rotation_not_the_identity():
   """A tiny rate gives the exact tiny rotation, continuous in the rate."""
-  q = quat_from_gyro([1e-12, 0.0, 0.0], 1e-3)
+  q = quat_exp(np.asarray([1e-12, 0.0, 0.0]) * 1e-3)
 
   np.testing.assert_allclose(q, IDENTITY, atol=1e-15)
   assert q[1] == 5e-16
 
 
-def test_gyro_quarter_turn_about_z():
-  q = quat_from_gyro([0.0, 0.0, np.pi / 2], 1.0)
+def test_exp_quarter_turn_about_z():
+  q = quat_exp(np.asarray([0.0, 0.0, np.pi / 2]) * 1.0)
   R = quat_to_rotmat(q)
   np.testing.assert_allclose(
     R @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0], atol=1e-9
   )
 
 
-def test_gyro_integrates_over_many_small_steps():
+def test_exp_integrates_over_many_small_steps():
   """A full turn in 1000 steps equals a full turn in one."""
   omega = np.array([0.0, 0.0, 2 * np.pi])
   dt = 1.0 / 1000
   q = IDENTITY
   for _ in range(1000):
-    q = quat_normalize(quat_multiply(q, quat_from_gyro(omega, dt)))
+    q = quat_normalize(quat_multiply(q, quat_exp(np.asarray(omega) * dt)))
   np.testing.assert_allclose(quat_to_rotmat(q), np.eye(3), atol=1e-9)
 
 
@@ -135,12 +135,12 @@ def test_angle_to_itself_is_zero():
 
 
 def test_angle_of_a_quarter_turn():
-  q = quat_from_gyro([0.0, 0.0, 1.0], np.pi / 2)
+  q = quat_exp(np.asarray([0.0, 0.0, 1.0]) * np.pi / 2)
   assert quat_angle(IDENTITY, q) == pytest.approx(np.pi / 2)
 
 
 def test_angle_of_a_half_turn():
-  q = quat_from_gyro([0.0, 1.0, 0.0], np.pi)
+  q = quat_exp(np.asarray([0.0, 1.0, 0.0]) * np.pi)
   assert quat_angle(IDENTITY, q) == pytest.approx(np.pi)
 
 
@@ -172,7 +172,7 @@ def test_angle_survives_rounding_past_one():
 
 def test_angle_grows_with_the_rotation():
   angles = [
-    quat_angle(IDENTITY, quat_from_gyro([0.0, 0.0, 1.0], t))
+    quat_angle(IDENTITY, quat_exp(np.asarray([0.0, 0.0, 1.0]) * t))
     for t in (0.1, 0.5, 1.0, 2.0)
   ]
   assert angles == sorted(angles)

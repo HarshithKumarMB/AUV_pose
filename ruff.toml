@@ -3,6 +3,3 @@ line-length = 80
 
 [format]
 quote-style = "double"
-
-[lint.pydocstyle]
-convention = "google"

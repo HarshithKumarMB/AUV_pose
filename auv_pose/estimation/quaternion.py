@@ -74,11 +74,6 @@ def quat_log(q: ArrayLike) -> NDArray[np.float64]:
   return vec * (2.0 * np.arctan2(norm, q[0]) / norm)
 
 
-def quat_from_gyro(omega: ArrayLike, dt: float) -> NDArray[np.float64]:
-  """Rotation increment from body rate ``omega`` (rad/s) held over ``dt``."""
-  return quat_exp(np.asarray(omega, dtype=float) * dt)
-
-
 def so3_right_jacobian(rotvec: ArrayLike) -> NDArray[np.float64]:
   """Right Jacobian: ``exp(phi + dphi) ~= exp(phi) exp(Jr(phi) dphi)``.
 

@@ -14,7 +14,6 @@ from auv_pose.estimation.quaternion import (
   quat_angle,
   quat_conjugate,
   quat_exp,
-  quat_from_gyro,
   quat_log,
   quat_multiply,
   quat_normalize,
@@ -71,16 +70,6 @@ def test_log_folds_a_rotation_past_half_a_turn():
 
   assert np.linalg.norm(folded) <= np.pi + 1e-12
   assert quat_angle(quat_exp(folded), quat_exp(rotvec)) < 1e-12
-
-
-def test_exp_agrees_with_the_gyro_increment_already_in_use():
-  rng = np.random.default_rng(1)
-  for _ in range(20):
-    omega = rng.normal(size=3)
-    dt = 0.03
-    np.testing.assert_allclose(
-      quat_from_gyro(omega, dt), quat_exp(omega * dt), atol=1e-15
-    )
 
 
 def test_exp_matches_rodrigues():

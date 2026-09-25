@@ -8,29 +8,11 @@
     let
       system = "x86_64-linux";
 
-      # CUDA, for fitting the bathymetry GP. nixpkgs' own `torch` is built
-      # without it, so `torch.cuda.is_available()` is False however good the
-      # card is; `torch-bin` is upstream's wheel and ships the CUDA runtime.
-      #
-      # That wheel is unfree -- `unfreeRedistributable` plus NVIDIA's `issl`,
-      # the CUDA SDK licence -- so it needs `allowUnfree`, which is a licence
-      # decision and not merely a build flag. Setting it here scopes the
-      # decision to this flake rather than to the machine.
-      #
-      # Only `torch` is overridden, not the whole tree: `cudaSupport = true`
-      # would rebuild torch and its dependents from source, which is hours of
-      # compilation for the same result.
-      #
-      # CUDA is pinned forward because this nixpkgs defaults to 12.9.7 while the
-      # wheel wants cuda-bindings >= 13.0.3, and nixpkgs refuses to evaluate it
-      # otherwise. That refusal is a real check rather than noise, so it is
-      # answered by supplying a new enough CUDA rather than by setting
-      # `problems.handlers` to ignore it.
-      #
-      # `cuda-bindings` is a Python package in its own right and is what the
-      # version check actually reads, so overriding `torch-bin`'s `cudaPackages`
-      # alone changes nothing -- it has to be overridden in the set, from which
-      # `torch-bin` then picks it up.
+      # CUDA torch for fitting the map: upstream's `torch-bin` wheel, which is
+      # unfree (hence `allowUnfree`, scoped to this flake). `cudaSupport = true`
+      # would instead rebuild torch from source for hours. The wheel needs
+      # cuda-bindings >= 13, so CUDA 13 is supplied, overriding cuda-bindings
+      # itself because that is what the version check reads.
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
@@ -41,11 +23,8 @@
                 cuda-bindings = pyPrev.cuda-bindings.override {
                   cudaPackages = final.cudaPackages_13;
                 };
-                # The wheel's metadata pins `setuptools<82` and nixpkgs carries
-                # 83, which fails a runtime-dependency check rather than
-                # anything that matters: torch uses setuptools only for
-                # `torch.utils.cpp_extension`, which nothing here calls, and it
-                # imports and runs fine against 83.
+                # The wheel pins setuptools<82; torch uses it only for
+                # cpp_extension, unused here, and runs fine on 83.
                 torch =
                   (pyFinal.torch-bin.override {
                     cudaPackages = final.cudaPackages_13;
@@ -183,13 +162,9 @@
         sim = simFhs;
       };
 
-      # Mirrors the dev shell so the two cannot disagree: experiments/ for the
-      # tests that import it, and vendor/ on PYTHONPATH because navigate.py
-      # imports holoocean at module scope.
-      #
-      # Importing holoocean does not start the simulator -- only holoocean.make
-      # does -- and testpaths keeps collection to tests/, so nothing here can
-      # launch a world.
+      # Mirrors the dev shell: experiments/ for the tests that import it, and
+      # the vendored client because survey.py imports holoocean. Importing it
+      # launches nothing; only holoocean.make does.
       checks.${system}.pytest = pkgs.runCommand "auv-pose-pytest" { } ''
         cp -r ${./.}/{auv_pose,experiments,tests,vendor,pyproject.toml} .
         chmod -R +w .

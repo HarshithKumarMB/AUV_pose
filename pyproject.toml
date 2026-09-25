@@ -25,8 +25,7 @@ test = ["pytest"]
 include = ["auv_pose*"]
 
 [tool.pytest.ini_options]
-# Only tests/. experiments/ contains scripts that call holoocean.make() at import
-# time -- collecting them would try to launch the Unreal simulator.
+# Only tests/: experiments/ holds scripts, not tests.
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = [
