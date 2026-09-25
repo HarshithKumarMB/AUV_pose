@@ -95,7 +95,7 @@ def build_structure(
   :param first: Passed to :func:`~auv_pose.mapping.ordering.maximin_order`.
   :param near: How many of the ``m`` are nearest neighbours; see
       :func:`~auv_pose.mapping.ordering.ordered_neighbours`. Defaults to all
-      nearest, which is right for prediction and wrong for fitting.
+      nearest.
   :return: The structure, with ``points`` permuted into maximin order.
   """
   points = np.asarray(points, dtype=float)
@@ -920,8 +920,8 @@ def fit_vecchia(
   :param n0: Dense head-block size; see :func:`build_structure`.
   :param learning_rate: Adam step size, on the log parameters.
   :param method: ``"reml"`` or ``"ml"``; see :func:`vecchia_reml`.
-  :param near: How many of the ``m`` are nearest neighbours; ``None`` is
-      all. On a dense survey all-nearest sets misfit the lengthscale.
+  :param near: How many of the ``m`` are nearest neighbours, the rest spread
+      across the ordering; ``None`` is all nearest.
   :param mean: Mean basis; see :meth:`MeanBasis.build`.
   :return: The fitted map. Deterministic for a given survey and settings.
   """
