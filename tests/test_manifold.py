@@ -1,10 +1,4 @@
-"""The state manifold and its chart.
-
-The round-trip tests carry most of the weight: boxplus and boxminus are each
-other's inverse by construction, and every moment the estimators compute is a
-weighted sum of boxminus results mapped back through boxplus. A sign or a
-transpose wrong in either one is silent in a single step and fatal over a run.
-"""
+"""The state manifold, its ``+``/``-`` chart, and the SO(3) maps under it."""
 
 import numpy as np
 import pytest
@@ -66,22 +60,20 @@ def test_exp_log_round_trip_at_the_awkward_angles():
 
 
 def test_log_of_identity_is_exactly_zero():
-  """Not NaN. The quotient it comes from is 0/0 without the series branch."""
+  """Not NaN."""
   assert np.all(quat_log(np.array([1.0, 0.0, 0.0, 0.0])) == 0.0)
 
 
 def test_log_folds_a_rotation_past_half_a_turn():
-  """``q`` and ``-q`` are one rotation, so the result stays within pi."""
+  """The result has norm at most pi and names the same orientation."""
   rotvec = np.array([0.0, 0.0, 1.5 * np.pi])
   folded = quat_log(quat_exp(rotvec))
 
   assert np.linalg.norm(folded) <= np.pi + 1e-12
-  # Same orientation, expressed the short way round.
   assert quat_angle(quat_exp(folded), quat_exp(rotvec)) < 1e-12
 
 
 def test_exp_agrees_with_the_gyro_increment_already_in_use():
-  """``quat_from_gyro`` now delegates; this pins that it still means the same."""
   rng = np.random.default_rng(1)
   for _ in range(20):
     omega = rng.normal(size=3)
@@ -111,17 +103,7 @@ def test_right_jacobian_is_the_identity_at_zero():
 
 
 def test_right_jacobian_matches_barfoots_closed_form():
-  """Against Barfoot, *State Estimation for Robotics* (2024), eq. 8.82a.
-
-  The implementation uses the series form built from ``skew(phi)``; Barfoot
-  writes the same matrix in axis-angle terms. The two are equal after
-  substituting ``W = theta a^`` and ``W^2 = theta^2 (a a^T - I)``, so agreeing
-  numerically checks the implementation against an independently written
-  formula rather than against a rearrangement of itself.
-
-  Note Barfoot's convention is the *left* Jacobian, ``J = J_l``, with
-  ``J_l(-phi) = J_r(phi)`` (eq. 8.85). This is the right one.
-  """
+  """Against Barfoot eq. 8.82a, via ``J_l(-phi) = J_r(phi)``."""
   rng = np.random.default_rng(14)
   for _ in range(20):
     axis = rng.normal(size=3)
@@ -141,35 +123,19 @@ def test_right_jacobian_matches_barfoots_closed_form():
 
 
 def test_right_jacobian_is_continuous_across_its_series_threshold():
-  """No step where the implementation switches to the series, at 1e-2.
-
-  Regression: the threshold was first placed at 1e-6, where the closed form
-  has already lost most of its precision to cancellation in ``1 - cos(theta)``
-  and ``theta - sin(theta)``. That put a relative step of ~1e-4 into the
-  Jacobian -- and so into the attitude block of every propagated covariance --
-  at an angle small enough to occur on every quiet step of a run.
-  """
+  """No step where the implementation switches to the series, at 1e-2."""
   axis = np.array([0.6, -0.8, 0.0])
   delta = 1e-12
 
   below = so3_right_jacobian(axis * (1e-2 - delta))
   above = so3_right_jacobian(axis * (1e-2 + delta))
 
-  # What is left is the closed form's own rounding at this angle -- 4e-10
-  # relative, against the ~1e-4 the old threshold produced. Removing it
-  # entirely would mean using the series everywhere, which trades a negligible
-  # step for a growing truncation error.
+  # The residual is the closed form's own rounding at this angle.
   np.testing.assert_allclose(below, above, rtol=1e-9, atol=1e-17)
 
 
 def test_right_jacobian_is_accurate_where_cancellation_bites():
-  """The series branch must beat the closed form, not merely differ from it.
-
-  At these angles ``(1 - cos t) / t^2`` computed directly is wrong in the
-  fourth significant digit. The exact coefficients are known from the series,
-  so this checks the implementation against them rather than against the
-  expression it is replacing.
-  """
+  """Small angles match the exact series, where the closed form would not."""
   axis = np.array([0.0, 0.0, 1.0])
   for theta in (1e-6, 1e-5, 1e-4, 1e-3):
     coeff_w = 0.5 - theta**2 / 24.0 + theta**4 / 720.0
@@ -183,7 +149,7 @@ def test_right_jacobian_is_accurate_where_cancellation_bites():
 
 
 def test_right_jacobian_matches_finite_differences():
-  """``exp(phi + d) ~= exp(phi) exp(Jr(phi) d)`` is the defining property."""
+  """``exp(phi + d) ~= exp(phi) exp(Jr(phi) d)``."""
   phi = np.array([0.3, -0.2, 0.5])
   jacobian = so3_right_jacobian(phi)
   eps = 1e-7
@@ -197,7 +163,7 @@ def test_right_jacobian_matches_finite_differences():
     np.testing.assert_allclose(measured / eps, jacobian[:, axis], atol=1e-6)
 
 
-# -- boxplus and boxminus ---------------------------------------------------
+# -- state + xi and state - other ------------------------------------------
 
 
 def test_boxminus_inverts_boxplus():
@@ -220,13 +186,7 @@ def test_boxplus_inverts_boxminus():
 
 
 def test_boxminus_of_a_state_with_itself_vanishes():
-  """The vector blocks cancel exactly; the attitude to rounding.
-
-  ``conj(q) * q`` is the identity only to floating point, so the rotation block
-  lands at ~1e-17 rather than at zero. That is why the prediction step reuses
-  the sigma-point offsets it already has instead of recovering them with a
-  second ``boxminus``.
-  """
+  """The vector blocks cancel exactly; the attitude only to rounding."""
   state = random_state(np.random.default_rng(6))
   delta = state - state
 
@@ -236,28 +196,21 @@ def test_boxminus_of_a_state_with_itself_vanishes():
 
 
 def test_boxplus_perturbs_the_rotation_on_the_right():
-  """The increment is a body-frame rotation, not a world-frame one.
-
-  Getting this backwards leaves every round-trip test above passing and the
-  attitude block of every cross-covariance transposed.
-  """
+  """The rotation increment is applied in the body frame, not the world."""
   # Yaw 90 degrees: body +x points along world +y.
   state = NavState.at_rest(attitude=quat_exp(np.array([0.0, 0.0, np.pi / 2])))
   # A further quarter turn about *body* +x.
   turned = state + np.concatenate([np.zeros(3), [np.pi / 2, 0, 0], np.zeros(9)])
 
-  # Body +x is unmoved by a rotation about body +x, so it still points at world +y.
+  # A body-x turn leaves body +x on world +y; a world-x turn would not.
   np.testing.assert_allclose(
     turned.rotation @ np.array([1.0, 0.0, 0.0]),
     np.array([0.0, 1.0, 0.0]),
     atol=1e-12,
   )
-  # Had the increment been applied in the world frame, it would have been a
-  # turn about world +x, which moves body +x off world +y.
 
 
 def test_an_increment_on_the_left_is_refused_not_broadcast():
-  """NumPy would otherwise add the state to each element of the increment."""
   with pytest.raises(TypeError):
     _ = np.zeros(DOF) + NavState.at_rest()  # pyright: ignore[reportOperatorIssue]
 
@@ -311,7 +264,6 @@ def test_mean_of_one_state_is_that_state():
 
 
 def test_mean_recovers_the_centre_of_a_symmetric_cloud():
-  """The truth is a fixed point: symmetric offsets must cancel exactly."""
   rng = np.random.default_rng(10)
   centre = random_state(rng)
 
@@ -343,12 +295,7 @@ def test_mean_weights_are_respected():
 
 
 def test_mean_gets_the_vector_blocks_right_in_one_pass():
-  """Only the attitude iterates, which is why this mean is cheap.
-
-  A single weighted pass, from a deliberately poor seed, already lands the
-  twelve vector components on the converged answer -- their update is linear.
-  The attitude, from that same seed, does not.
-  """
+  """One pass lands the vector blocks exactly; the attitude still iterates."""
   rng = np.random.default_rng(11)
   centre = random_state(rng)
   states = [(centre + xi) for xi in rng.normal(size=(6, DOF)) * 0.05]
@@ -371,7 +318,6 @@ def test_mean_gets_the_vector_blocks_right_in_one_pass():
 
 
 def test_mean_raises_rather_than_returning_an_unconverged_attitude():
-  """A cloud wider than the chart is a broken belief, not a number to return."""
   spread = [
     NavState.at_rest(attitude=quat_exp(v))
     for v in [

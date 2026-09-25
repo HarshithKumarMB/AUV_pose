@@ -1,25 +1,7 @@
-"""The navigation state and the chart the estimators work in.
+"""The navigation state on ``(R^3)^4 x SO(3)`` and its tangent-space chart.
 
-The state is a position, an orientation, a velocity and the two IMU biases, so
-it lives on ``(R^3)^4 x SO(3)`` rather than in a vector space. A Gaussian belief
-over it is a mean *on* that manifold plus an error state in the tangent space at
-the mean -- ``chi = m [+] xi``, ``xi ~ N(0, P)`` -- following Hertzberg et al.,
-who introduce exactly this encapsulation and whose worked example is this state.
-
-``state + xi`` and ``state - other`` are the encapsulation. On velocity and the
-biases they are ordinary addition and subtraction; on the pose they are
-
-    x [+] xi  =  (p + xi_p,  R exp(xi_R))
-    x [-] x'  =  (p - p',    log(R'^T R))
-
-which is a **right** perturbation -- the rotation increment is applied in the
-frame the orientation already describes. That matches
-:func:`~auv_pose.estimation.quaternion.quat_multiply`, whose Hamilton product
-composes left-to-right in the body frame, so ``+`` is one multiply with no
-transposes to get backwards.
-
-Frames and signs are as :mod:`auv_pose.estimation` documents them: a z-up world,
-attitude as a scalar-first quaternion rotating body into world.
+The rotation chart is a right perturbation: ``x + xi = (p + xi_p, R exp(xi_R))``
+and ``x - x' = (p - p', log(R'^T R))``.
 """
 
 from collections.abc import Sequence
@@ -40,16 +22,14 @@ from auv_pose.estimation.quaternion import (
 )
 from auv_pose.estimation.typing import NumpyArray
 
-#: Where each component lives in a tangent vector. The order is the paper's,
-#: ``xi = (xi_p, xi_R, xi_v, xi_g, xi_a)``, and every covariance in this package
-#: is blocked this way.
+#: Tangent-vector layout, ``xi = (xi_p, xi_R, xi_v, xi_g, xi_a)``; every
+#: covariance in this package is blocked this way.
 POSITION = slice(0, 3)
 ROTATION = slice(3, 6)
 VELOCITY = slice(6, 9)
 GYRO_BIAS = slice(9, 12)
 ACCEL_BIAS = slice(12, 15)
 
-#: Degrees of freedom of the state, and so the side of every covariance here.
 DOF = 15
 
 _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
@@ -59,12 +39,11 @@ _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
 class NavState:
   """A point on the state manifold.
 
-  :param position: World position, metres, shape ``(3,)``. The world is z-up,
-      so a vehicle 65 m down has ``position[2] == -65``.
+  :param position: World position, metres, z up (depth is negative).
   :param attitude: Scalar-first unit quaternion rotating body into world.
-  :param velocity: World velocity, m/s, shape ``(3,)``.
-  :param gyro_bias: Gyroscope bias in the body frame, rad/s, shape ``(3,)``.
-  :param accel_bias: Accelerometer bias in the body frame, m/s^2, shape ``(3,)``.
+  :param velocity: World velocity, m/s.
+  :param gyro_bias: Body-frame gyroscope bias, rad/s.
+  :param accel_bias: Body-frame accelerometer bias, m/s^2.
 
   ``state + xi`` applies a ``(15,)`` tangent increment and ``state - other``
   is the increment taking ``other`` to ``state``.
@@ -131,12 +110,8 @@ class NavState:
 class ManifoldGaussian:
   """A Gaussian belief over :class:`NavState`.
 
-  The covariance lives in the tangent space **at the mean**, so it is only
-  meaningful alongside the mean it was built at.
-
-  :param mean: Belief mean.
-  :param cov: Error-state covariance, shape ``(15, 15)``, blocked by the
-      module-level slices.
+  :param cov: ``(15, 15)`` covariance in the tangent space at ``mean``; it is
+      meaningless with any other mean.
   """
 
   mean: NavState
@@ -144,19 +119,10 @@ class ManifoldGaussian:
 
 
 def covariance_transport(xi: ArrayLike) -> NumpyArray:
-  """Jacobian carrying a covariance along a ``state + xi`` correction.
+  """Jacobian moving a covariance from the chart at ``m`` to ``m + xi``.
 
-  A covariance computed in the tangent space at ``m`` is not the covariance in
-  the tangent space at ``m [+] xi``; the two charts differ by the right
-  Jacobian of the exponential map. Conjugating by this matrix moves it across,
-  which matters once a correction is degrees rather than milliradians -- the
-  first few updates of a run usually are.
-
-  Only the rotation block is affected. The four vector blocks are flat, so
-  their charts coincide everywhere.
-
-  :param xi: The increment the state was moved by, shape ``(15,)``.
-  :return: ``(15, 15)`` block-diagonal Jacobian.
+  Only the rotation block differs from identity (the SO(3) right Jacobian);
+  it matters once corrections reach degrees.
   """
   xi = np.asarray(xi, dtype=float)
   jacobian = np.eye(DOF)
@@ -171,29 +137,12 @@ def manifold_mean(
   max_iter: int = 10,
   tol: float = 1e-12,
 ) -> NavState:
-  """Weighted intrinsic mean of points on the manifold.
+  """Weighted intrinsic mean: where weighted tangent vectors sum to zero.
 
-  The mean of a set of orientations is not the mean of their coordinates, so
-  this iterates to the point whose weighted tangent vectors sum to zero --
-  Hauberg et al.'s unscented mean, and the ``E[chi]`` the prediction step needs.
-
-  :param states: Points to average.
-  :param weights: Weight per point; should sum to one.
-  :param initial: Where to start. Defaults to the first state, which for a
-      sigma-point set is the propagated previous mean and so is already within
-      the nonlinearity of the answer.
-  :param max_iter: Cap on iterations.
-  :param tol: Stop once the largest component of the increment is below this.
-  :return: The weighted mean.
-  :raises ValueError: If the iteration has not converged in the rotation block
-      by ``max_iter``, which means the cloud is wider than the chart can
-      describe.
-
-  Note:
-      The twelve vector components are exact after one iteration, since their
-      update is linear; only the attitude actually iterates, and it typically
-      takes two to four passes. That is why an iterative mean costs almost
-      nothing here.
+  :param weights: Weight per state; should sum to one.
+  :param initial: Starting point; defaults to ``states[0]``.
+  :param tol: Stop once the largest increment component is below this.
+  :raises ValueError: If the attitude has not converged by ``max_iter``.
   """
   weights = np.asarray(weights, dtype=float)
   if len(states) != len(weights):

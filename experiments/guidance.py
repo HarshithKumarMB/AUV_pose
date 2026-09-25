@@ -1,9 +1,4 @@
-"""Waypoint following for the BlueROV2.
-
-Vehicle-specific control, shared by the drivers. Not in ``auv_pose`` because the
-thruster mixing is a fact about this hull and HoloOcean's control scheme 0, not an
-algorithm.
-"""
+"""Waypoint following for the BlueROV2 under HoloOcean's control scheme 0."""
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -12,32 +7,11 @@ THRUST_LIMIT = 20.0
 
 
 def thruster_command(error: ArrayLike, yaw: float = 0.0) -> NDArray[np.float64]:
-  """Proportional thruster command driving ``error`` to zero, and turning.
+  """Proportional eight-thruster command driving ``error`` to zero, and turning.
 
-  Control scheme 0 takes eight thruster values: four vertical, then four in the
-  horizontal plane mixed for the BlueROV2's 45-degree vectored layout.
-
-  The mix is torque-free: against the documented thruster geometry, pure surge,
-  sway and heave each produce zero net moment. **Saturating it element-wise is
-  not.** Clipping ``e_x + e_y`` and ``e_x - e_y`` by different amounts leaves
-  the two angled front thrusters unbalanced, and the residual is a yaw moment
-  that appears exactly when the position error is largest. Nothing in the loop
-  observes yaw, so it integrates freely -- measured against the simulator, the
-  vehicle began rotating within sixteen samples of the first horizontal clip and
-  went on to tumble through 135 degrees.
-
-  So scale rather than clip: divide the whole vector down by a single factor
-  when it exceeds the limit, which caps the thrust while preserving both the
-  commanded direction and the torque balance.
-
-  **Yaw is thrusters 6 and 7 driven against each other.** Measured in the
-  simulator rather than taken from the vendored geometry, whose comment would have this vehicle's forward mix push
-  it backwards: fired alone from rest, each horizontal thruster turns the
-  vehicle about 28 degrees in half a second, and the pattern that turns it
-  with no net force solves to ``[0.045, -0.043, -1, 1]`` over thrusters 4-7.
-  ``[0, 0, -1, 1]`` turned it 59 degrees anticlockwise in half a second with
-  3 cm of stray translation. The same single scale factor caps it, so a turn
-  never leaves an unbalanced moment behind either.
+  Saturate by scaling the whole vector, never by clipping element-wise:
+  clipping unbalances the angled thrusters and leaves a yaw moment. Yaw drives
+  thrusters 6 and 7 against each other.
 
   :param error: Body-frame position error, ``(x, y, z)``.
   :param yaw: Turning command, positive anticlockwise seen from above.
@@ -60,20 +34,15 @@ def wrap(angle: float) -> float:
 
 
 class WaypointFollower:
-  """Steers through a waypoint list, advancing on arrival.
-
-  The bow is turned along the direction of travel, as a survey AUV does, so a
-  body-fixed sonar fan stays across-track on every leg.
+  """Steers through ``(x, y, z)`` waypoints, bow along the direction of travel.
 
   Args:
-      waypoints: Sequence of ``(x, y, z)`` targets.
       arrival_radius: Distance at which a waypoint counts as reached, metres.
       yaw_gain: Turning command per radian of heading error.
-      yaw_damping: Turning command per radian per second of heading rate;
-          the vehicle yaws readily and overshoots without it.
-      dt: Interval between calls, seconds, for the heading rate.
-      hold_within: Keep the last heading target inside this distance of a
-          waypoint, metres, so arrival does not spin the vehicle toward it.
+      yaw_damping: Turning command per rad/s of heading rate.
+      dt: Interval between calls, seconds.
+      hold_within: Freeze the heading target inside this distance of a
+          waypoint, metres, so arrival does not spin the vehicle.
   """
 
   def __init__(
@@ -108,18 +77,14 @@ class WaypointFollower:
   def command(
     self, position: ArrayLike, rotation: ArrayLike
   ) -> NDArray[np.float64] | None:
-    """Thruster command steering from ``position`` toward the current waypoint.
+    """Thruster command toward the current waypoint.
 
     Args:
-        position: Current world position, ``(3,)``.
-        rotation: Body-to-world rotation, ``(3, 3)``. Only its heading is used:
-            HoloOcean's level attitude is ``diag(1, -1, -1)``, and applying the
-            whole matrix would invert depth control.
+        rotation: Body-to-world rotation; only its heading is used, since
+            applying HoloOcean's level ``diag(1, -1, -1)`` would invert depth.
 
     Returns:
-        None when the waypoint has just been reached -- advance and try again
-        on the next tick -- or when the course is complete. Check
-        :attr:`finished` to tell the two apart.
+        None on arrival at a waypoint or when :attr:`finished`.
     """
     if self.finished:
       return None

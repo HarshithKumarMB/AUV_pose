@@ -3,12 +3,8 @@
     python experiments/georeference.py pass0 --out pass0_smoothed.csv
     python experiments/georeference.py pass0 --pose truth --out pass0_truth.csv
 
-Replays the log through the navigator the vehicle steered on, smooths it, and
-places every beam from the pose at its ping. Each sounding also records where
-it would have landed from the true pose. Nothing observes horizontal position,
-so the surface fix's error shifts the whole run rigidly; it is reported apart
-(:attr:`~auv_pose.io.raw_survey.RawSurvey.start_offset`) and errors are scored
-relative to it.
+Each sounding also records where it lands from the true pose, shifted by the
+run's shared start offset.
 """
 
 import argparse
@@ -54,8 +50,7 @@ def parse_args() -> argparse.Namespace:
 def initial_belief(meta: dict, anchored: bool = False) -> ManifoldGaussian:
   """The belief the flight started from, as its metadata recorded it.
 
-  :param anchored: Pin the start's horizontal position, so every covariance
-      that follows is relative to it.
+  :param anchored: Zero the start's horizontal variance.
   """
   mean = meta["initial_mean"]
   sigma = meta["initial_sigma"]
@@ -82,11 +77,7 @@ def initial_belief(meta: dict, anchored: bool = False) -> ManifoldGaussian:
 
 
 def replay(survey: RawSurvey) -> InertialNavigator:
-  """Run the flight's forward pass again, anchored at the start.
-
-  The means are the flight's: nothing observes horizontal position, so its
-  prior never enters a gain. Only the covariances change.
-  """
+  """Rerun the forward pass anchored at the start; only covariances change."""
   meta = survey.meta
   navigator = InertialNavigator(
     initial_belief(meta, anchored=True),
@@ -163,7 +154,7 @@ def main() -> None:
     smoothed = unscented_rts_smooth(navigator.initial, navigator.history)[1:]
     poses = dict(zip(navigator.cycle_ticks, smoothed))
 
-    # Pose error at the pings, horizontally relative to the start's own error.
+    # Pose error at the pings, relative to the start's own error.
     print(
       f"  shared start offset {np.round(start, 2)} m against "
       f"{np.round(sigma0, 2)} m (1 sigma), in the map frame, not per sounding"

@@ -1,4 +1,4 @@
-"""The survey track, which decides what the map can resolve."""
+"""Survey and test-track waypoint generation."""
 
 import numpy as np
 import pytest
@@ -7,11 +7,7 @@ from experiments.survey import SURVEY_BOX, figure_eight, lawnmower
 
 
 def legs(waypoints):
-  """Direction of each *traverse*, as unit vectors in the horizontal plane.
-
-  A boustrophedon alternates long traverses with short steps across to the next
-  line, so select by length: only the traverses carry the heading.
-  """
+  """Unit horizontal direction of each long traverse, skipping short steps."""
   points = np.asarray(waypoints)[:, :2]
   steps = np.diff(points, axis=0)
   lengths = np.linalg.norm(steps, axis=1)
@@ -21,7 +17,6 @@ def legs(waypoints):
 
 @pytest.mark.parametrize("heading", [0.0, 45.0, 90.0, 135.0])
 def test_traverses_run_along_the_heading(heading):
-  """The long legs run along the heading, the short steps across it."""
   forward = np.array([np.cos(np.radians(heading)), np.sin(np.radians(heading))])
 
   for direction in legs(lawnmower(heading=heading)):
@@ -30,7 +25,6 @@ def test_traverses_run_along_the_heading(heading):
 
 @pytest.mark.parametrize("heading", [0.0, 30.0, 45.0, 90.0, 135.0])
 def test_every_heading_covers_the_box(heading):
-  """A rotated pattern must still span the box, not an inscribed square."""
   waypoints = np.asarray(lawnmower(heading=heading, spacing=2.0))[:, :2]
   x_min, x_max, y_min, y_max = SURVEY_BOX
 
@@ -40,17 +34,14 @@ def test_every_heading_covers_the_box(heading):
 
 def test_lines_are_spaced_as_asked():
   waypoints = np.asarray(lawnmower(heading=0.0, spacing=5.0))
-  # Heading 0 steps across in y; consecutive lines differ by the spacing.
   offsets = np.unique(np.round(waypoints[:, 1], 6))
   assert np.allclose(np.diff(offsets), 5.0)
 
 
 def test_the_pattern_reverses_each_line():
-  """Boustrophedon, not a raster: flying back to the start wastes the leg."""
   waypoints = np.asarray(lawnmower(heading=0.0, spacing=5.0))[:, :2]
   directions = legs(waypoints)
 
-  # Consecutive traverses alternate sign along the heading.
   along = directions @ np.array([1.0, 0.0])
   assert np.allclose(np.abs(along), 1.0)
   assert np.all(along[:-1] * along[1:] < 0)
@@ -83,7 +74,6 @@ def test_each_loop_is_a_circle_at_its_own_depth():
 
 
 def test_the_loops_turn_opposite_ways_and_meet_at_the_centre():
-  """A figure eight, not two circles flown the same way."""
   track = np.asarray(figure_eight((5.0, -3.0), 10.0, (0.0, -30.0), 24))
   np.testing.assert_allclose(track[0], [5.0, -3.0, 0.0])
   np.testing.assert_allclose(track[-1], [5.0, -3.0, -30.0], atol=1e-9)

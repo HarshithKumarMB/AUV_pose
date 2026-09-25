@@ -3,10 +3,8 @@
     python experiments/score_track.py test0.csv --track-log test0 \
         --survey-log pass0 pass90 --map vecchia.npz vecchia --map svgp.npz svgp
 
-Each map is asked for the seabed where every track beam truly struck it. The
-track's truth is carried into the map's frame through the flights' recorded
-start offsets, since each flight's frame is the world shifted by its own
-surface-fix error.
+Each map predicts the seabed where every track beam truly struck, after
+shifting the track's truth into the map's frame by the flights' start offsets.
 """
 
 import argparse
@@ -51,11 +49,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def loop_of_each_ping(log: RawSurvey) -> np.ndarray:
-  """Which loop a ping was taken on, from the vehicle's true depth.
-
-  The loops are flown at two depths; the vehicle is on the first while it is
-  nearer that depth than the second.
-  """
+  """Which loop (0 or 1) each ping was taken on, by nearer true depth."""
   depths = log.meta["waypoints"]
   first, second = depths[1][2], depths[-1][2]
   ticks = log.ticks.set_index("tick").loc[log.ping_ticks, "true_z"].to_numpy()

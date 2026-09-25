@@ -1,20 +1,7 @@
-"""The IMU motion model, and the uncertainty it injects.
+"""The IMU motion model and the covariance its own noise injects.
 
-Two things live here, deliberately apart. :func:`propagate` is the deterministic
-motion model -- a pure function of a state and a run of IMU samples, which is
-what lets a sigma point be pushed through it without the propagation carrying
-any state of its own. :func:`imu_noise_covariance` is everything the sensor's
-own noise adds, accumulated separately and added to the predicted covariance
-afterwards.
-
-That split is the whole reason the prediction step works: the unscented
-transform carries the *prior's* uncertainty through the true nonlinear model,
-while the IMU's own noise -- which is independent of the prior -- is accumulated
-linearly alongside and summed in at the end.
-
-The propagation equations are the paper's, and the second-order position update
-is not optional: it is the form Forster's covariance recursion is derived for,
-and it is what puts the accelerometer's noise into the position block at all.
+:func:`propagate` is deterministic so sigma points can be pushed through it;
+the IMU noise is accumulated separately by :func:`imu_noise_covariance`.
 """
 
 from dataclasses import dataclass
@@ -59,9 +46,8 @@ class ImuSamples:
   """A run of IMU samples, as one smoother step consumes them.
 
   :param gyro: Body angular rate per sample, rad/s, shape ``(k, 3)``.
-  :param accel: Body specific force per sample, m/s^2, shape ``(k, 3)``. This
-      is what an accelerometer reports: ``f = a - g``, so at rest it reads
-      ``-g`` rather than zero.
+  :param accel: Body specific force ``f = a - g`` per sample, m/s^2, shape
+      ``(k, 3)``; at rest it reads ``-g``, not zero.
   :param dt: Interval per sample, seconds, shape ``(k,)``.
   """
 
@@ -71,12 +57,7 @@ class ImuSamples:
 
   @classmethod
   def uniform(cls, gyro: ArrayLike, accel: ArrayLike, dt: float) -> Self:
-    """Samples at a fixed rate, which is the usual case.
-
-    :param gyro: Shape ``(k, 3)``, or ``(3,)`` for a single sample.
-    :param accel: Shape ``(k, 3)``, or ``(3,)`` for a single sample.
-    :param dt: Interval, seconds.
-    """
+    """Samples at a fixed interval ``dt``; ``(3,)`` inputs are one sample."""
     gyro = np.atleast_2d(np.asarray(gyro, dtype=float))
     accel = np.atleast_2d(np.asarray(accel, dtype=float))
     if gyro.shape != accel.shape:
@@ -107,8 +88,8 @@ class ImuNoise:
   def covariance(self, dt: float) -> NumpyArray:
     """Driving-noise covariance of one sample of length ``dt``, ``(12, 12)``.
 
-    White noise averages down over a sample, ``sigma = density / sqrt(dt)``;
-    a random walk accumulates, ``sigma = density * sqrt(dt)``.
+    White noise gives ``density / sqrt(dt)``; a random walk
+    ``density * sqrt(dt)``.
     """
     return np.diag(
       np.repeat(
@@ -130,24 +111,14 @@ def propagate(
   state: NavState,
   samples: ImuSamples,
 ) -> NavState:
-  """Advance a state through a run of IMU samples.
-
-  Composes the paper's propagation equations, noise-free, over every sample::
+  """Advance a state through a run of IMU samples, noise-free::
 
       R' = R exp(dt (w - b_g))
       v' = v + dt (R (a - b_a) + g)
       p' = p + dt v + (dt^2 / 2) (R (a - b_a) + g)
 
-  The biases are held: their random walk has no mean, so it belongs in
-  :func:`imu_noise_covariance` and not here.
-
-  :param state: State to advance.
-  :param samples: IMU samples for the step.
-  :return: The advanced state.
-
-  Note:
-      The position update is second order in ``dt``, as Forster's covariance
-      recursion assumes.
+  The biases are held constant. The second-order position term is required:
+  it is what :func:`imu_noise_covariance` is derived for.
   """
   position = np.asarray(state.position, dtype=float)
   attitude = np.asarray(state.attitude, dtype=float)
@@ -177,39 +148,14 @@ def imu_noise_covariance(
 ) -> NumpyArray:
   """Covariance the IMU's own noise adds over a run of samples.
 
-  Runs the error-state recursion ``S <- F S F^T + G Q G^T`` along the state's
-  own trajectory, which is Forster's preintegrated noise written as a filter
-  recursion rather than as a factor.
+  Runs ``S <- F S F^T + G Q G^T`` along the state's trajectory. The rotation
+  error is a right perturbation, ``R = R_hat exp(xi_R)``, matching
+  ``NavState.__add__``, so the result adds directly to a sigma-point covariance.
+  Bias uncertainty is not linearised here: each sigma point propagates under
+  its own bias.
 
-  The error state is the chart of :mod:`auv_pose.estimation.manifold`, so the
-  rotation error is a **right** perturbation, ``R = R_hat exp(xi_R)``. That is
-  what makes the rotation row come out as ``dR^T xi_R - Jr dt (xi_g + eta_g)``
-  with no adjoint left over, and it is why this covariance can be added
-  directly to one produced by :func:`~auv_pose.estimation.manifold.boxplus`.
-
-  Gravity does not appear: it is deterministic, so it cancels from every
-  Jacobian.
-
-  :param state: State the samples are propagated from; supplies the attitude
-      the trajectory is linearised about, and the bias estimates.
-  :param samples: IMU samples for the step.
-  :param noise: The IMU's noise densities.
-  :return: Covariance contribution, shape ``(15, 15)``, symmetric PSD.
-
-  Note:
-      Approximated relative to full preintegration, and deliberately:
-
-      * The Jacobians are linearised about this state's trajectory. That is
-          Forster's own approximation, not an extra one.
-      * **There are no bias Jacobians and no repropagation.** Preintegration
-          carries ``d(dR)/d(b_g)`` so a factor need not be re-integrated when
-          an optimiser moves the bias estimate. A filter re-integrates every
-          step regardless, and each sigma point propagates under *its own*
-          bias, so bias uncertainty goes through the true nonlinear model --
-          which is stronger than the first-order correction it replaces.
-      * ``Q`` is additive, and each interval is a zero-order hold. No coning
-          or sculling compensation, which at 30 Hz on a slow vehicle is far
-          below the accelerometer noise.
+  :param state: State to propagate from; supplies attitude and bias estimates.
+  :return: Covariance contribution, ``(15, 15)``, symmetric PSD.
   """
   covariance = np.zeros((DOF, DOF))
   attitude = np.asarray(state.attitude, dtype=float)

@@ -1,10 +1,4 @@
-"""Sigma points and the moments they carry.
-
-The sharpest test available is exactness on an affine map: the unscented
-transform reproduces the mean, the covariance and the cross-covariance of
-``A x + b`` to machine precision, so any error in the weights, the spread or
-the matrix square root shows up immediately and unambiguously.
-"""
+"""Sigma points and their moments, pinned by exactness on an affine map."""
 
 import numpy as np
 
@@ -67,7 +61,6 @@ def test_matrix_sqrt_factors_a_well_conditioned_covariance():
 
 
 def test_matrix_sqrt_handles_a_singular_covariance():
-  """A perfectly known direction is legitimate; Cholesky alone refuses it."""
   cov = random_cov(np.random.default_rng(1))
   cov[:, 4] = 0.0
   cov[4, :] = 0.0
@@ -98,7 +91,6 @@ def test_the_first_offset_is_the_mean():
 
 
 def test_offsets_reproduce_the_covariance_exactly():
-  """The defining property, and what every moment below rests on."""
   rng = np.random.default_rng(4)
   for rule in RULES:
     cov = random_cov(rng)
@@ -157,7 +149,7 @@ def test_the_transform_is_exact_for_an_affine_covariance():
 
 
 def test_the_transform_is_exact_for_an_affine_cross_covariance():
-  """``Cov[x, Ax + b] = P A^T`` -- what the backward pass consumes."""
+  """``Cov[x, Ax + b] = P A^T``."""
   rng = np.random.default_rng(8)
   cov = random_cov(rng)
   A = rng.normal(size=(7, DOF))
@@ -188,7 +180,6 @@ def test_weighted_mean_reduces_to_the_arithmetic_mean_in_a_vector_space():
 
 
 def test_weighted_mean_converges_in_one_pass_in_a_vector_space():
-  """Nothing to iterate when the chart is flat, whatever the seed."""
   rng = np.random.default_rng(10)
   points = list(rng.normal(size=(5, 3)))
   weights = np.full(5, 0.2)

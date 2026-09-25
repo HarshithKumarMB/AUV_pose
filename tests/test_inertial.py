@@ -1,11 +1,4 @@
-"""The IMU motion model and the uncertainty it injects.
-
-The Monte-Carlo test at the bottom is the one that matters. Every structural
-check above it -- symmetry, positive-definiteness, growth with sample count --
-passes just as happily with a transposed Jacobian or a sign wrong in the
-rotation-to-velocity coupling. Sampling the actual noisy propagation and
-comparing the empirical covariance to the analytic one does not.
-"""
+"""The IMU motion model and its noise covariance, checked by Monte Carlo."""
 
 from dataclasses import replace
 from itertools import pairwise
@@ -41,11 +34,7 @@ DT = 1.0 / RATE
 
 
 def resting_samples(state, k=6):
-  """What a motionless vehicle's IMU reports: no rotation, gravity only.
-
-  An accelerometer measures specific force ``f = a - g``, so at rest it reads
-  ``-g`` rotated into the body frame.
-  """
+  """A motionless vehicle's IMU: zero rate, specific force ``-g`` in body."""
   specific_force = -quat_to_rotmat(state.attitude).T @ GRAVITY
   return ImuSamples.uniform(
     gyro=np.zeros((k, 3)), accel=np.tile(specific_force, (k, 1)), dt=DT
@@ -66,7 +55,6 @@ def test_a_resting_vehicle_stays_at_rest():
 
 
 def test_a_resting_tilted_vehicle_also_stays_at_rest():
-  """Same, with the gravity vector no longer along a body axis."""
   start = NavState.at_rest(attitude=quat_exp(np.array([0.3, -0.2, 1.1])))
   moved = propagate(start, resting_samples(start, k=30))
 
@@ -103,7 +91,6 @@ def test_the_gyro_bias_is_subtracted_from_the_rate():
     gyro=np.tile(bias, (30, 1)), accel=np.zeros((30, 3)), dt=DT
   )
 
-  # The gyro reads exactly the bias, so the true rate is zero.
   moved = propagate(start, samples)
   assert quat_angle(moved.attitude, start.attitude) < 1e-14
 
@@ -121,7 +108,6 @@ def test_the_accel_bias_is_subtracted_from_the_specific_force():
 
 
 def test_the_biases_are_held_through_propagation():
-  """Their random walk has no mean, so it belongs in the covariance."""
   start = replace(
     NavState.at_rest(),
     gyro_bias=np.array([1.0, 2.0, 3.0]),
@@ -198,7 +184,7 @@ def level_samples(rate, duration=2.0):
 
 @pytest.mark.parametrize("rate", [10.0, 30.0, 400.0])
 def test_the_bias_blocks_are_the_random_walk_whatever_the_rate(rate):
-  """Nothing feeds back into a bias: its variance is ``density^2 * time``."""
+  """Bias variance is ``density^2 * time``."""
   noise = ImuNoise()
   start, samples = level_samples(rate)
   cov = imu_noise_covariance(start, samples, noise)
@@ -214,7 +200,7 @@ def test_the_bias_blocks_are_the_random_walk_whatever_the_rate(rate):
 
 @pytest.mark.parametrize("rate", [10.0, 30.0, 400.0])
 def test_accelerometer_noise_walks_velocity_whatever_the_rate(rate):
-  """White noise integrated: velocity variance ``density^2 * time``, exactly."""
+  """Velocity variance is ``density^2 * time``."""
   noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
   start, samples = level_samples(rate)
   cov = imu_noise_covariance(start, samples, noise)
@@ -224,7 +210,7 @@ def test_accelerometer_noise_walks_velocity_whatever_the_rate(rate):
 
 
 def test_position_variance_approaches_the_continuous_limit():
-  """``density^2 T^3 / 3``: the second-order position update reached the Jacobians."""
+  """Position variance tends to ``density^2 T^3 / 3``."""
   noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
   start, samples = level_samples(1000.0)
   cov = imu_noise_covariance(start, samples, noise)
@@ -234,12 +220,7 @@ def test_position_variance_approaches_the_continuous_limit():
 
 
 def test_gyro_noise_leaks_into_velocity_through_gravity():
-  """An attitude error tilts the gravity vector, which is a false acceleration.
-
-  This is the ``g sin(theta)`` leak, and it only exists if the
-  rotation-to-velocity Jacobian is wired up. Gyro noise alone, with a perfect
-  accelerometer, must still put variance in velocity.
-  """
+  """Gyro noise alone reaches velocity and position via tilted gravity."""
   start = NavState.at_rest()
   cov = imu_noise_covariance(
     start,
@@ -252,24 +233,13 @@ def test_gyro_noise_leaks_into_velocity_through_gravity():
 
 # -- the noise covariance, against sampling ---------------------------------
 #
-# These sample the noisy propagation directly and compare the empirical
-# covariance to the analytic recursion. Two deliberate choices:
-#
-# The model is written out again here rather than calling ``propagate``, so
-# this stays an independent statement of the paper's equations rather than a
-# rearrangement of the code it is checking.
-#
-# It is written with **rotation matrices**, not quaternions, and vectorised
-# across trials. Being a different representation from the one under test, a
-# convention error in the quaternion algebra cannot cancel itself out; being
-# vectorised, 20k trials cost a second rather than the thirty-five a per-trial
-# Python loop took.
+# The noisy model is rewritten here with rotation matrices, independent of
+# ``propagate`` and its quaternions, so a convention error cannot cancel.
 
 
 def batch_exp(rotvec):
   """Rodrigues, batched over the leading axis. ``(n, 3) -> (n, 3, 3)``."""
   theta = np.linalg.norm(rotvec, axis=-1)[:, None]
-  # The rotations here are noise-sized, so guard the axis rather than branch.
   axis = rotvec / np.where(theta > 0.0, theta, 1.0)
 
   K = np.zeros((len(rotvec), 3, 3))
@@ -294,25 +264,14 @@ def batch_log(rotations):
     )
     / 2.0
   )
-  # |vee| is sin(theta); these are noise-sized rotations, far from pi/2.
+  # |vee| is sin(theta); valid for rotations well below pi/2.
   norm = np.linalg.norm(vee, axis=-1)
   scale = np.where(norm > 1e-12, np.arcsin(np.clip(norm, 0.0, 1.0)), norm)
   return vee * (scale / np.where(norm > 0.0, norm, 1.0))[:, None]
 
 
 def sample_errors(state, samples, noise, rng, trials):
-  """Error states of ``trials`` noisy propagations, against the noise-free one.
-
-  The paper's equations with the noise terms left in::
-
-      R' = R exp(dt (w - b_g - eta_g))
-      v' = v + dt (R (a - b_a - eta_a) + g)
-      p' = p + dt v + (dt^2 / 2) (R (a - b_a - eta_a) + g)
-      b'  = b + eta_b
-
-  :return: ``(trials, 15)`` error states, in the chart of
-      :mod:`auv_pose.estimation.manifold`.
-  """
+  """``(trials, 15)`` error states of noisy against noise-free propagation."""
   position = np.tile(state.position, (trials, 1))
   velocity = np.tile(state.velocity, (trials, 1))
   rotation = np.tile(quat_to_rotmat(state.attitude), (trials, 1, 1))
@@ -376,23 +335,13 @@ def turning_case():
 
 
 def normalised(cov, reference):
-  """``cov`` in units of ``reference``'s standard deviations.
-
-  The blocks span metres and microradians, so an elementwise relative
-  tolerance on the raw matrices would be measuring the Monte-Carlo sampling
-  error on the near-zero off-diagonals and nothing else.
-  """
+  """``cov`` scaled to a correlation-like matrix by ``reference``'s diagonal."""
   scale = np.sqrt(np.outer(np.diag(reference), np.diag(reference)))
   return cov / scale
 
 
 def test_the_covariance_matches_the_noise_it_claims_to_model():
-  """Monte Carlo against the analytic recursion, over all fifteen states.
-
-  This is the test that validates the Jacobians. A transposed block or a sign
-  wrong in the rotation-to-velocity coupling leaves every structural check
-  above it passing and fails here.
-  """
+  """Monte Carlo agrees with the analytic recursion over all fifteen states."""
   rng = np.random.default_rng(7)
   noise = per_sample(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
   start, samples = turning_case()
@@ -408,7 +357,6 @@ def test_the_covariance_matches_the_noise_it_claims_to_model():
 
 
 def test_the_sampled_error_is_centred():
-  """A biased propagation would make the covariance above meaningless."""
   rng = np.random.default_rng(8)
   noise = per_sample(gyro=0.05, accel=0.2, gyro_bias=2e-3, accel_bias=5e-3)
   start, samples = turning_case()
@@ -421,11 +369,7 @@ def test_the_sampled_error_is_centred():
 
 
 def test_the_rotation_block_alone_matches_sampling():
-  """Isolated, because it is the block a right-versus-left mix-up breaks.
-
-  With the accelerometer silent, nothing but the gyro and its bias can put
-  variance here, so the comparison is against the attitude Jacobians alone.
-  """
+  """Catches a right-versus-left perturbation mix-up."""
   rng = np.random.default_rng(9)
   noise = per_sample(gyro=0.05, accel=0.0, gyro_bias=5e-3, accel_bias=0.0)
 

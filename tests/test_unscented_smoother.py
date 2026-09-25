@@ -1,15 +1,5 @@
-"""The manifold backward pass.
-
-The first test is the important one. ``unscented_rts_smooth`` and
-``rts_smooth`` are the same recursion written two ways -- one taking its gain
-from a recorded cross-covariance, the other forming ``P F^T`` -- so on a
-linear-Gaussian problem they must agree to machine precision. Running the
-linear ``ConstantVelocityKF`` in ``linear_reference``, converting its history, and comparing pins the
-entire backward pass against an implementation that was already trusted, with no
-map, no IMU and no simulator involved.
-
-Everything after that is about the parts the vector case cannot reach: the
-chart, and the covariance transport across it.
+"""The backward pass: exact against the linear RTS smoother in a flat chart,
+then the manifold chart and its covariance transport.
 """
 
 import operator
@@ -32,7 +22,7 @@ POSITION_H = np.hstack([np.eye(3), np.zeros((3, 3))])
 
 
 def linear_run(n=25, seed=0):
-  """A short linear-Gaussian run, as ``tests/test_smoothers.py`` builds one."""
+  """A short linear-Gaussian filter run."""
   rng = np.random.default_rng(seed)
   dt = 0.1
 
@@ -65,13 +55,7 @@ def linear_run(n=25, seed=0):
 
 
 def as_smoother_steps(initial, history):
-  """Convert a linear filter's record into the cross-covariance form.
-
-  For a linear filter the cross-covariance between the filtered error state at
-  ``k`` and the predicted one at ``k + 1`` is exactly ``P_k^+ F^T`` -- which is
-  the product ``rts_smooth`` forms inline. Handing it over explicitly is what
-  makes the two passes comparable.
-  """
+  """A linear filter's record with ``cross_cov = P_k^+ F^T``."""
   posteriors = [initial] + [step.posterior for step in history]
   return [
     SmootherStep(
@@ -84,7 +68,7 @@ def as_smoother_steps(initial, history):
 
 
 def vector_chart(smoother_initial, steps):
-  """Smooth in a flat chart: boxplus is ``+``, and nothing to transport."""
+  """Smooth with ``+``/``-`` and no transport."""
   return unscented_rts_smooth(
     smoother_initial,
     steps,
@@ -98,7 +82,6 @@ def vector_chart(smoother_initial, steps):
 
 
 def test_it_reproduces_the_linear_smoother_exactly():
-  """The strongest check available, and it needs nothing but the two passes."""
   ekf, initial = linear_run(n=40, seed=3)
 
   expected = rts_smooth(initial, ekf.history)
@@ -141,7 +124,6 @@ def test_an_empty_history_returns_the_initial_belief():
 
 
 def test_the_final_belief_is_left_as_the_filter_had_it():
-  """There is no future to condition the last step on."""
   ekf, initial = linear_run(n=15)
   steps = as_smoother_steps(initial, ekf.history)
   smoothed = vector_chart(initial, steps)
@@ -176,16 +158,10 @@ def test_smoothing_never_loosens_the_belief():
 
 
 def manifold_run(n=20, seed=0, attitude_spread=0.05, rotate=True):
-  """A synthetic manifold history with something for the backward pass to do.
+  """A synthetic manifold history where each prediction overshoots.
 
-  The means are laid out so each prediction overshoots and each posterior pulls
-  part of the way back, which is what gives the correction a direction.
-
-  :param rotate: When ``False``, *every* attitude is exactly the identity --
-      the systematic turn and the per-step drift both. That is what makes the
-      chart genuinely flat; zeroing only ``attitude_spread`` leaves the drift
-      rotating each step, which is not the same thing and does not make the
-      transport a no-op.
+  :param rotate: When ``False`` every attitude is the identity, making the
+      chart flat; ``attitude_spread=0`` alone does not.
   """
   rng = np.random.default_rng(seed)
   cov = np.eye(DOF) * 0.04
@@ -225,7 +201,6 @@ def test_the_manifold_pass_runs_and_stays_finite():
 
 
 def test_the_manifold_pass_keeps_the_covariance_symmetric_and_positive():
-  """The failure mode that only appears after many steps."""
   initial, steps = manifold_run(n=60, seed=2, attitude_spread=0.03)
   smoothed = unscented_rts_smooth(initial, steps)
 
@@ -235,7 +210,6 @@ def test_the_manifold_pass_keeps_the_covariance_symmetric_and_positive():
 
 
 def test_the_manifold_pass_returns_unit_quaternions():
-  """``boxplus`` renormalises; a pass that skipped it would drift off the sphere."""
   initial, steps = manifold_run(n=40, attitude_spread=0.08)
   for belief in unscented_rts_smooth(initial, steps):
     np.testing.assert_allclose(
@@ -244,12 +218,7 @@ def test_the_manifold_pass_returns_unit_quaternions():
 
 
 def test_it_agrees_with_the_vector_pass_when_nothing_rotates():
-  """With every attitude identical, the chart is flat and the two must match.
-
-  This is what ties the manifold path to the exactness test above: the same
-  code, on data where the rotation block does nothing, has to reproduce plain
-  vector arithmetic.
-  """
+  """With every attitude identical, the manifold pass is vector arithmetic."""
   initial, steps = manifold_run(n=25, seed=6, rotate=False)
 
   on_manifold = unscented_rts_smooth(initial, steps)
@@ -279,13 +248,12 @@ def test_it_agrees_with_the_vector_pass_when_nothing_rotates():
 
 
 def test_transport_changes_the_covariance_only_at_second_order():
-  """It matters on a large correction and not on a small one."""
+  """Transport changes the covariance but never the mean."""
   initial, steps = manifold_run(n=20, seed=8, attitude_spread=0.4)
 
   with_transport = unscented_rts_smooth(initial, steps)
   without = unscented_rts_smooth(initial, steps, transport=None)
 
-  # Same means -- transport touches only the covariance.
   for got, want in zip(with_transport, without):
     assert quat_angle(got.mean.attitude, want.mean.attitude) < 1e-14
 
@@ -300,7 +268,6 @@ def test_a_zero_correction_leaves_transport_with_nothing_to_do():
 
 
 def test_the_correction_moves_the_mean_toward_the_future():
-  """The point of smoothing: the past is pulled toward what came next."""
   initial, steps = manifold_run(n=30, seed=9, attitude_spread=0.02)
   smoothed = unscented_rts_smooth(initial, steps)
 

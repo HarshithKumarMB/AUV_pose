@@ -11,8 +11,7 @@ from experiments.guidance import (
 
 SQUARE = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]])
 
-# HoloOcean's attitude for this vehicle at zero yaw: a z-down body frame, not a
-# rolled vehicle, and not the identity.
+# HoloOcean's level attitude at zero yaw: a z-down body frame.
 LEVEL = np.diag([1.0, -1.0, -1.0])
 
 
@@ -48,7 +47,7 @@ def turning_part(follower, position, degrees):
 
 
 def test_the_mix_is_the_vectored_layout():
-  """Vertical bank carries z; [x+y, x-y, y-yaw, -y+yaw] in the horizontal."""
+  """Vertical bank carries z; ``[x+y, x-y, y-yaw, -y+yaw]`` horizontally."""
   np.testing.assert_allclose(
     thruster_command([2.0, 5.0, 3.0], yaw=1.0),
     [3.0, 3.0, 3.0, 3.0, 7.0, -3.0, 4.0, -4.0],
@@ -60,8 +59,7 @@ def test_rejects_an_error_that_is_not_three_elements():
     thruster_command([1.0, 2.0])
 
 
-# Documented BlueROV2 geometry from holoocean.agents.HoveringAUV: unit thrust
-# directions and their positions in the body frame.
+# BlueROV2 thruster directions and positions, body frame, from holoocean.
 _S = 1.0 / np.sqrt(2.0)
 THRUSTER_DIR = np.array(
   [[0, 0, 1]] * 4 + [[_S, _S, 0], [_S, -_S, 0], [_S, _S, 0], [_S, -_S, 0]],
@@ -92,7 +90,6 @@ THRUSTER_POS = np.array(
   ],
 )
 def test_a_translation_command_is_torque_free_even_when_saturated(error):
-  """Clipping element-wise would leave a yaw moment; scaling must not."""
   command = thruster_command(error)
   assert np.all(np.abs(command) <= THRUST_LIMIT + 1e-9)
   moment = np.cross(THRUSTER_POS, THRUSTER_DIR * command[:, None]).sum(axis=0)
@@ -101,7 +98,7 @@ def test_a_translation_command_is_torque_free_even_when_saturated(error):
 
 @pytest.mark.parametrize("yaw", [0.0, 15.0, -40.0])
 def test_saturation_scales_the_whole_command(yaw):
-  """A capped command is the uncapped one shrunk: same direction, same turn."""
+  """A capped command is the uncapped one scaled down."""
   error = np.array([40.0, -15.0, -5.0])
   capped = thruster_command(error, yaw)
   small = thruster_command(error / 1000.0, yaw / 1000.0)
@@ -154,7 +151,6 @@ def test_the_course_finishes_and_stays_finished():
 
 @pytest.mark.parametrize("degrees", [0.0, 45.0, 90.0, 180.0, -90.0])
 def test_depth_control_is_never_inverted(degrees):
-  """Applying the whole level attitude would flip z; only heading may be used."""
   follower = WaypointFollower([[0.0, 0.0, 10.0]], arrival_radius=0.5)
   command = steer(follower, np.zeros(3), yawed(degrees))
   np.testing.assert_allclose(command[:4], 10.0)
@@ -220,7 +216,6 @@ def test_turning_is_damped_by_the_heading_rate():
 
 
 def test_the_heading_target_is_held_close_to_a_waypoint():
-  """Arrival must not spin the vehicle toward a point it is sitting on."""
   follower = WaypointFollower([[10.0, 0.0, 0.0]], hold_within=1.5)
   steer(follower, np.zeros(3), LEVEL)
   added = turning_part(follower, np.array([9.5, 0.9, 0.0]), 0.0)

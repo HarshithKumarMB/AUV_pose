@@ -1,8 +1,4 @@
-"""A linear Kalman filter and RTS smoother: the known-exact answer.
-
-On a linear-Gaussian problem the unscented filter and smoother must reproduce
-these to round-off, which is what the tests that import this check.
-"""
+"""A linear Kalman filter and RTS smoother: the exact reference."""
 
 from dataclasses import dataclass
 

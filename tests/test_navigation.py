@@ -1,15 +1,5 @@
-"""The unscented forward pass.
-
-The first test is the one that pins it. On a linear-Gaussian problem the
-unscented predict and update are exact, so run in a vector chart they must
-reproduce ``ConstantVelocityKF`` -- and the smoother fed their record must
-reproduce ``rts_smooth`` fed the filter's. That checks the sigma-point moments, the
-cross-covariance the backward pass consumes, and the gain, against an
-implementation that was already trusted.
-
-After that, the manifold: the measurement models against hand-derived readings,
-then a Monte-Carlo consistency check of the whole inertial filter against
-simulated truth.
+"""The unscented forward pass: exact against the Kalman filter on a linear
+problem, and NEES-consistent against simulated truth on the manifold.
 """
 
 import operator
@@ -116,7 +106,6 @@ def test_the_forward_pass_reproduces_the_kalman_filter():
 
 
 def test_its_record_smooths_to_the_linear_smoother():
-  """The cross-covariance is what the backward pass needs, so check it there."""
   ekf, initial, steps = linear_runs(seed=3)
 
   theirs = rts_smooth(initial, ekf.history)
@@ -216,7 +205,7 @@ def test_the_magnetometer_bounds_heading_and_the_gyro_does_not():
 
 DT = 1.0 / 30.0
 NOISE = ImuNoise()
-#: Per-sample standard deviations of NOISE at the test's tick.
+#: Per-sample standard deviations of NOISE at DT.
 SIGMA = np.sqrt(np.diag(NOISE.covariance(DT)))
 SAMPLES_PER_STEP = 6
 DVL_NOISE = dvl_noise_covariance(0.02, 22.5)
@@ -225,11 +214,7 @@ COMPASS_NOISE = np.eye(3) * 0.02**2
 
 
 def simulate(rng, prior, steps):
-  """Truth drawn from the prior, and the noisy sensors a filter would see.
-
-  The vehicle turns slowly and accelerates gently, so every state is excited,
-  with biases walking as :class:`ImuNoise` says they do.
-  """
+  """Truth drawn from the prior, gently manoeuvring, and its noisy sensors."""
   truth = prior.mean + np.linalg.cholesky(prior.cov) @ rng.normal(size=DOF)
   cycles = []
 
@@ -274,10 +259,7 @@ def simulate(rng, prior, steps):
 
 @pytest.fixture(scope="module")
 def monte_carlo():
-  """NEES of the filter and the smoother at every step, over independent runs.
-
-  One simulation serves both tests: the runs are the expensive part.
-  """
+  """``(filtered, smoothed)`` NEES per trial and step."""
   rng = np.random.default_rng(5)
   trials, steps = 40, 15
 
@@ -320,21 +302,12 @@ def monte_carlo():
 
 
 def consistent_band(trials, steps):
-  """Where a step's mean NEES over ``trials`` runs should sit.
-
-  The sum of ``trials`` chi-squared(15) draws is chi-squared(15 * trials).
-  The band is 99% over all ``steps`` together, Bonferroni-corrected.
-  """
+  """99% band (Bonferroni over ``steps``) for the mean of ``trials`` NEES."""
   tail = 0.005 / steps
   return chi2.ppf([tail, 1.0 - tail], DOF * trials) / trials
 
 
 def test_the_filter_is_consistent_with_its_own_covariance(monte_carlo):
-  """An overconfident filter lands above the band.
-
-  That is the failure that matters here, since the smoothed covariance becomes
-  the soundings' ``Sigma_q``.
-  """
   filtered, _ = monte_carlo
   low, high = consistent_band(*filtered.shape)
   mean = filtered.mean(axis=0)
@@ -342,14 +315,8 @@ def test_the_filter_is_consistent_with_its_own_covariance(monte_carlo):
 
 
 def test_the_smoother_is_consistent_with_its_own_covariance(monte_carlo):
-  """The smoothed covariance is what places a sounding, so it must be honest.
-
-  This replaces a "smoothing never loosens the belief" check, which holds in a
-  vector space and not here. The smoothed and filtered covariances live in the
-  tangent spaces at different means, so comparing them compares two charts --
-  and the recursion itself differences covariances from different charts. The
-  gap measured 6-31% of the largest eigenvalue, while the NEES stayed inside
-  its band at every step.
+  """NEES, not "smoothing never loosens", since the two covariances are in
+  different charts.
   """
   _, smoothed = monte_carlo
   low, high = consistent_band(*smoothed.shape)
@@ -403,7 +370,6 @@ def test_a_ping_closes_a_cycle_without_aiding():
 
 
 def test_the_navigator_matches_calling_the_step_directly():
-  """Buffering is bookkeeping only: the record is inertial_step's."""
   rng = np.random.default_rng(1)
   readings = list(ticks(rng, 6))
 

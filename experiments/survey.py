@@ -1,12 +1,6 @@
 """Fly a survey or test track on the vehicle's own navigation, logging raw data.
 
-    nix run .#sim -- -c "python -u experiments/survey.py --out pass0 --yaw 0"
-
-Steers on an unscented inertial filter aided by DVL, depth and compass, with no
-absolute position fix, and writes a raw log (:mod:`auv_pose.io.raw_survey`).
-``georeference.py`` places the soundings afterwards, once the run is smoothed.
-Ground truth is logged for scoring only; the initial belief is drawn around it,
-standing in for a surface fix.
+nix run .#sim -- -c "python -u experiments/survey.py --out pass0 --yaw 0"
 """
 
 import argparse
@@ -53,8 +47,7 @@ from experiments.scenarios import (
 
 TICK_RATE_HZ = 30
 
-# 5 Hz, not the tick rate: raycasting a 240-beam fan is the expensive part of a
-# tick, and at survey speed 5 Hz still oversamples the along-track footprint.
+# Below the tick rate: sonar raycasting dominates a tick.
 SONAR_HZ = 5
 SONAR = {
   "range_min": 0.5,
@@ -65,25 +58,20 @@ SONAR = {
   "elevation": 1.0,
 }
 
-#: The aiding sensors run at the sonar's rate, as a survey DVL typically does,
-#: so a filter cycle closes on every ping. Running depth at the 30 Hz tick rate
-#: instead is what made the older filter 3-10 sigma overconfident in z: each
-#: reading was treated as independent when the noise was not.
+#: Aiding at the sonar rate, so a filter cycle closes on every ping.
 AIDING_HZ = SONAR_HZ
 DVL_BEAM_SIGMA = 0.02
 DVL_ELEVATION = 22.5
 DEPTH_SIGMA = 0.05
 COMPASS_SIGMA = 0.03
 
-#: The survey IMU, as densities. Over a 15-minute pass the biases walk to about
-#: 0.01 deg/s and 1e-3 m/s^2: a tactical-grade MEMS unit.
+#: The survey IMU: a tactical-grade MEMS unit.
 SURVEY_IMU = ImuNoise(
   gyro=1.8e-3, accel=9e-3, gyro_bias=5.5e-6, accel_bias=3.3e-5
 )
 
-#: Spread of the belief navigation starts from, around the true start pose:
-#: position as from a surface GNSS fix, attitude as from a levelled AHRS, and
-#: the biases at what a pass accumulates.
+#: Spread of the initial belief around the true start pose, standing in for a
+#: surface GNSS fix and a levelled AHRS.
 INITIAL_SIGMA = {
   "position": [1.0, 1.0, 0.1],
   "attitude_deg": [1.0, 1.0, 3.0],
@@ -96,11 +84,9 @@ INITIAL_SIGMA = {
 #: The default box to cover, ``(x_min, x_max, y_min, y_max)`` in metres.
 SURVEY_BOX = (-70.0, 30.0, -55.0, 35.0)
 
-#: Lawnmower line spacing, metres. The swath is 80 m wide at survey altitude, so
-#: this gives four looks at every patch from one heading.
+#: Lawnmower line spacing, metres.
 SPACING = 20.0
-#: Ticks under zero thrust before navigation starts: the vehicle is dropped in
-#: negatively buoyant and is still sinking on the first tick.
+#: Ticks under zero thrust before navigation starts, while the vehicle settles.
 SETTLE_STEPS = 60
 MAX_STEPS = 100_000
 ARRIVAL_RADIUS = 0.5
@@ -112,10 +98,7 @@ def lawnmower(
   spacing: float = SPACING,
   z: float = 0.0,
 ) -> list[list[float]]:
-  """Boustrophedon track covering ``box``, lines along ``heading`` degrees.
-
-  Returns ``(n, 3)`` waypoints as a list.
-  """
+  """Boustrophedon ``(n, 3)`` waypoints over ``box``, along ``heading``."""
   angle = np.radians(heading)
   forward = np.array([np.cos(angle), np.sin(angle)])
   across = np.array([-np.sin(angle), np.cos(angle)])
@@ -124,9 +107,7 @@ def lawnmower(
   centre = np.array([(x_min + x_max) / 2, (y_min + y_max) / 2])
   length, width = x_max - x_min, y_max - y_min
 
-  # Extent of an axis-aligned box measured along a rotated axis: the projection
-  # of both sides onto it. Covers the box at any heading without flying a square
-  # big enough for the worst one.
+  # Extent of the axis-aligned box along the rotated axes.
   along = abs(length * forward[0]) + abs(width * forward[1])
   side = abs(length * across[0]) + abs(width * across[1])
 
@@ -149,11 +130,10 @@ def figure_eight(
   depths: tuple[float, float] = (0.0, -30.0),
   loop_points: int = 36,
 ) -> list[list[float]]:
-  """A test track: two tangent loops, each at its own depth.
+  """A test track of two tangent loops meeting at ``centre``, one per depth.
 
-  Starts at the crossing, flies loop one anticlockwise at ``depths[0]``, changes
-  depth at the crossing and flies loop two clockwise at ``depths[1]``. Its
-  soundings land between the survey's, at two altitudes.
+  Loop one is anticlockwise at ``depths[0]``, loop two clockwise at
+  ``depths[1]``.
   """
   cx, cy = centre
   first, second = depths
@@ -203,8 +183,7 @@ def build_scenario(
     # Start facing along the first line.
     rotation=[0.0, 0.0, yaw],
     sensors=[
-      # Truth, logged for scoring only. The socket is load-bearing -- see
-      # orientation_sensor's docstring.
+      # Truth, for scoring only.
       pose_sensor(),
       orientation_sensor(),
       imu_sensor(SURVEY_IMU, hz=TICK_RATE_HZ, return_bias=True),
@@ -383,9 +362,8 @@ def main() -> None:
     state = env.step(command)
     dvl = reading(state, "dvl", 3) if "dvl" in state else dvl
 
-  # The belief starts *around* the truth, not on it: the stand-in for a
-  # surface fix. Velocity comes from the last DVL reading, rotated by the
-  # believed attitude, as a vehicle would have it.
+  # Draw the initial belief around the truth; velocity from the last DVL
+  # reading, rotated by the believed attitude.
   rng = np.random.default_rng(args.seed)
   true_rotation = np.array(state["orient"], dtype=float)
   truth = NavState.at_rest(
@@ -423,9 +401,7 @@ def main() -> None:
     "compass_sigma": COMPASS_SIGMA,
     "magnetic_field": MAGNETIC_NORTH.tolist(),
     "initial_sigma": INITIAL_SIGMA,
-    # Truth at the moment navigation started, so the pose's error can be
-    # scored relative to the start's own -- which is what an anchored map's
-    # covariance describes. Scoring only.
+    # Truth at navigation start, so error can be scored relative to it.
     "initial_truth": {
       "position": truth.position.tolist(),
       "attitude": truth.attitude.tolist(),
@@ -495,7 +471,6 @@ def main() -> None:
         pings += 1
         live_beams += int(np.isfinite(beam_ranges).sum())
 
-        # Count pings, not steps: the sonar runs at 5 Hz against a 30 Hz tick.
         if pings % 200 == 0:
           estimate = navigator.belief
           error = np.linalg.norm(estimate.mean.position[:2] - true_position[:2])
@@ -506,8 +481,7 @@ def main() -> None:
             f"against {sigma:.2f} m (1 sigma)"
           )
 
-      # Steer on the estimate, in the body frame: at a non-zero yaw a
-      # world-frame error drives the vehicle sideways.
+      # Steer on the estimate, not the truth.
       estimate = navigator.belief.mean
       next_command = follower.command(
         estimate.position, quat_to_rotmat(estimate.attitude)

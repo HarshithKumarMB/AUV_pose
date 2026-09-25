@@ -1,7 +1,6 @@
-"""Quaternion algebra and small rotation helpers.
+"""Quaternion algebra and SO(3) helpers.
 
-Quaternions are scalar-first ``[w, x, y, z]``, unit norm, and rotate body vectors
-into the world frame. See :mod:`auv_pose.estimation` for the frame conventions.
+Quaternions are unit, scalar-first ``[w, x, y, z]``, rotating body into world.
 """
 
 import numpy as np
@@ -18,11 +17,7 @@ def quat_normalize(q: ArrayLike) -> NDArray[np.float64]:
 
 
 def quat_multiply(q: ArrayLike, r: ArrayLike) -> NDArray[np.float64]:
-  """Hamilton product ``q * r``.
-
-  Composition is left-to-right in the body frame: ``quat_multiply(q, dq)``
-  applies ``dq`` in the frame that ``q`` already describes.
-  """
+  """Hamilton product; ``quat_multiply(q, dq)`` applies ``dq`` in body."""
   w0, x0, y0, z0 = np.asarray(q, dtype=float)
   w1, x1, y1, z1 = np.asarray(r, dtype=float)
   return np.array(
@@ -42,29 +37,16 @@ def quat_conjugate(q: ArrayLike) -> NDArray[np.float64]:
 
 
 def quat_exp(rotvec: ArrayLike) -> NDArray[np.float64]:
-  """Exponential map: a rotation vector to the quaternion it names.
+  """Exponential map: rotation vector (radians) to unit quaternion.
 
-  The rotation is through ``|rotvec|`` radians about ``rotvec / |rotvec|``, so
-  this is ``exp`` on :math:`\\mathfrak{so}(3)` written in quaternions.
-
-  Args:
-      rotvec: Rotation vector, radians, shape ``(3,)``.
-
-  Returns:
-      Unit quaternion, scalar-first.
-
-  Note:
-      Below ``1e-6`` radians the half-angle sinc is taken from its series
-      rather than as ``sin(theta/2)/theta``. The quotient is 0/0 at the
-      identity, and returning the identity wholesale -- as this function's
-      predecessor did below ``1e-8`` -- puts a step in the derivative that a
-      sigma-point rule walks straight into.
+  Near zero the half-angle sinc uses its series, keeping the derivative smooth
+  at the identity for sigma points.
   """
   rotvec = np.asarray(rotvec, dtype=float)
   theta = float(np.linalg.norm(rotvec))
 
   if theta < 1e-6:
-    # sin(theta/2)/theta, expanded. Exact to double precision well past 1e-6.
+    # sin(theta/2)/theta, expanded.
     half_sinc = 0.5 - theta**2 / 48.0 + theta**4 / 3840.0
   else:
     half_sinc = np.sin(theta / 2.0) / theta
@@ -73,22 +55,10 @@ def quat_exp(rotvec: ArrayLike) -> NDArray[np.float64]:
 
 
 def quat_log(q: ArrayLike) -> NDArray[np.float64]:
-  """Logarithmic map: the rotation vector a quaternion names.
+  """Logarithmic map: unit quaternion to rotation vector, norm in ``[0, pi]``.
 
-  Inverse of :func:`quat_exp` on rotations of less than a half turn.
-
-  Args:
-      q: Unit quaternion, scalar-first.
-
-  Returns:
-      Rotation vector, radians, shape ``(3,)``, with norm in ``[0, pi]``.
-
-  Note:
-      ``q`` and ``-q`` are the same rotation, so the sign is flipped when
-      ``w < 0``. Without that a rotation just past a half turn comes back as
-      nearly ``2 pi`` about the opposite axis -- the same orientation, but a
-      tangent vector far outside the range a covariance in this chart can
-      describe.
+  ``q`` is flipped to ``w >= 0`` so rotations past a half turn do not come back
+  as nearly ``2 pi`` about the opposite axis.
   """
   q = quat_normalize(q)
   if q[0] < 0.0:
@@ -105,56 +75,22 @@ def quat_log(q: ArrayLike) -> NDArray[np.float64]:
 
 
 def quat_from_gyro(omega: ArrayLike, dt: float) -> NDArray[np.float64]:
-  """Rotation increment from an angular rate held over ``dt``.
-
-  Args:
-      omega: Body angular rate, rad/s.
-      dt: Interval, seconds.
-
-  Returns:
-      Unit quaternion for the rotation through ``|omega| * dt`` about
-      ``omega / |omega|``. Identity when the rotation is negligible.
-  """
+  """Rotation increment from body rate ``omega`` (rad/s) held over ``dt``."""
   return quat_exp(np.asarray(omega, dtype=float) * dt)
 
 
 def so3_right_jacobian(rotvec: ArrayLike) -> NDArray[np.float64]:
-  """Right Jacobian of the exponential map at ``rotvec``.
+  """Right Jacobian: ``exp(phi + dphi) ~= exp(phi) exp(Jr(phi) dphi)``.
 
-  Relates a perturbation of the rotation vector to the body-frame rotation it
-  produces: ``exp(phi + dphi) ~= exp(phi) exp(Jr(phi) dphi)``. This is what
-  carries gyro noise and gyro-bias error into the attitude block of the
-  propagated covariance, and what transports a covariance across a
-  :func:`~auv_pose.estimation.manifold.boxplus` correction.
-
-  Args:
-      rotvec: Rotation vector, radians, shape ``(3,)``.
-
-  Returns:
-      ``(3, 3)`` matrix; the identity at zero.
-
-  Note:
-      The series branch cuts in at ``1e-2``, which looks generous and is not.
-      Both coefficients are differences of nearly equal numbers -- ``1 - cos``
-      and ``theta - sin`` -- and lose precision to cancellation far earlier
-      than the usual small-angle intuition suggests. Measured relative error of
-      the closed form: 3e-13 at ``theta = 1e-2``, but 3e-8 at ``1e-4`` and
-      **9e-5 at 1e-6**. A threshold placed at ``1e-6`` would hand back four
-      correct digits just above it while the series below it was exact, and put
-      a step of that size into the middle of the propagated covariance.
-
-  See also:
-      Barfoot, *State Estimation for Robotics* (2024), eq. 8.82a, which writes
-      the same matrix in axis-angle form. Note his convention is the **left**
-      Jacobian, with ``J_l(-phi) = J_r(phi)`` (eq. 8.85).
+  The series threshold of ``1e-2`` is deliberate: the closed form loses
+  precision to cancellation well above ``1e-6``.
   """
   rotvec = np.asarray(rotvec, dtype=float)
   theta = float(np.linalg.norm(rotvec))
   W = skew(rotvec)
 
   if theta < 1e-2:
-    # (1 - cos t)/t^2 and (t - sin t)/t^3, expanded. Truncation here is below
-    # 1e-16 at the threshold, against the 3e-13 of the closed form above it.
+    # (1 - cos t)/t^2 and (t - sin t)/t^3, expanded.
     coeff_w = 0.5 - theta**2 / 24.0 + theta**4 / 720.0
     coeff_ww = 1.0 / 6.0 - theta**2 / 120.0 + theta**4 / 5040.0
   else:
@@ -177,11 +113,7 @@ def quat_to_rotmat(q: ArrayLike) -> NDArray[np.float64]:
 
 
 def rotmat_to_quat(R: ArrayLike) -> NDArray[np.float64]:
-  """Inverse of :func:`quat_to_rotmat`.
-
-  Uses Shepperd's method: pick the branch with the largest divisor so the square
-  root never loses precision near a 180-degree rotation.
-  """
+  """Inverse of :func:`quat_to_rotmat`, by Shepperd's method."""
   R = np.asarray(R, dtype=float)
   q = np.zeros(4)
   trace = np.trace(R)
@@ -217,16 +149,7 @@ def rotmat_to_quat(R: ArrayLike) -> NDArray[np.float64]:
 
 
 def quat_angle(q: ArrayLike, r: ArrayLike) -> float:
-  """Smallest rotation angle between two orientations, in radians.
-
-  ``q`` and ``-q`` denote the same rotation, so the dot product is taken in
-  absolute value -- without that, identical orientations of opposite sign would
-  read as a half turn.
-
-  :param q: First orientation.
-  :param r: Second orientation.
-  :return: Angle in ``[0, pi]``.
-  """
+  """Smallest angle between two orientations, radians in ``[0, pi]``."""
   dot = abs(float(np.dot(quat_normalize(q), quat_normalize(r))))
   return 2.0 * float(np.arccos(np.clip(dot, -1.0, 1.0)))
 

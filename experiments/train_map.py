@@ -2,10 +2,8 @@
 
     python experiments/train_map.py ~/data/auv_pose/surveys_v4/pass*_smoothed.csv
 
-Writes the map checkpoint and a render of the fitted seabed beside it. The map
-is the Vecchia GP: plane mean, one Matérn-5/2 term, ``m = 30``, 2000 steps.
-``--method svgp`` fits the SVGP baseline instead. Nothing is held out: the map
-is scored on an independently flown test track by ``score_track.py``.
+Writes the checkpoint and a PNG render beside it. Vecchia GP by default;
+``--method svgp`` fits the SVGP baseline.
 """
 
 import argparse
