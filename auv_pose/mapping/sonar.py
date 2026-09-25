@@ -68,16 +68,10 @@ def bottom_return_ranges(
       fault.
 
   Note:
-      **A range that disagrees with the octree is not automatically wrong.**
-      Measured against a ray-cast through the octree, these ranges agree to a
-      0.035 m MAD-std -- inside the 0.0996 m quantisation. Where they disagree,
-      by 4-5 m, the sonar turned out to be right: it sees pipelines lying on the
-      Dam seabed that octree generation omits, and they were eventually
-      photographed. Three separate explanations were fitted to that discrepancy
-      -- beam geometry, an ``atan2`` approximation, fabricated returns -- and
-      all three were wrong, because the reference was incomplete rather than the
-      sensor. Score with ``experiments/check_beam_validity.py`` and suspect the
-      octree first.
+      Against a ray-cast through the simulator's octree these ranges agree to a
+      0.035 m MAD-std, inside the 0.0996 m quantisation. Where they disagree,
+      by 4-5 m, the sonar is right: it sees pipelines on the Dam seabed that the
+      octree omits.
   """
   image = np.asarray(image, dtype=float)
   ranges = np.asarray(ranges, dtype=float)

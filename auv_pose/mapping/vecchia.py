@@ -1122,8 +1122,8 @@ class VecchiaMap:
   ):
     """Predict seabed elevation at horizontal positions, one point at a time.
 
-    Signature-compatible with :meth:`auv_pose.mapping.svgp.BathymetryMap.predict`
-    so ``navigate.py`` and ``predict_depth.py`` need no change.
+    Signature-compatible with :meth:`auv_pose.mapping.svgp.BathymetryMap.predict`,
+    so ``navigate.py`` takes either map.
 
     :param points: ``(n, 2)`` of ``(x, y)`` in metres.
     :param chunk_size: Points per batch, to bound memory.

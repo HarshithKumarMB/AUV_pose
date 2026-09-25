@@ -187,8 +187,7 @@
 
       # Mirrors the dev shell so the two cannot disagree: experiments/ for the
       # tests that import it, and vendor/ on PYTHONPATH because navigate.py
-      # imports holoocean at module scope. Tests that read the octree cache or
-      # the survey data volume skip here, since neither is in the sandbox.
+      # imports holoocean at module scope.
       #
       # Importing holoocean does not start the simulator -- only holoocean.make
       # does -- and testpaths keeps collection to tests/, so nothing here can

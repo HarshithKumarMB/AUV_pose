@@ -48,7 +48,6 @@ from auv_pose.mapping.sonar import (
   bottom_return_ranges,
   range_bins,
 )
-from experiments.captures import write_capture
 from experiments.cli import configure_sdl, refuse_overwrite
 from experiments.guidance import WaypointFollower
 from experiments.scenarios import (
@@ -392,22 +391,6 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--max-steps", type=int, default=100_000)
   parser.add_argument("--arrival-radius", type=float, default=0.5)
   parser.add_argument(
-    "--profiles",
-    type=Path,
-    default=None,
-    help=(
-      "also write the raw sonar images, with true poses, to this .npz for "
-      "check_beam_validity.py -- scoring the sonar against the octree over "
-      "the whole box rather than one hover"
-    ),
-  )
-  parser.add_argument(
-    "--profile-steps",
-    type=int,
-    default=400,
-    help="stop recording images after this many pings; diagnosis, not a survey",
-  )
-  parser.add_argument(
     "--octree-min",
     type=float,
     default=0.02,
@@ -564,9 +547,6 @@ def main() -> None:
   ticks = 0
   pings = 0
   live_beams = 0
-  images: list[np.ndarray] = []
-  image_poses: list[np.ndarray] = []
-  image_rotations: list[np.ndarray] = []
 
   with RawSurveyWriter(args.out, len(bearings), meta) as log:
     for step in range(args.max_steps):
@@ -587,10 +567,6 @@ def main() -> None:
       if "multibeam" in state:
         image = np.asarray(state["multibeam"], dtype=float)
         beam_ranges = bottom_return_ranges(image, ranges)
-        if args.profiles and len(images) < args.profile_steps:
-          images.append(image.copy())
-          image_poses.append(true_position.copy())
-          image_rotations.append(true_rotation.copy())
 
       log.tick(
         step,
@@ -656,10 +632,6 @@ def main() -> None:
         f"{name:8s} mean NIS {np.mean(values):.2f} against {dof} "
         f"over {len(values)} updates"
       )
-
-  if args.profiles and images:
-    write_capture(args.profiles, images, image_poses, image_rotations, SONAR)
-    print(f"Wrote {len(images)} pings to {args.profiles}")
 
 
 if __name__ == "__main__":

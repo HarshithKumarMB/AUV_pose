@@ -19,15 +19,12 @@ __all__ = [
   "blue_rov_agent",
   "depth_sensor",
   "dvl_sensor",
-  "imaging_sonar",
   "imu_sensor",
   "magnetometer_sensor",
   "ocean_scenario",
   "orientation_sensor",
   "pose_sensor",
   "profiling_sonar",
-  "sidescan_sonar",
-  "viewport_capture",
 ]
 
 
@@ -135,20 +132,6 @@ def profiling_sonar(
   defect in any one of them visible against its neighbours, which one beam
   cannot do.
 
-  **The singlebeam's soundings are bimodal, not smeared.** Against the octree
-  they fall in two *tight* populations 4.87 m apart, the far one agreeing to a
-  0.059 m MAD-std -- below the sensor's own quantisation. The "a constant beats
-  every bin-selection rule" figure that used to justify this switch was measured
-  over a four-metre strip where the seabed barely varies, so a constant won by
-  construction; it does not generalise.
-
-  Where the two disagree, do not assume the sonar is at fault. Measured with
-  ``experiments/check_beam_validity.py``, the multibeam agrees with a ray-cast
-  through the octree to a 0.035 m MAD-std except over compact patches where it
-  reports 4-5 m shorter -- and those patches hold **fixed world positions and a
-  fixed ~10 m size across altitudes of 17, 40 and 69 m**, which is an object on
-  the seabed, not a property of the fan. The octree contains no geometry there.
-
   This fan is ~0.31 m across-track by ~1.2 m along-track at 70 m altitude, small
   enough that treating a beam as a point sounding is a fair approximation.
 
@@ -216,56 +199,6 @@ def profiling_sonar(
     "rotation": [0, -90, 0],
     "Hz": hz,
     "configuration": configuration,
-  }
-
-
-def viewport_capture(
-  name: str = "ViewportCapture", width: int = 1280, height: int = 720
-) -> dict[str, Any]:
-  """The viewport's own frame, for looking at the world rather than measuring it.
-
-  Faster than an ``RGBCamera`` and, more usefully here, it renders whatever
-  :meth:`~holoocean.environments.HoloOceanEnvironment.move_viewport` is pointed
-  at -- so the camera is not tied to the vehicle and a patch of seabed can be
-  viewed from any side.
-
-  :param name: Sensor name in the state dict. The default is what holoocean
-      calls it, and the key the frame arrives under.
-  :param width: Capture width in pixels. **Must equal the viewport width** or
-      the returned buffer does not match the frame.
-  :param height: Capture height in pixels; same constraint.
-  :return: A sensor configuration block.
-  """
-  return {
-    "sensor_name": name,
-    "sensor_type": "ViewportCapture",
-    "socket": "IMUSocket",
-    "configuration": {"CaptureWidth": width, "CaptureHeight": height},
-  }
-
-
-def sidescan_sonar(
-  name: str = "sidescan",
-  hz: int = 10,
-  range_min: float = 0.5,
-  range_max: float = 70.0,
-  range_bins: int = 256,
-  azimuth_bins: int = 256,
-) -> dict[str, Any]:
-  """Side-looking sonar, for imaging the seabed either side of the track."""
-  return {
-    "sensor_name": name,
-    "sensor_type": "SidescanSonar",
-    "socket": "IMUSocket",
-    "rotation": [0, -90, 0],
-    "Hz": hz,
-    "configuration": {
-      "RangeMin": range_min,
-      "RangeMax": range_max,
-      "RangeBins": range_bins,
-      "AzimuthBins": azimuth_bins,
-      "AddNoise": True,
-    },
   }
 
 
@@ -366,33 +299,6 @@ def magnetometer_sensor(
     "socket": "IMUSocket",
     "Hz": hz,
     "configuration": {"Sigma": sigma},
-  }
-
-
-def imaging_sonar(
-  name: str = "sonar",
-  hz: int = 10,
-  range_min: float = 0.5,
-  range_max: float = 50.0,
-  range_bins: int = 256,
-  azimuth_bins: int = 256,
-  azimuth: float = 90.0,
-) -> dict[str, Any]:
-  """Forward-looking imaging sonar."""
-  return {
-    "sensor_name": name,
-    "sensor_type": "ImagingSonar",
-    "socket": "IMUSocket",
-    "rotation": [0, -90, 0],
-    "Hz": hz,
-    "configuration": {
-      "RangeMin": range_min,
-      "RangeMax": range_max,
-      "RangeBins": range_bins,
-      "AzimuthBins": azimuth_bins,
-      "Azimuth": azimuth,
-      "AddNoise": True,
-    },
   }
 
 

@@ -297,9 +297,8 @@ def test_attitude_filter_chases_an_unmodelled_manoeuvre():
   reckoning comes out short rather than merely noisy.
 
   Detecting the manoeuvre instead of subtracting it is the obvious alternative
-  when there is no DVL, and it does not work -- see the note in
-  ``visuals/README.md``. Any such test must distinguish a manoeuvre from a
-  rotation, and specific force changes under both.
+  when there is no DVL, and it does not work: any such test must distinguish a
+  manoeuvre from a rotation, and specific force changes under both.
   """
   accel = np.array([0.5, 0.0, 0.0])
   reading = LEVEL_ACCEL + accel

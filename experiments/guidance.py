@@ -33,8 +33,7 @@ def thruster_command(error: ArrayLike, yaw: float = 0.0) -> NDArray[np.float64]:
   commanded direction and the torque balance.
 
   **Yaw is thrusters 6 and 7 driven against each other.** Measured in the
-  simulator (``experiments/check_thrusters.py``) rather than taken from the
-  vendored geometry, whose comment would have this vehicle's forward mix push
+  simulator rather than taken from the vendored geometry, whose comment would have this vehicle's forward mix push
   it backwards: fired alone from rest, each horizontal thruster turns the
   vehicle about 28 degrees in half a second, and the pattern that turns it
   with no net force solves to ``[0.045, -0.043, -1, 1]`` over thrusters 4-7.
