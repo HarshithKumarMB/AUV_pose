@@ -938,14 +938,7 @@ class VecchiaMap:
 
   @property
   def tree(self) -> KDTree:
-    """A ``KDTree`` over the survey, built **once** and kept.
-
-    ``navigate.py`` queries the map every ping at 5 Hz. Rebuilding a tree over
-    a hundred thousand soundings on each of those would dominate the tick by
-    orders of magnitude, so it is built lazily here and reused. Lazily rather
-    than in ``__init__`` so that loading a checkpoint stays cheap for callers
-    that only want the hyperparameters.
-    """
+    """A ``KDTree`` over the survey, built on first use and kept."""
     tree = self._tree
     if tree is None:
       tree = self._tree = KDTree(self.structure.points)
@@ -1122,8 +1115,7 @@ class VecchiaMap:
   ):
     """Predict seabed elevation at horizontal positions, one point at a time.
 
-    Signature-compatible with :meth:`auv_pose.mapping.svgp.BathymetryMap.predict`,
-    so ``navigate.py`` takes either map.
+    Signature-compatible with :meth:`auv_pose.mapping.svgp.BathymetryMap.predict`.
 
     :param points: ``(n, 2)`` of ``(x, y)`` in metres.
     :param chunk_size: Points per batch, to bound memory.

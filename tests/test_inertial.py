@@ -12,6 +12,7 @@ from itertools import pairwise
 import numpy as np
 
 from auv_pose.estimation.inertial import (
+  GRAVITY,
   ImuNoise,
   ImuSamples,
   imu_noise_covariance,
@@ -27,25 +28,23 @@ from auv_pose.estimation.manifold import (
   NavState,
 )
 from auv_pose.estimation.quaternion import (
-  GRAVITY_NWU,
   quat_angle,
   quat_exp,
   quat_normalize,
   quat_to_rotmat,
 )
-from auv_pose.estimation.strapdown import StrapdownIntegrator
 
 RATE = 30.0
 DT = 1.0 / RATE
 
 
-def resting_samples(state, k=6, gravity=GRAVITY_NWU):
+def resting_samples(state, k=6):
   """What a motionless vehicle's IMU reports: no rotation, gravity only.
 
   An accelerometer measures specific force ``f = a - g``, so at rest it reads
   ``-g`` rotated into the body frame.
   """
-  specific_force = -quat_to_rotmat(state.attitude).T @ np.asarray(gravity)
+  specific_force = -quat_to_rotmat(state.attitude).T @ GRAVITY
   return ImuSamples.uniform(
     gyro=np.zeros((k, 3)), accel=np.tile(specific_force, (k, 1)), dt=DT
   )
@@ -55,13 +54,7 @@ def resting_samples(state, k=6, gravity=GRAVITY_NWU):
 
 
 def test_a_resting_vehicle_stays_at_rest():
-  """The single test that catches a gravity sign slip.
-
-  ``estimation/__init__.py`` documents that choosing the wrong gravity vector
-  does not announce itself -- a z-down body reading cancels a z-down gravity
-  vector exactly. Here the world is z-up, so the reading and the gravity must
-  disagree in sign for the vehicle to stay put.
-  """
+  """Catches a gravity sign slip, which is otherwise silent."""
   start = NavState.at_rest(position=np.array([10.0, -5.0, -65.0]))
   moved = propagate(start, resting_samples(start, k=30))
 
@@ -87,7 +80,7 @@ def test_free_fall_accelerates_at_gravity():
   )
   moved = propagate(start, samples)
 
-  np.testing.assert_allclose(moved.velocity, GRAVITY_NWU * 1.0, atol=1e-12)
+  np.testing.assert_allclose(moved.velocity, GRAVITY * 1.0, atol=1e-12)
 
 
 def test_a_constant_body_rate_integrates_to_the_closed_form_angle():
@@ -116,7 +109,7 @@ def test_the_gyro_bias_is_subtracted_from_the_rate():
 def test_the_accel_bias_is_subtracted_from_the_specific_force():
   bias = np.array([0.1, -0.2, 0.3])
   start = NavState.at_rest()._replace(accel_bias=bias)
-  reading = -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU + bias
+  reading = -quat_to_rotmat(start.attitude).T @ GRAVITY + bias
 
   samples = ImuSamples.uniform(
     gyro=np.zeros((30, 3)), accel=np.tile(reading, (30, 1)), dt=DT
@@ -157,76 +150,6 @@ def test_propagating_together_matches_propagating_one_at_a_time():
   np.testing.assert_allclose(apart.position, together.position, atol=1e-12)
   np.testing.assert_allclose(apart.velocity, together.velocity, atol=1e-12)
   assert quat_angle(apart.attitude, together.attitude) < 1e-14
-
-
-def test_without_rotation_it_differs_from_strapdown_only_by_the_integrator():
-  """Strapdown is semi-implicit Euler; this is second order.
-
-  With the gyro silent the *only* difference is that strapdown does
-  ``p += v' dt`` where this does ``p += v dt + a dt^2 / 2``, so the gap is
-  exactly ``dt^2 a / 2`` per sample. Pinning it keeps the two from drifting
-  apart for any other reason.
-  """
-  rng = np.random.default_rng(1)
-  accel = rng.normal(size=(20, 3)) * 0.3 + np.array([0.0, 0.0, 9.81])
-  gyro = np.zeros((20, 3))
-
-  start = NavState.at_rest(velocity=np.array([0.7, -0.3, 0.1]))
-  mine = propagate(start, ImuSamples.uniform(gyro, accel, DT))
-
-  integrator = StrapdownIntegrator(
-    position=start.position,
-    attitude=start.attitude,
-    velocity=start.velocity,
-    gravity=GRAVITY_NWU,
-  )
-  offset = np.zeros(3)
-  for sample_gyro, sample_accel in zip(gyro, accel):
-    world_accel = integrator.step(sample_gyro, sample_accel, DT)
-    offset += 0.5 * DT**2 * world_accel
-
-  np.testing.assert_allclose(integrator.velocity, mine.velocity, atol=1e-12)
-  np.testing.assert_allclose(
-    integrator.position - offset, mine.position, atol=1e-12
-  )
-
-
-def test_under_rotation_it_also_differs_from_strapdown_in_attitude_timing():
-  """A second, separate difference, worth knowing about before comparing runs.
-
-  ``StrapdownIntegrator.step`` advances the attitude *first* and then rotates
-  the accelerometer reading with the new one. The paper's equations use the
-  rotation at the start of the interval, ``v' = v + dt (R (a - b_a) + g)``, so
-  the two disagree at first order in ``dt * omega`` whenever the vehicle is
-  turning -- on top of the position-integrator offset above.
-
-  This is not a bug in either. It does mean the smoother and the dead-reckoning
-  baseline are not bit-comparable under rotation, and a discrepancy between
-  them of this size is expected rather than a symptom.
-  """
-  rate = np.array([0.0, 0.0, 0.8])
-  # The lateral component matters: a specific force parallel to the rotation
-  # axis is unmoved by the rotation, and the two integrators would agree by
-  # construction rather than by being equivalent.
-  accel = np.tile([0.5, -0.3, 9.81], (20, 1))
-
-  start = NavState.at_rest(velocity=np.array([1.0, 0.0, 0.0]))
-  mine = propagate(start, ImuSamples.uniform(np.tile(rate, (20, 1)), accel, DT))
-
-  integrator = StrapdownIntegrator(
-    position=start.position,
-    attitude=start.attitude,
-    velocity=start.velocity,
-    gravity=GRAVITY_NWU,
-  )
-  for sample_accel in accel:
-    integrator.step(rate, sample_accel, DT)
-
-  # Same attitude -- that part of the model is shared.
-  assert quat_angle(integrator.attitude, mine.attitude) < 1e-12
-  # But the velocities differ, and by more than the position integrator could
-  # ever explain, because that one does not touch velocity at all.
-  assert np.linalg.norm(integrator.velocity - mine.velocity) > 1e-3
 
 
 # -- the noise covariance, structurally -------------------------------------
@@ -287,7 +210,7 @@ def test_the_position_block_scales_as_dt_to_the_fourth():
   noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
 
   def position_variance(dt):
-    force = -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU
+    force = -quat_to_rotmat(start.attitude).T @ GRAVITY
     samples = ImuSamples.uniform(np.zeros(3), force, dt)
     return np.trace(
       imu_noise_covariance(start, samples, noise)[POSITION, POSITION]
@@ -305,7 +228,7 @@ def test_the_velocity_block_scales_as_dt_squared():
   noise = ImuNoise(gyro=0.0, accel=0.05, gyro_bias=0.0, accel_bias=0.0)
 
   def velocity_variance(dt):
-    force = -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU
+    force = -quat_to_rotmat(start.attitude).T @ GRAVITY
     samples = ImuSamples.uniform(np.zeros(3), force, dt)
     return np.trace(
       imu_noise_covariance(start, samples, noise)[VELOCITY, VELOCITY]
@@ -383,7 +306,7 @@ def batch_log(rotations):
   return vee * (scale / np.where(norm > 0.0, norm, 1.0))[:, None]
 
 
-def sample_errors(state, samples, noise, rng, trials, gravity=GRAVITY_NWU):
+def sample_errors(state, samples, noise, rng, trials):
   """Error states of ``trials`` noisy propagations, against the noise-free one.
 
   The paper's equations with the noise terms left in::
@@ -407,7 +330,7 @@ def sample_errors(state, samples, noise, rng, trials, gravity=GRAVITY_NWU):
     eta_accel = rng.normal(scale=noise.accel, size=(trials, 3))
 
     force = accel - accel_bias - eta_accel
-    acceleration = np.einsum("nij,nj->ni", rotation, force) + gravity
+    acceleration = np.einsum("nij,nj->ni", rotation, force) + GRAVITY
 
     position = position + dt * velocity + 0.5 * dt**2 * acceleration
     velocity = velocity + dt * acceleration
@@ -418,7 +341,7 @@ def sample_errors(state, samples, noise, rng, trials, gravity=GRAVITY_NWU):
       scale=noise.accel_bias, size=(trials, 3)
     )
 
-  nominal = propagate(state, samples, gravity)
+  nominal = propagate(state, samples)
   nominal_rotation = quat_to_rotmat(nominal.attitude)
 
   return np.concatenate(
@@ -443,7 +366,7 @@ def turning_case():
   samples = ImuSamples.uniform(
     gyro=np.tile([0.15, -0.1, 0.25], (k, 1)),
     accel=np.tile(
-      -quat_to_rotmat(start.attitude).T @ GRAVITY_NWU + [0.4, -0.3, 0.2],
+      -quat_to_rotmat(start.attitude).T @ GRAVITY + [0.4, -0.3, 0.2],
       (k, 1),
     ),
     dt=DT,

@@ -4,7 +4,7 @@ The first test is the important one. ``unscented_rts_smooth`` and
 ``rts_smooth`` are the same recursion written two ways -- one taking its gain
 from a recorded cross-covariance, the other forming ``P F^T`` -- so on a
 linear-Gaussian problem they must agree to machine precision. Running the
-existing ``ConstantVelocityEKF``, converting its history, and comparing pins the
+linear ``ConstantVelocityKF`` in ``linear_reference``, converting its history, and comparing pins the
 entire backward pass against an implementation that was already trusted, with no
 map, no IMU and no simulator involved.
 
@@ -15,8 +15,8 @@ chart, and the covariance transport across it.
 import operator
 
 import numpy as np
+from linear_reference import ConstantVelocityKF, Measurement, rts_smooth
 
-from auv_pose.estimation.filters import ConstantVelocityEKF
 from auv_pose.estimation.manifold import (
   DOF,
   ManifoldGaussian,
@@ -25,8 +25,8 @@ from auv_pose.estimation.manifold import (
   covariance_transport,
 )
 from auv_pose.estimation.quaternion import quat_angle, quat_exp
-from auv_pose.estimation.smoothers import rts_smooth, unscented_rts_smooth
-from auv_pose.estimation.typing import Measurement, SmootherStep
+from auv_pose.estimation.smoothers import unscented_rts_smooth
+from auv_pose.estimation.typing import SmootherStep
 
 POSITION_H = np.hstack([np.eye(3), np.zeros((3, 3))])
 
@@ -36,8 +36,8 @@ def linear_run(n=25, seed=0):
   rng = np.random.default_rng(seed)
   dt = 0.1
 
-  ekf = ConstantVelocityEKF(accel_process_sigma=0.5)
-  initial = ConstantVelocityEKF.initial(np.zeros(3))
+  ekf = ConstantVelocityKF(accel_process_sigma=0.5)
+  initial = ConstantVelocityKF.initial(np.zeros(3))
   state = initial
 
   position = np.zeros(3)
@@ -136,7 +136,7 @@ def test_it_returns_one_belief_more_than_there_are_steps():
 
 
 def test_an_empty_history_returns_the_initial_belief():
-  initial = ConstantVelocityEKF.initial(np.zeros(3))
+  initial = ConstantVelocityKF.initial(np.zeros(3))
   assert vector_chart(initial, []) == [initial]
 
 

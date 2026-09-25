@@ -2,8 +2,8 @@
 
 The first test is the one that pins it. On a linear-Gaussian problem the
 unscented predict and update are exact, so run in a vector chart they must
-reproduce ``ConstantVelocityEKF`` -- and the smoother fed their record must
-reproduce ``rts_smooth`` fed the EKF's. That checks the sigma-point moments, the
+reproduce ``ConstantVelocityKF`` -- and the smoother fed their record must
+reproduce ``rts_smooth`` fed the filter's. That checks the sigma-point moments, the
 cross-covariance the backward pass consumes, and the gain, against an
 implementation that was already trusted.
 
@@ -16,10 +16,20 @@ import operator
 
 import numpy as np
 import pytest
+from linear_reference import (
+  ConstantVelocityKF,
+  GaussianState,
+  Measurement,
+  rts_smooth,
+)
 from scipy.stats import chi2
 
-from auv_pose.estimation.filters import ConstantVelocityEKF
-from auv_pose.estimation.inertial import ImuNoise, ImuSamples, propagate
+from auv_pose.estimation.inertial import (
+  GRAVITY,
+  ImuNoise,
+  ImuSamples,
+  propagate,
+)
 from auv_pose.estimation.manifold import (
   DOF,
   ROTATION,
@@ -41,9 +51,9 @@ from auv_pose.estimation.navigation import (
   unscented_predict,
   unscented_update,
 )
-from auv_pose.estimation.quaternion import GRAVITY_NWU, quat_exp
-from auv_pose.estimation.smoothers import rts_smooth, unscented_rts_smooth
-from auv_pose.estimation.typing import GaussianState, Measurement, SmootherStep
+from auv_pose.estimation.quaternion import quat_exp
+from auv_pose.estimation.smoothers import unscented_rts_smooth
+from auv_pose.estimation.typing import SmootherStep
 
 POSITION_H = np.hstack([np.eye(3), np.zeros((3, 3))])
 
@@ -52,13 +62,13 @@ POSITION_H = np.hstack([np.eye(3), np.zeros((3, 3))])
 
 
 def linear_runs(n=25, seed=0):
-  """The EKF's record, and the unscented pass's on the same data."""
+  """The Kalman filter's record, and the unscented pass's on the same data."""
   rng = np.random.default_rng(seed)
   dt = 0.1
 
-  ekf = ConstantVelocityEKF(accel_process_sigma=0.5)
-  F, B, Q = ekf._matrices(dt)
-  initial = ConstantVelocityEKF.initial(
+  ekf = ConstantVelocityKF(accel_process_sigma=0.5)
+  F, B, Q = ekf.matrices(dt)
+  initial = ConstantVelocityKF.initial(
     np.zeros(3), cov=np.diag([1.0, 2.0, 0.5, 0.3, 0.2, 0.1])
   )
 
@@ -187,7 +197,7 @@ def test_the_magnetometer_bounds_heading_and_the_gyro_does_not():
   cov[ROTATION, ROTATION] = np.diag([1e-6, 1e-6, np.radians(10.0) ** 2])
   belief = ManifoldGaussian(mean, cov)
 
-  still = ImuSamples.uniform(np.zeros(3), -GRAVITY_NWU, 1.0 / 30.0)
+  still = ImuSamples.uniform(np.zeros(3), -GRAVITY, 1.0 / 30.0)
   compass = Aiding(
     magnetometer_reading(mean), magnetometer_reading, np.eye(3) * 1e-4
   )
@@ -228,7 +238,7 @@ def simulate(rng, prior, steps):
     gyro, accel = [], []
     for _ in range(SAMPLES_PER_STEP):
       rate = np.array([0.01, -0.02, 0.05])
-      force = truth.rotation.T @ (np.array([0.05, 0.0, 0.0]) - GRAVITY_NWU)
+      force = truth.rotation.T @ (np.array([0.05, 0.0, 0.0]) - GRAVITY)
       clean = ImuSamples.uniform(
         rate + truth.gyro_bias, force + truth.accel_bias, DT
       )
@@ -369,7 +379,7 @@ def ticks(rng, n):
     yield {
       "index": index,
       "gyro": rng.normal(scale=NOISE.gyro, size=3),
-      "accel": -GRAVITY_NWU + rng.normal(scale=NOISE.accel, size=3),
+      "accel": -GRAVITY + rng.normal(scale=NOISE.accel, size=3),
       "dvl": np.array([1.0, 0.0, 0.0]) if aided else None,
       "depth": -60.0 if aided else None,
       "magnetometer": MAGNETIC_NORTH if aided else None,
@@ -387,7 +397,7 @@ def test_a_cycle_closes_on_aiding_and_carries_every_sample_since():
 
 def test_a_ping_closes_a_cycle_without_aiding():
   nav = navigator()
-  still = {"gyro": np.zeros(3), "accel": -GRAVITY_NWU}
+  still = {"gyro": np.zeros(3), "accel": -GRAVITY}
   assert nav.tick(0, **still) is None
   assert nav.tick(1, **still, close=True) is not None
   assert nav.cycle_ticks == [1]

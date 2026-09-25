@@ -109,7 +109,7 @@ def test_a_refused_row_writes_nothing(tmp_path):
 
 
 def test_nan_is_written_as_a_readable_value(tmp_path):
-  """navigate.py logs NaN for map_depth when the sonar returns no echo."""
+  """A beam with no echo is logged as NaN."""
   path = tmp_path / "log.csv"
   with CsvWriter(path, COLUMNS) as log:
     log.write(step=0, x=float("nan"), y=2.0, z=3.0)

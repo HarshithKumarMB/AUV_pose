@@ -111,10 +111,8 @@ class NavState(NamedTuple):
 class ManifoldGaussian(NamedTuple):
   """A Gaussian belief over :class:`NavState`.
 
-  The counterpart of :class:`~auv_pose.estimation.typing.GaussianState` for a
-  state that is not a vector: the mean is a point on the manifold and the
-  covariance lives in the tangent space **at that mean**, so a covariance is
-  only meaningful alongside the mean it was built at.
+  The covariance lives in the tangent space **at the mean**, so it is only
+  meaningful alongside the mean it was built at.
 
   :param mean: Belief mean.
   :param cov: Error-state covariance, shape ``(15, 15)``, blocked by the

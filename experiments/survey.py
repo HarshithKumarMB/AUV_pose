@@ -107,13 +107,7 @@ INITIAL_SIGMA = {
 }
 
 
-#: The box to cover, ``(x_min, x_max, y_min, y_max)`` in metres.
-#:
-#: Sized from what navigation will *look at*, not where it will go.
-#: ``navigate.py`` flies x -30..-10, y -15..-5, and at 70 m altitude a 60 degree
-#: fan reaches 40.2 m either side of the vehicle -- so every beam of every ping
-#: it takes lands somewhere in this box. Surveying only the track would map the
-#: nadir beam's footprint and leave the other 239 over unsurveyed ground.
+#: The default box to cover, ``(x_min, x_max, y_min, y_max)`` in metres.
 SURVEY_BOX = (-70.0, 30.0, -55.0, 35.0)
 
 

@@ -47,7 +47,6 @@ from auv_pose.estimation.manifold import (
   covariance_transport,
   manifold_mean,
 )
-from auv_pose.estimation.quaternion import GRAVITY_NWU
 from auv_pose.estimation.typing import Belief, NumpyArray, SmootherStep
 from auv_pose.estimation.unscented import (
   DEFAULT_RULE,
@@ -272,7 +271,6 @@ def inertial_step(
   samples: ImuSamples,
   aiding: Sequence[Aiding] = (),
   noise: ImuNoise = DEFAULT_NOISE,
-  gravity: ArrayLike = GRAVITY_NWU,
   rule: SigmaRule = DEFAULT_RULE,
 ) -> tuple[SmootherStep[ManifoldGaussian], list[Update[ManifoldGaussian]]]:
   """One cycle of the inertial filter: predict through the IMU, then aid.
@@ -281,13 +279,12 @@ def inertial_step(
   :param samples: The IMU samples covering this cycle.
   :param aiding: Measurements taken at the end of the cycle, applied in order.
   :param noise: The IMU's per-sample noise.
-  :param gravity: World-frame gravity.
   :param rule: Sigma-point placement and weighting.
   :return: The recorded step, and one :class:`Update` per aiding measurement.
   """
   prior, cross_cov = unscented_predict(
     belief,
-    motion=lambda state: propagate(state, samples, gravity),
+    motion=lambda state: propagate(state, samples),
     process_cov=imu_noise_covariance(belief.mean, samples, noise),
     average=lambda points, weights: manifold_mean(points, weights),
     rule=rule,
@@ -341,7 +338,6 @@ class InertialNavigator:
   :param aiding_noise: Noise of the DVL, depth and magnetometer readings.
   :param imu_noise: The IMU's per-sample noise.
   :param field: World vector the magnetometer measures.
-  :param gravity: World-frame gravity.
   """
 
   def __init__(
@@ -351,7 +347,6 @@ class InertialNavigator:
     aiding_noise: AidingNoise,
     imu_noise: ImuNoise = DEFAULT_NOISE,
     field: ArrayLike = MAGNETIC_NORTH,
-    gravity: ArrayLike = GRAVITY_NWU,
   ) -> None:
     self.initial = initial
     self.belief = initial
@@ -359,7 +354,6 @@ class InertialNavigator:
     self.aiding_noise = aiding_noise
     self.imu_noise = imu_noise
     self.field = np.asarray(field, dtype=float)
-    self.gravity = np.asarray(gravity, dtype=float)
 
     #: One recorded step per closed cycle, and the tick that closed it.
     self.history: list[SmootherStep[ManifoldGaussian]] = []
@@ -433,7 +427,6 @@ class InertialNavigator:
       samples,
       aiding,
       noise=self.imu_noise,
-      gravity=self.gravity,
     )
     for name, update in zip(names, updates):
       innovation = update.innovation

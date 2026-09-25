@@ -173,11 +173,8 @@ class BathymetryMap:
   The model is trained on standardised inputs and targets; this wraps it so
   callers can pass raw ``(x, y)`` and get depths back in metres.
 
-  :param device: Where to evaluate. Defaults to the CPU deliberately, unlike
-      :func:`fit_svgp`: ``navigate.py`` queries this one point at a time at tick
-      rate, where moving that point to a GPU and the answer back costs far more
-      than the arithmetic saves. Pass ``"cuda"`` when scoring a large held-out
-      set or rendering a grid, which is where it does pay.
+  :param device: Where to evaluate. CPU by default: single-point queries cost
+      more in transfer than a GPU saves. Use ``"cuda"`` for large batches.
 
   Note:
       ``torch.nn.Module.to`` moves in place, so passing a non-CPU device moves

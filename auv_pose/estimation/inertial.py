@@ -15,9 +15,6 @@ linearly alongside and summed in at the end.
 The propagation equations are the paper's, and the second-order position update
 is not optional: it is the form Forster's covariance recursion is derived for,
 and it is what puts the accelerometer's noise into the position block at all.
-
-See :mod:`auv_pose.estimation` for frames and signs. The world is z-up, so
-``gravity`` defaults to :data:`~auv_pose.estimation.quaternion.GRAVITY_NWU`.
 """
 
 from typing import NamedTuple, Self
@@ -35,7 +32,6 @@ from auv_pose.estimation.manifold import (
   NavState,
 )
 from auv_pose.estimation.quaternion import (
-  GRAVITY_NWU,
   quat_exp,
   quat_multiply,
   quat_normalize,
@@ -45,8 +41,12 @@ from auv_pose.estimation.quaternion import (
 )
 from auv_pose.estimation.typing import NumpyArray
 
+#: World-frame gravity. The world is z up, so it points down.
+GRAVITY = np.array([0.0, 0.0, -9.81])
+
 __all__ = [
   "DEFAULT_NOISE",
+  "GRAVITY",
   "ImuNoise",
   "ImuSamples",
   "imu_noise_covariance",
@@ -146,7 +146,6 @@ DEFAULT_NOISE = ImuNoise()
 def propagate(
   state: NavState,
   samples: ImuSamples,
-  gravity: ArrayLike = GRAVITY_NWU,
 ) -> NavState:
   """Advance a state through a run of IMU samples.
 
@@ -161,28 +160,19 @@ def propagate(
 
   :param state: State to advance.
   :param samples: IMU samples for the step.
-  :param gravity: World-frame gravity. Must match the frame the attitude
-      rotates into -- see :mod:`auv_pose.estimation`, where getting this
-      backwards is documented as silent.
   :return: The advanced state.
 
   Note:
-      The position update is second order in ``dt``, unlike
-      :meth:`~auv_pose.estimation.strapdown.StrapdownIntegrator.step`, which
-      is semi-implicit Euler (``p += v' dt``). The two differ by
-      ``dt^2 a / 2`` per sample. This form is the one Forster's covariance
-      recursion assumes, so using the other here would mean citing a
-      derivation for an integrator it was not written for.
+      The position update is second order in ``dt``, as Forster's covariance
+      recursion assumes.
   """
-  gravity = np.asarray(gravity, dtype=float)
-
   position = np.asarray(state.position, dtype=float)
   attitude = np.asarray(state.attitude, dtype=float)
   velocity = np.asarray(state.velocity, dtype=float)
 
   for gyro, accel, dt in zip(samples.gyro, samples.accel, samples.dt):
     rotation = quat_to_rotmat(attitude)
-    acceleration = rotation @ (accel - state.accel_bias) + gravity
+    acceleration = rotation @ (accel - state.accel_bias) + GRAVITY
 
     position = position + dt * velocity + 0.5 * dt**2 * acceleration
     velocity = velocity + dt * acceleration

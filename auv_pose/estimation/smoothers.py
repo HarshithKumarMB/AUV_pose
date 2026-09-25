@@ -1,11 +1,4 @@
-"""Non-causal estimators.
-
-A smoother uses the whole record, including observations from after the step it
-is estimating, so it can only run once a trajectory is complete. That is the
-opposite of the filters in :mod:`auv_pose.estimation.filters`, and why the two
-live apart: this module imports no filter, only the shared types, so it will
-smooth a run recorded by any of them -- or steps built by hand from a log.
-"""
+"""Fixed-interval smoothing of a recorded filter run."""
 
 from collections.abc import Callable, Sequence
 
@@ -20,61 +13,7 @@ from auv_pose.estimation.manifold import (
 from auv_pose.estimation.manifold import (
   covariance_transport as manifold_transport,
 )
-from auv_pose.estimation.typing import (
-  Belief,
-  GaussianState,
-  NumpyArray,
-  SmootherStep,
-  Step,
-)
-
-__all__ = ["rts_smooth", "unscented_rts_smooth"]
-
-
-def rts_smooth(
-  initial: GaussianState, history: Sequence[Step]
-) -> list[GaussianState]:
-  """Rauch-Tung-Striebel fixed-interval smoothing.
-
-  Walks backwards from the final belief, correcting each step with what the
-  future turned out to hold::
-
-      C_k = P_k F^T (P_{k+1}^-)^{-1}
-      x_k = x_k^f + C_k (x_{k+1}^s - x_{k+1}^-)
-      P_k = P_k^f + C_k (P_{k+1}^s - P_{k+1}^-) C_k^T
-
-  Exact rather than approximate here, because the constant-velocity dynamics
-  are linear.
-
-  Note:
-      Smoothing cannot make an unobservable direction observable. Where the
-      measurement model never constrains a state component, the backward pass
-      tightens its covariance only through correlation with components that
-      are constrained.
-
-  :param initial: Belief before the first step.
-  :param history: Recorded steps, oldest first, as produced by
-      :meth:`auv_pose.estimation.filters.Filter.step`.
-  :return: Smoothed beliefs, oldest first, one longer than ``history``
-      because the initial belief is included.
-  """
-  posteriors = [initial] + [step.posterior for step in history]
-  n = len(posteriors)
-
-  smoothed: list[GaussianState] = [posteriors[-1]] * n
-
-  for k in range(n - 2, -1, -1):
-    filtered = posteriors[k]
-    step = history[k]  # the step leading from k to k + 1
-
-    gain = filtered.cov @ step.transition.T @ np.linalg.inv(step.prior.cov)
-
-    smoothed[k] = GaussianState(
-      mean=filtered.mean + gain @ (smoothed[k + 1].mean - step.prior.mean),
-      cov=filtered.cov + gain @ (smoothed[k + 1].cov - step.prior.cov) @ gain.T,
-    )
-
-  return smoothed
+from auv_pose.estimation.typing import Belief, NumpyArray, SmootherStep
 
 
 def unscented_rts_smooth(
@@ -86,17 +25,14 @@ def unscented_rts_smooth(
 ) -> list[Belief]:
   """Fixed-interval smoothing for a filter that records no transition matrix.
 
-  The same recursion as :func:`rts_smooth`, written in a chart::
+  Rauch-Tung-Striebel, written in a chart::
 
       G_k = C_{k+1} (P_{k+1}^-)^{-1}
       x_k = x_k^f [+] G_k (x_{k+1}^s [-] x_{k+1}^-)
       P_k = P_k^f + G_k (P_{k+1}^s - P_{k+1}^-) G_k^T
 
-  The gain comes from a recorded cross-covariance rather than from ``P F^T``,
-  which is the only reason an unscented forward pass can be smoothed at all:
-  it has no ``F``. For a linear filter the two are the same number, so this
-  reduces to :func:`rts_smooth` exactly -- and that is worth knowing, because
-  it means the backward pass can be tested where the right answer is known.
+  The gain comes from the recorded cross-covariance, since an unscented
+  forward pass has no ``F``; for a linear filter it equals ``P F^T``.
 
   **This pass is exact given the forward pass.** Every approximation in the
   smoother lives in the predict and update steps that produced ``history``.
