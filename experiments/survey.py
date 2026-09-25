@@ -1,24 +1,12 @@
-"""Survey the seabed on a lawnmower track, navigating on the vehicle's own filter.
+"""Fly a survey or test track on the vehicle's own navigation, logging raw data.
 
     nix run .#sim -- -c "python -u experiments/survey.py --out pass0 --yaw 0"
 
-Flies a boustrophedon pattern with a downward **multibeam**, steering on the
-estimate of an unscented inertial filter aided by a DVL, a pressure sensor and
-a magnetometer -- no absolute position fix, as on the hardware vehicle. It
-writes a **raw log** (:mod:`auv_pose.io.raw_survey`), not soundings: where a
-sounding lies depends on a pose that is only settled once the whole run can be
-smoothed, so ``georeference.py`` places them afterwards. That is how a real
-survey is processed, and it means one flight yields both the navigated map and
-a ground-truth-placed control, from the same pings.
-
-Ground truth is logged beside every reading for scoring and never read by the
-filter or the controller. The one exception is the initial belief, which is
-drawn *around* the true start pose with the stated covariance -- standing in for
-the surface fix a real vehicle takes before it dives.
-
-The multibeam's per-beam return is 0.40 m wide, and 100% of beams answer at
-survey altitude. Sonar and aiding sensors all run at 5 Hz, so every filter
-cycle closes on a ping tick and the smoothed pose lands exactly on it.
+Steers on an unscented inertial filter aided by DVL, depth and compass, with no
+absolute position fix, and writes a raw log (:mod:`auv_pose.io.raw_survey`).
+``georeference.py`` places the soundings afterwards, once the run is smoothed.
+Ground truth is logged for scoring only; the initial belief is drawn around it,
+standing in for a surface fix.
 """
 
 import argparse
@@ -110,37 +98,25 @@ INITIAL_SIGMA = {
 #: The default box to cover, ``(x_min, x_max, y_min, y_max)`` in metres.
 SURVEY_BOX = (-70.0, 30.0, -55.0, 35.0)
 
+#: Lawnmower line spacing, metres. The swath is 80 m wide at survey altitude, so
+#: this gives four looks at every patch from one heading.
+SPACING = 20.0
+#: Ticks under zero thrust before navigation starts: the vehicle is dropped in
+#: negatively buoyant and is still sinking on the first tick.
+SETTLE_STEPS = 60
+MAX_STEPS = 100_000
+ARRIVAL_RADIUS = 0.5
+
 
 def lawnmower(
   heading: float = 0.0,
   box: tuple[float, float, float, float] = SURVEY_BOX,
-  spacing: float = 5.0,
+  spacing: float = SPACING,
   z: float = 0.0,
 ) -> list[list[float]]:
-  """Boustrophedon track aligned to ``heading``, covering ``box``.
+  """Boustrophedon track covering ``box``, lines along ``heading`` degrees.
 
-  **The vehicle travels along its own x, so the fan is across-track.** That is
-  the whole point of the alignment: the fan opens along body -y and the vehicle
-  never rotates, so a track running parallel to the fan sweeps the same strip of
-  seabed 240 times and leaves the across-track sampling at the line spacing.
-  Measured that way, a 240-beam fan bought no more coverage than one beam.
-
-  Flying the same box at several headings is then how a patch gets seen from
-  several directions, which fills the shadow a pipeline casts from any one of
-  them. Each heading is a separate run -- the spawn attitude is held for the
-  whole flight and nothing commands yaw.
-
-  Args:
-      heading: Track direction in degrees, counter-clockwise from world ``+x``.
-          Must match the vehicle's spawn yaw or the fan is not across-track.
-      box: Region to cover.
-      spacing: Line spacing in metres. Generous compared to the old 2 m,
-          because at 70 m altitude a 60 degree fan reaches 40 m either side and
-          the redundancy is now real rather than the same strip re-measured.
-      z: Depth to hold.
-
-  Returns:
-      Waypoints, ``(n, 3)`` as a list.
+  Returns ``(n, 3)`` waypoints as a list.
   """
   angle = np.radians(heading)
   forward = np.array([np.cos(angle), np.sin(angle)])
@@ -175,26 +151,11 @@ def figure_eight(
   depths: tuple[float, float] = (0.0, -30.0),
   loop_points: int = 36,
 ) -> list[list[float]]:
-  """A figure-eight test track: two tangent circles, each at its own depth.
+  """A test track: two tangent loops, each at its own depth.
 
-  Made to be flown *after* a survey, as a test set the map never saw: its
-  soundings land between the survey's, on every heading, from a navigation
-  run with its own drift. The two depths put the fan at two altitudes, so the
-  map is tested at two sounding densities.
-
-  Loop one is flown anticlockwise from the crossing at ``depths[0]``; the
-  vehicle then changes depth at the crossing and flies loop two clockwise at
-  ``depths[1]``, ending back where it started -- the crossing is where the
-  track overlaps itself at both altitudes.
-
-  Args:
-      centre: Where the loops touch, world ``(x, y)``.
-      radius: Radius of each loop, metres.
-      depths: World ``z`` of loop one and loop two.
-      loop_points: Waypoints per loop.
-
-  Returns:
-      Waypoints, ``(n, 3)`` as a list, starting at the crossing.
+  Starts at the crossing, flies loop one anticlockwise at ``depths[0]``, changes
+  depth at the crossing and flies loop two clockwise at ``depths[1]``. Its
+  soundings land between the survey's, at two altitudes.
   """
   cx, cy = centre
   first, second = depths
@@ -241,8 +202,7 @@ def build_scenario(
     start=start,
     world=world,
     octree_min=octree_min,
-    # Held for the whole run; nothing commands yaw. This is what turns the fan
-    # across-track, so it must match the heading lawnmower() was built with.
+    # Start facing along the first line.
     rotation=[0.0, 0.0, yaw],
     sensors=[
       # Truth, logged for scoring only. The socket is load-bearing -- see
@@ -314,17 +274,7 @@ def parse_args() -> argparse.Namespace:
     default="lawnmower",
     help=(
       "lawnmower surveys --box; figure8 flies a test track the map is scored "
-      "on, two loops at --depths about --centre. Without --turn the vehicle "
-      "crabs around the loops at its spawn heading"
-    ),
-  )
-  parser.add_argument(
-    "--turn",
-    action="store_true",
-    help=(
-      "point the bow along the direction of travel instead of crabbing at the "
-      "spawn heading, so the body-fixed fan turns with the track. The first "
-      "runs where the vehicle rotates at all"
+      "on, two loops at --depths about --centre"
     ),
   )
   parser.add_argument(
@@ -336,18 +286,12 @@ def parse_args() -> argparse.Namespace:
     help="figure8: where the loops touch",
   )
   parser.add_argument(
-    "--radius", type=float, default=15.0, help="figure8: loop radius, m"
-  )
-  parser.add_argument(
     "--depths",
     type=float,
     nargs=2,
     default=[0.0, -30.0],
     metavar=("Z1", "Z2"),
     help="figure8: world z of each loop",
-  )
-  parser.add_argument(
-    "--loop-points", type=int, default=36, help="figure8: waypoints per loop"
   )
   parser.add_argument(
     "--box",
@@ -358,32 +302,11 @@ def parse_args() -> argparse.Namespace:
     help="region to cover, metres",
   )
   parser.add_argument(
-    "--spacing",
-    type=float,
-    default=20.0,
-    help=(
-      "line spacing, metres. Sets redundancy, not coverage: the swath is 80 m "
-      "wide at survey altitude, so 20 m already gives four looks at every "
-      "patch from one heading"
-    ),
-  )
-  parser.add_argument(
     "--seed",
     type=int,
     default=0,
     help="seeds the initial belief's draw around the true start pose",
   )
-  parser.add_argument(
-    "--settle-steps",
-    type=int,
-    default=60,
-    help=(
-      "ticks under zero thrust before navigation starts. The vehicle is "
-      "dropped in negatively buoyant and is still sinking on the first tick"
-    ),
-  )
-  parser.add_argument("--max-steps", type=int, default=100_000)
-  parser.add_argument("--arrival-radius", type=float, default=0.5)
   parser.add_argument(
     "--octree-min",
     type=float,
@@ -435,23 +358,17 @@ def main() -> None:
 
   if args.route == "figure8":
     waypoints = figure_eight(
-      centre=tuple(args.centre),
-      radius=args.radius,
-      depths=tuple(args.depths),
-      loop_points=args.loop_points,
+      centre=tuple(args.centre), depths=tuple(args.depths)
     )
     print(
-      f"figure eight about {tuple(args.centre)}: two {args.radius:g} m loops "
-      f"at z = {args.depths[0]:g} and {args.depths[1]:g} m, heading held at "
-      f"{args.yaw:.0f} deg"
+      f"figure eight about {tuple(args.centre)} at z = {args.depths[0]:g} and "
+      f"{args.depths[1]:g} m"
     )
   else:
     waypoints = lawnmower(
-      heading=args.yaw, box=tuple(args.box), spacing=args.spacing, z=args.depth
+      heading=args.yaw, box=tuple(args.box), spacing=SPACING, z=args.depth
     )
-    print(
-      f"lawnmower, heading {args.yaw:.0f} deg, {args.spacing:.1f} m spacing"
-    )
+    print(f"lawnmower, heading {args.yaw:.0f} deg")
   track = np.asarray(waypoints)
   print(
     f"{len(waypoints)} waypoints, "
@@ -472,7 +389,7 @@ def main() -> None:
   command = np.zeros(8)
   state = env.tick()
   dvl = None
-  for _ in range(args.settle_steps):
+  for _ in range(SETTLE_STEPS):
     state = env.step(command)
     dvl = reading(state, "dvl", 3) if "dvl" in state else dvl
 
@@ -531,19 +448,18 @@ def main() -> None:
     "world": args.world,
     "depth": args.depth,
     "route": args.route,
-    "turn": args.turn,
     "box": list(args.box),
-    "spacing": args.spacing,
+    "spacing": SPACING,
     "waypoints": waypoints,
   }
 
-  follower = WaypointFollower(waypoints, args.arrival_radius, turn=args.turn)
+  follower = WaypointFollower(waypoints, ARRIVAL_RADIUS)
   ticks = 0
   pings = 0
   live_beams = 0
 
   with RawSurveyWriter(args.out, len(bearings), meta) as log:
-    for step in range(args.max_steps):
+    for step in range(MAX_STEPS):
       state = env.step(command)
       ticks += 1
 
@@ -613,7 +529,7 @@ def main() -> None:
         continue
       command = next_command
     else:
-      print(f"stopped after {args.max_steps} steps without finishing")
+      print(f"stopped after {MAX_STEPS} steps without finishing")
 
   print(f"Wrote {pings} pings and {ticks} ticks to {args.out}")
   if pings:

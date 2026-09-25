@@ -64,19 +64,15 @@ def wrap(angle: float) -> float:
 class WaypointFollower:
   """Steers through a waypoint list, advancing on arrival.
 
-  With ``turn`` the vehicle also points its bow along the direction of travel,
-  as a survey AUV does, instead of crabbing at its starting heading. That turns
-  a body-fixed sonar fan with the track: across-track on every leg, and
-  sweeping round on a loop.
+  The bow is turned along the direction of travel, as a survey AUV does, so a
+  body-fixed sonar fan stays across-track on every leg.
 
   Args:
       waypoints: Sequence of ``(x, y, z)`` targets.
       arrival_radius: Distance at which a waypoint counts as reached, metres.
-      turn: Steer the heading toward the direction of travel.
       yaw_gain: Turning command per radian of heading error.
-      yaw_damping: Turning command per radian per second of heading rate.
-          The vehicle yaws readily -- one thruster turns it 28 degrees in half
-          a second -- so without damping it overshoots.
+      yaw_damping: Turning command per radian per second of heading rate;
+          the vehicle yaws readily and overshoots without it.
       dt: Interval between calls, seconds, for the heading rate.
       hold_within: Keep the last heading target inside this distance of a
           waypoint, metres, so arrival does not spin the vehicle toward it.
@@ -86,7 +82,6 @@ class WaypointFollower:
     self,
     waypoints: ArrayLike,
     arrival_radius: float = 0.5,
-    turn: bool = False,
     yaw_gain: float = 4.0,
     yaw_damping: float = 3.0,
     dt: float = 1.0 / 30.0,
@@ -97,7 +92,6 @@ class WaypointFollower:
       raise ValueError(f"expected (n, 3) waypoints, got {self.waypoints.shape}")
     self.arrival_radius = arrival_radius
     self.index = 0
-    self.turn = turn
     self.yaw_gain = yaw_gain
     self.yaw_damping = yaw_damping
     self.dt = dt
@@ -114,25 +108,15 @@ class WaypointFollower:
     return self.waypoints[self.index]
 
   def command(
-    self, position: ArrayLike, rotation: ArrayLike | None = None
+    self, position: ArrayLike, rotation: ArrayLike
   ) -> NDArray[np.float64] | None:
     """Thruster command steering from ``position`` toward the current waypoint.
 
     Args:
         position: Current world position, ``(3,)``.
-        rotation: Body-to-world rotation, ``(3, 3)``. **Required for any run
-            that is not aligned with the world axes.** The waypoint error is a
-            world vector and :func:`thruster_command` mixes body thrusters, so
-            without this the two frames are silently assumed identical --
-            measured at yaw 90 degrees a commanded world ``+x`` produces world
-            ``+y``, and at 180 degrees ``-x``, which is positive feedback.
-
-            Only the **heading** is taken from it. HoloOcean reports this
-            vehicle's attitude as ``diag(1, -1, -1)`` at zero yaw -- a
-            z-down body frame, not a rolled vehicle -- so applying the whole
-            matrix inverts ``e_y`` and ``e_z`` and inverts depth control with
-            them. That is not hypothetical: it stalled a survey 16 m short of
-            its first waypoint, having driven the one axis it left alone.
+        rotation: Body-to-world rotation, ``(3, 3)``. Only its heading is used:
+            HoloOcean's level attitude is ``diag(1, -1, -1)``, and applying the
+            whole matrix would invert depth control.
 
     Returns:
         None when the waypoint has just been reached -- advance and try again
@@ -147,24 +131,18 @@ class WaypointFollower:
       self.index += 1
       return None
 
-    yaw = 0.0
-    if rotation is not None:
-      rotation = np.asarray(rotation, dtype=float)
-      # Heading of the body x axis in the world. At zero yaw this is a no-op,
-      # so every run flown before headings existed is reproduced exactly.
-      heading = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
-      if self.turn:
-        yaw = self._turning(heading, error)
-      cos, sin = np.cos(heading), np.sin(heading)
-      error = np.array(
-        [
-          cos * error[0] + sin * error[1],
-          -sin * error[0] + cos * error[1],
-          error[2],
-        ]
-      )
-
-    return thruster_command(error, yaw)
+    rotation = np.asarray(rotation, dtype=float)
+    heading = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+    yaw = self._turning(heading, error)
+    cos, sin = np.cos(heading), np.sin(heading)
+    body = np.array(
+      [
+        cos * error[0] + sin * error[1],
+        -sin * error[0] + cos * error[1],
+        error[2],
+      ]
+    )
+    return thruster_command(body, yaw)
 
   def _turning(self, heading: float, error: NDArray[np.float64]) -> float:
     """PD turning command toward the direction of travel."""

@@ -1,30 +1,14 @@
-"""Place a raw survey's soundings, from the smoothed pose or from truth.
+"""Place a raw survey's soundings from the smoothed pose, or from truth.
 
-    python experiments/georeference.py ~/data/auv_pose/surveys_v3/pass0 \\
-        --pose smoothed --out pass0_smoothed.csv
-    python experiments/georeference.py ~/data/auv_pose/surveys_v3/pass0 \\
-        --pose truth --out pass0_truth.csv
+    python experiments/georeference.py pass0 --out pass0_smoothed.csv
+    python experiments/georeference.py pass0 --pose truth --out pass0_truth.csv
 
-Replays the log's ticks through the same
-:class:`~auv_pose.estimation.navigation.InertialNavigator` the vehicle steered
-on, smooths the record with
-:func:`~auv_pose.estimation.smoothers.unscented_rts_smooth`, and places every
-beam from the pose at its ping. Each sounding also records where the same range
-would have landed from the true pose, for scoring.
-
-**Errors are relative to the start.** Nothing observes horizontal position, so
-the surface fix's error is carried unchanged to the end of the run: one offset,
-shared by every sounding, which moves the whole map rigidly and distorts none
-of it. It belongs to the map's frame, not to any sounding, so it is reported
-apart (:attr:`~auv_pose.io.raw_survey.RawSurvey.start_offset`) and the pose's
-honesty is scored against the error that remains.
-
-``--pose truth`` is the control: the same pings, placed exactly. Fitting a map to both separates "the map is distorted by
-navigation" from everything else.
-
-The replay is checked against the flight: it must reproduce the filter's own
-innovations, which it does exactly when nothing in the navigation has changed
-since the survey was flown.
+Replays the log through the navigator the vehicle steered on, smooths it, and
+places every beam from the pose at its ping. Each sounding also records where
+it would have landed from the true pose. Nothing observes horizontal position,
+so the surface fix's error shifts the whole run rigidly; it is reported apart
+(:attr:`~auv_pose.io.raw_survey.RawSurvey.start_offset`) and errors are scored
+relative to it.
 """
 
 import argparse
@@ -61,13 +45,7 @@ def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("log", type=Path, help="raw survey log directory")
   parser.add_argument(
-    "--pose",
-    choices=("smoothed", "filtered", "truth"),
-    default="smoothed",
-    help=(
-      "which pose places the soundings. 'filtered' is the causal estimate the "
-      "vehicle steered on, kept to show what smoothing buys"
-    ),
+    "--pose", choices=("smoothed", "truth"), default="smoothed"
   )
   parser.add_argument("--out", type=Path, required=True)
   parser.add_argument("--force", action="store_true")
@@ -78,7 +56,7 @@ def initial_belief(meta: dict, anchored: bool = False) -> ManifoldGaussian:
   """The belief the flight started from, as its metadata recorded it.
 
   :param anchored: Pin the start's horizontal position, so every covariance
-      that follows is relative to it. See the module docstring.
+      that follows is relative to it.
   """
   mean = meta["initial_mean"]
   sigma = meta["initial_sigma"]
@@ -104,15 +82,15 @@ def initial_belief(meta: dict, anchored: bool = False) -> ManifoldGaussian:
   return ManifoldGaussian(state, cov)
 
 
-def replay(survey: RawSurvey, anchored: bool = True) -> InertialNavigator:
-  """Run the flight's forward pass again, tick for tick.
+def replay(survey: RawSurvey) -> InertialNavigator:
+  """Run the flight's forward pass again, anchored at the start.
 
-  Anchored, the means are the flight's -- nothing observes horizontal position,
-  so its prior never enters a gain -- and only the covariances change.
+  The means are the flight's: nothing observes horizontal position, so its
+  prior never enters a gain. Only the covariances change.
   """
   meta = survey.meta
   navigator = InertialNavigator(
-    initial_belief(meta, anchored),
+    initial_belief(meta, anchored=True),
     1.0 / meta["tick_rate_hz"],
     AidingNoise(
       dvl=dvl_noise_covariance(
@@ -183,16 +161,10 @@ def main() -> None:
       dof = {"dvl": 3, "depth": 1, "compass": 3}[name]
       print(f"  {name:8s} mean NIS {np.mean(values):.2f} against {dof}")
 
-    beliefs = (
-      [step.posterior for step in navigator.history]
-      if args.pose == "filtered"
-      else unscented_rts_smooth(navigator.initial, navigator.history)[1:]
-    )
-    poses = dict(zip(navigator.cycle_ticks, beliefs))
+    smoothed = unscented_rts_smooth(navigator.initial, navigator.history)[1:]
+    poses = dict(zip(navigator.cycle_ticks, smoothed))
 
-    # How honest the pose is where it matters: at the pings, in the six
-    # coordinates that place a sounding -- horizontally relative to the start's
-    # own error, which is what the anchored covariance describes.
+    # Pose error at the pings, horizontally relative to the start's own error.
     print(
       f"  shared start offset {np.round(start, 2)} m against "
       f"{np.round(sigma0, 2)} m (1 sigma), in the map frame, not per sounding"
@@ -206,7 +178,7 @@ def main() -> None:
       block = belief.cov[np.ix_(POSE, POSE)]
       nees.append(error @ np.linalg.solve(block, error))
     print(
-      f"  {args.pose} pose at the pings: error relative to the start median "
+      f"  smoothed pose at the pings: error relative to the start median "
       f"{np.median(errors):.2f} m, max {np.max(errors):.2f} m; "
       f"mean NEES {np.mean(nees):.2f} against 6"
     )
@@ -223,9 +195,7 @@ def main() -> None:
     true_points = seabed_points(
       true.position, true.rotation, ranges, bearings, swath, nadir
     )
-    # Truth in the map's frame, which the shared start offset displaces
-    # rigidly from the world's: the question downstream is how wrong the map is,
-    # not where its frame sits.
+    # Truth in the map's frame, shifted by the shared start offset.
     true_points[:, :2] += map_frame
     finite = np.isfinite(points).all(axis=1)
     frames.append(
@@ -250,7 +220,6 @@ def main() -> None:
   )
 
   if args.pose != "truth":
-    # Truth is already in the map's frame, so this is relative to the start.
     offset = (
       soundings[["x", "y"]].to_numpy()
       - soundings[["true_x", "true_y"]].to_numpy()

@@ -21,12 +21,7 @@ def legs(waypoints):
 
 @pytest.mark.parametrize("heading", [0.0, 45.0, 90.0, 135.0])
 def test_traverses_run_along_the_heading(heading):
-  """The fan opens along body -y, so the track must run along body x.
-
-  A track parallel to the fan sweeps the same strip 240 times and leaves the
-  across-track sampling at the line spacing -- which is how a 240-beam fan
-  bought no more coverage than one beam.
-  """
+  """The long legs run along the heading, the short steps across it."""
   forward = np.array([np.cos(np.radians(heading)), np.sin(np.radians(heading))])
 
   for direction in legs(lawnmower(heading=heading)):
