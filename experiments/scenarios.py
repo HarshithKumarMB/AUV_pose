@@ -13,20 +13,6 @@ Note:
 
 from typing import Any
 
-__all__ = [
-  "PROFILER_NADIR_AXIS",
-  "PROFILER_SWATH_AXIS",
-  "blue_rov_agent",
-  "depth_sensor",
-  "dvl_sensor",
-  "imu_sensor",
-  "magnetometer_sensor",
-  "ocean_scenario",
-  "orientation_sensor",
-  "pose_sensor",
-  "profiling_sonar",
-]
-
 
 def imu_sensor(
   name: str = "imu",

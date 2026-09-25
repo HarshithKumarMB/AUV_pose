@@ -28,8 +28,7 @@ hardware data as it does on simulated.
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-
-__all__ = ["ground_surface", "object_soundings"]
+from scipy import ndimage
 
 
 def _grid(points: np.ndarray, cell: float) -> tuple[np.ndarray, np.ndarray]:
@@ -58,8 +57,6 @@ def ground_surface(
       multibeam here returns every beam and has no such spikes; a real sonar's
       would be rejected by a range gate before this runs.
   """
-  from scipy import ndimage
-
   points = np.asarray(points, dtype=float)
   z = np.asarray(z, dtype=float)
   index, shape = _grid(points, cell)
@@ -103,8 +100,6 @@ def object_soundings(
       about the part of a pipe's width below the core height.
   :return: ``(n,)`` boolean, True for an object sounding.
   """
-  from scipy import ndimage
-
   points = np.asarray(points, dtype=float)
   above = np.nan_to_num(
     np.asarray(z, dtype=float) - ground_surface(points, z, cell, window),

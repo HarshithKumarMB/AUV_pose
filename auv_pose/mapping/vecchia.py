@@ -38,30 +38,14 @@ from typing import Literal, Self, overload
 import numpy as np
 import torch
 from numpy.typing import ArrayLike
+from scipy.sparse import csc_matrix
+from scipy.sparse.linalg import spsolve_triangular
 from scipy.spatial import KDTree
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 from auv_pose.mapping.kernels import matern52, matern52_gradient
 from auv_pose.mapping.ordering import maximin_order, ordered_neighbours
-
-__all__ = [
-  "DEFAULT_JITTER",
-  "MeanBasis",
-  "VecchiaHyperparameters",
-  "VecchiaMap",
-  "VecchiaStructure",
-  "build_structure",
-  "design_matrix",
-  "draw",
-  "fit_vecchia",
-  "initial_hyperparameters",
-  "sparse_factor",
-  "vecchia_loglik",
-  "vecchia_reml",
-  "whiten",
-  "whiten_gram",
-]
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:
@@ -572,8 +556,6 @@ def sparse_factor(
       ``K = L L^T`` gives ``K^-1 = L^-T L^-1``, so its corner of ``U`` is
       ``L^-T``.
   """
-  from scipy.sparse import csc_matrix
-
   device, dtype = log_amplitude.device, log_amplitude.dtype
   points = torch.as_tensor(structure.points, dtype=dtype, device=device)
   noise = torch.as_tensor(noise, dtype=dtype, device=device).expand(
@@ -693,8 +675,6 @@ def draw(
       the approximation. Generate with a conditioning set several times larger
       than the one being tested.
   """
-  from scipy.sparse.linalg import spsolve_triangular
-
   factor = sparse_factor(
     structure,
     log_amplitude,

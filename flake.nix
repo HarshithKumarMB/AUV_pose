@@ -65,8 +65,7 @@
 
       # Upstream is access-gated (GitHub account linked to Epic Games) and PyPI is
       # stuck at 0.5.8, so 2.3.0 can only come from the vendored client. It is an
-      # unmodified copy of tag v2.3.0 -- see vendor/holoocean/VENDOR.md, and
-      # scripts/update-vendor.sh to re-verify that.
+      # unmodified copy of tag v2.3.0 -- see vendor/holoocean/VENDOR.md.
       #
       # Two spellings of the same path: a Nix path for the build, and a
       # repo-relative string for the shell hook. Keep them in sync.

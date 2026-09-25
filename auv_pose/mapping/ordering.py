@@ -22,8 +22,7 @@ import heapq
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-
-__all__ = ["maximin_order", "ordered_neighbours"]
+from scipy.spatial import KDTree
 
 
 def maximin_order(
@@ -64,8 +63,6 @@ def maximin_order(
       grid and exact ties are common; a stored ordering that does not reproduce
       is a thoroughly unpleasant bug to chase.
   """
-  from scipy.spatial import KDTree
-
   points = np.asarray(points, dtype=float)
   if points.ndim != 2:
     raise ValueError(f"expected (n, d) points, got {points.shape}")
@@ -226,8 +223,6 @@ def ordered_neighbours(
       which at the ~144k soundings of a decimated survey is about 1560. Hence
       the default of 2048.
   """
-  from scipy.spatial import KDTree
-
   points = np.asarray(points, dtype=float)
   if points.ndim != 2:
     raise ValueError(f"expected (n, d) points, got {points.shape}")

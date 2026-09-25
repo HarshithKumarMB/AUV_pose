@@ -23,13 +23,6 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-__all__ = [
-  "OPTIONAL_COLUMNS",
-  "SOUNDING_COLUMNS",
-  "load_soundings",
-  "soundings_to_arrays",
-]
-
 SOUNDING_COLUMNS = ("x", "y", "z")
 
 #: Written by ``georeference.py`` and optional on read. ``ping`` groups the

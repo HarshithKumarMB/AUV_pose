@@ -26,6 +26,7 @@ from itertools import pairwise
 import numpy as np
 import pytest
 import torch
+from scipy.spatial import KDTree
 
 from auv_pose.estimation.terrain import DepthMap
 from auv_pose.mapping.kernels import matern52, matern52_gradient
@@ -1335,8 +1336,6 @@ def test_a_draw_comes_back_in_the_callers_order():
   # Nearby points must have similar values; that is only true in the right
   # order. Compare the spread of differences between neighbours in the
   # caller's frame against the spread over arbitrary pairs.
-  from scipy.spatial import KDTree
-
   _, partner = KDTree(points).query(points, k=2)
   partner = np.asarray(partner)
   close = np.abs(values - values[partner[:, 1]]).mean()

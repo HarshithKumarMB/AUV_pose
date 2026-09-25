@@ -6,13 +6,6 @@ Pure numpy -- no simulator dependency, so this is testable offline.
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-__all__ = [
-  "azimuth_angles",
-  "bottom_return_ranges",
-  "range_bins",
-  "seabed_points",
-]
-
 
 def range_bins(
   range_min: float, range_max: float, n_bins: int

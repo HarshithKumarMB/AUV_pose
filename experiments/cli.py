@@ -3,11 +3,6 @@
 import os
 from pathlib import Path
 
-__all__ = [
-  "configure_sdl",
-  "refuse_overwrite",
-]
-
 
 def configure_sdl(headless: bool) -> None:
   """Point SDL at a video backend the FHS environment actually provides.

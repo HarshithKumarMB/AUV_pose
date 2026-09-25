@@ -5,8 +5,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Self
 
-__all__ = ["CsvWriter"]
-
 
 class CsvWriter:
   """Write rows to a CSV with a fixed header, refusing any that do not match.

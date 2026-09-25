@@ -25,8 +25,6 @@ from numpy.typing import ArrayLike
 
 from auv_pose.estimation.typing import NumpyArray
 
-__all__ = ["DepthMap"]
-
 
 @runtime_checkable
 class DepthMap(Protocol):

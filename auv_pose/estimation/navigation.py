@@ -57,21 +57,6 @@ from auv_pose.estimation.unscented import (
   weighted_mean,
 )
 
-__all__ = [
-  "MAGNETIC_NORTH",
-  "Aiding",
-  "AidingNoise",
-  "InertialNavigator",
-  "Update",
-  "depth_reading",
-  "dvl_noise_covariance",
-  "dvl_reading",
-  "inertial_step",
-  "magnetometer_reading",
-  "unscented_predict",
-  "unscented_update",
-]
-
 #: What HoloOcean's ``MagnetometerSensor`` measures unless configured otherwise:
 #: the world x axis, expressed in the sensor frame. Unit length, so the reading
 #: carries direction only.

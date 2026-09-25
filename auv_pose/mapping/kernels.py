@@ -24,8 +24,6 @@ import math
 import torch
 from torch import Tensor
 
-__all__ = ["matern52", "matern52_gradient"]
-
 _SQRT5 = math.sqrt(5.0)
 
 
