@@ -1,9 +1,4 @@
-"""Sparse variational GP surrogate for seabed bathymetry.
-
-Maps horizontal position ``(x, y)`` to seabed depth. An exact GP is not an option here: the surveys hold ~82k soundings and exact
-inference is cubic in that. A sparse variational GP with a few hundred inducing
-points is.
-"""
+"""Sparse variational GP bathymetry map: the baseline the Vecchia map is scored against."""
 
 from collections.abc import Iterator
 from typing import Literal, cast, overload
@@ -15,41 +10,20 @@ from gpytorch.utils.memoize import clear_cache_hook
 from numpy.typing import ArrayLike, NDArray
 from torch.utils.data import DataLoader, TensorDataset
 
-__all__ = ["BathymetryMap", "SVGPModel", "fit_svgp", "resolve_device"]
-
 
 def resolve_device(device: str | torch.device | None) -> torch.device:
-  """Pick a torch device, defaulting to CUDA when it is genuinely available.
-
-  ``torch.cuda.is_available()`` is False on a CPU-only build however capable
-  the card is, so this silently falls back rather than failing -- but a fit that
-  was expected to be on the GPU and quietly was not is worth noticing, which is
-  why :func:`fit_svgp` reports the device it chose.
-  """
+  """The given device, or CUDA when available."""
   if device is not None:
     return torch.device(device)
   return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class SVGPModel(gpytorch.models.ApproximateGP):
-  """Stochastic variational GP with a constant mean and a scaled RBF kernel.
+  """Variational GP, constant mean, RBF kernel with a lengthscale per axis.
 
-  Inducing point locations are learned along with the variational parameters.
-
-  **The kernel is ARD**, one lengthscale per input axis. A single isotropic
-  lengthscale is not the neutral choice it looks like: inputs are standardised
-  before fitting, so an isotropic kernel is implicitly anisotropic in metres by
-  exactly the ratio of the two scalers -- which is a fact about the shape of the
-  surveyed box, not about the seabed. The map fitted that way reported
-  lengthscales of 2.13 m by 1.19 m purely because the survey area is 40 m by
-  20 m.
-
-  :ivar elbo_trace: Mean negative ELBO per epoch, set by :func:`fit_svgp`.
-  :ivar fit_device: Device the fit ran on, set by :func:`fit_svgp`.
+  Per axis because inputs are standardised: one shared lengthscale would be
+  anisotropic in metres by the survey box's aspect ratio.
   """
-
-  elbo_trace: list[float]
-  fit_device: str
 
   def __init__(self, inducing_points: torch.Tensor) -> None:
     variational_distribution = (
@@ -81,114 +55,117 @@ class SVGPModel(gpytorch.models.ApproximateGP):
 
 
 def fit_svgp(
-  train_x: torch.Tensor,
-  train_y: torch.Tensor,
+  points: ArrayLike,
+  depth: ArrayLike,
   n_inducing: int = 500,
   epochs: int = 200,
   batch_size: int = 5000,
   learning_rate: float = 0.01,
   seed: int | None = None,
   device: str | torch.device | None = None,
-) -> tuple[SVGPModel, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor]:
-  """Fit an SVGP by maximising the variational ELBO.
+) -> "BathymetryMap":
+  """Fit the map to soundings by maximising the variational ELBO.
+
+  Inputs and depths are standardised for the fit; the returned map takes and
+  gives metres.
 
   Args:
-      train_x: Standardised inputs, ``(n, 2)``.
-      train_y: Standardised targets, ``(n,)``.
-      n_inducing: Number of inducing points, sampled from the training inputs.
-      epochs: Passes over the data. The default was 20, which on the survey
-          soundings is about 340 Adam steps and nowhere near converged: going to
-          200 moved held-out rmse from 1.25 m to 1.08 m, the fitted noise from
-          1.30 to 1.10, and the lengthscales by nearly a factor of two. Check
-          :attr:`SVGPModel.elbo_trace` rather than assuming any number here is
-          enough.
+      points: ``(n, 2)`` sounding positions, metres.
+      depth: ``(n,)`` seabed elevations, metres.
+      n_inducing: Inducing points, drawn from the soundings.
+      epochs: Passes over the data; check ``elbo_trace`` for convergence.
       batch_size: Minibatch size.
       learning_rate: Adam step size.
-      seed: Seed for inducing point selection, for reproducible fits.
-      device: Where to fit. Defaults to CUDA when available -- the cost is
-          dominated by Cholesky factorisations of the inducing covariance, which
-          the GPU is much better at, and the returned model is moved back to the
-          CPU so checkpoints stay portable.
-
-  Returns:
-      ``(model, likelihood, inducing_points)``, all in training mode and on the
-      CPU. The model carries ``elbo_trace``, the mean negative ELBO per epoch,
-      so convergence is observable instead of assumed, and ``fit_device``,
-      recording where it was actually fitted.
+      seed: Seed for the inducing point draw and the minibatch order.
+      device: Where to fit; CUDA when available.
   """
-  if n_inducing > len(train_x):
+  points = np.asarray(points, dtype=np.float64)
+  depth = np.asarray(depth, dtype=np.float64)
+  if n_inducing > len(points):
     raise ValueError(
-      f"n_inducing={n_inducing} exceeds the {len(train_x)} training points"
+      f"n_inducing={n_inducing} exceeds the {len(points)} training points"
     )
+  x_mean, x_scale = points.mean(axis=0), points.std(axis=0)
+  y_mean, y_std = float(depth.mean()), float(depth.std())
 
   device = resolve_device(device)
-  train_x = train_x.to(device)
-  train_y = train_y.to(device)
+  train_x = torch.as_tensor((points - x_mean) / x_scale, dtype=torch.float32)
+  train_y = torch.as_tensor((depth - y_mean) / y_std, dtype=torch.float32)
+  train_x, train_y = train_x.to(device), train_y.to(device)
 
-  rng = np.random.default_rng(seed)
-  idx = rng.choice(len(train_x), n_inducing, replace=False)
-  inducing_points = train_x[idx].clone()
+  # Every random draw -- inducing points, the variational mean's initial jitter,
+  # the minibatch order -- comes from torch's generator, seeded for the fit
+  # alone so the caller's global state is left as it was.
+  with torch.random.fork_rng(enabled=seed is not None):
+    if seed is not None:
+      torch.manual_seed(seed)
+    chosen = torch.randperm(len(train_x))[:n_inducing].to(device)
+    model = SVGPModel(train_x[chosen].clone()).to(device)
+    likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device)
+    trace = _train(
+      model, likelihood, train_x, train_y, epochs, batch_size, learning_rate
+    )
 
-  model = SVGPModel(inducing_points).to(device)
-  likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device)
+  bathymetry = BathymetryMap(
+    model.cpu(), likelihood.cpu(), x_mean, x_scale, y_mean, y_std
+  )
+  bathymetry.elbo_trace = trace
+  bathymetry.fit_device = str(device)
+  return bathymetry
 
+
+def _train(
+  model: SVGPModel,
+  likelihood: gpytorch.likelihoods.GaussianLikelihood,
+  train_x: torch.Tensor,
+  train_y: torch.Tensor,
+  epochs: int,
+  batch_size: int,
+  learning_rate: float,
+) -> list[float]:
+  """Adam on the negative ELBO; the mean loss of each epoch."""
   model.train()
   likelihood.train()
-
   optimizer = torch.optim.Adam(
     [{"params": model.parameters()}, {"params": likelihood.parameters()}],
     lr=learning_rate,
   )
   mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=len(train_y))
-
   loader = DataLoader(
     TensorDataset(train_x, train_y), batch_size=batch_size, shuffle=True
   )
-
   trace: list[float] = []
   for _ in range(epochs):
-    epoch_loss = 0.0
-    batches = 0
+    total, batches = 0.0, 0
     for x_batch, y_batch in loader:
       optimizer.zero_grad()
       loss = -cast(torch.Tensor, mll(model(x_batch), y_batch))
       loss.backward()
       optimizer.step()
-      epoch_loss += float(loss.detach())
+      total += float(loss.detach())
       batches += 1
-    trace.append(epoch_loss / max(batches, 1))
-
-  model.elbo_trace = trace
-  model.fit_device = str(device)
-
-  # Back to the CPU: a checkpoint holding CUDA tensors only loads on a machine
-  # with a GPU, and prediction is single points at tick rate where the transfer
-  # would cost more than the arithmetic saves.
-  return model.cpu(), likelihood.cpu(), inducing_points.cpu()
+    trace.append(total / max(batches, 1))
+  return trace
 
 
 class BathymetryMap:
-  """A fitted SVGP plus the scaling needed to use it in metric units.
+  """A fitted SVGP taking positions and giving depths in metres.
 
-  The model is trained on standardised inputs and targets; this wraps it so
-  callers can pass raw ``(x, y)`` and get depths back in metres.
-
+  :param x_mean: Per-axis mean the inputs were standardised by.
+  :param x_scale: Per-axis standard deviation, likewise.
   :param device: Where to evaluate. CPU by default: single-point queries cost
-      more in transfer than a GPU saves. Use ``"cuda"`` for large batches.
-
-  Note:
-      ``torch.nn.Module.to`` moves in place, so passing a non-CPU device moves
-      the caller's ``model`` too rather than taking a copy. That is ordinary
-      PyTorch behaviour, but it means a checkpoint written afterwards would hold
-      CUDA tensors -- :func:`auv_pose.io.checkpoints.save_map` forces them back
-      to the CPU for exactly this reason.
+      more in transfer than a GPU saves.
   """
+
+  elbo_trace: list[float]
+  fit_device: str = "cpu"
 
   def __init__(
     self,
     model: SVGPModel,
     likelihood: gpytorch.likelihoods.GaussianLikelihood,
-    x_scaler,
+    x_mean: ArrayLike,
+    x_scale: ArrayLike,
     y_mean: float,
     y_std: float,
     device: str | torch.device | None = "cpu",
@@ -196,16 +173,21 @@ class BathymetryMap:
     self.device = resolve_device(device)
     self.model = model.to(self.device)
     self.likelihood = likelihood.to(self.device)
-    self.x_scaler = x_scaler
+    self.x_mean = np.asarray(x_mean, dtype=np.float64)
+    self.x_scale = np.asarray(x_scale, dtype=np.float64)
     self.y_mean = float(y_mean)
     self.y_std = float(y_std)
+    self.elbo_trace = []
 
     self.model.eval()
     self.likelihood.eval()
 
+  def _standardise(self, points: NDArray) -> torch.Tensor:
+    scaled = (points - self.x_mean) / self.x_scale
+    return torch.as_tensor(scaled, dtype=torch.float32, device=self.device)
+
   def _chunks(self, points: NDArray, chunk_size: int) -> Iterator[torch.Tensor]:
-    scaled = self.x_scaler.transform(points)
-    tensor = torch.as_tensor(scaled, dtype=torch.float32, device=self.device)
+    tensor = self._standardise(points)
     for i in range(0, len(tensor), chunk_size):
       yield tensor[i : i + chunk_size]
 
@@ -242,21 +224,10 @@ class BathymetryMap:
         chunk_size: Points per forward pass, to bound memory on large grids.
         with_std: Also return the posterior standard deviation, in metres.
         observation_noise: Add the likelihood's noise to that standard
-            deviation, giving the spread of a *sounding* rather than of the
-            seabed. Off by default: a caller asking a map how deep the seabed
-            is wants to know how well the seabed is known there.
+            deviation: the spread of a sounding rather than of the seabed.
 
     Returns:
         Depths ``(n,)``, or ``(depths, stds)`` when ``with_std``.
-
-    Note:
-        The distinction matters more than it looks. This previously always
-        added the noise, and since a poorly fitted GP absorbs its own misfit
-        into that noise term, the number it returned was ~95% noise and nearly
-        constant across the map -- 1.36 to 1.87 m against a fitted noise of
-        1.36 m. As a measure of "where is this map trustworthy" that is
-        useless, and it is exactly what a filter wanting to weight the map
-        against its other sensors would have consumed.
     """
     points = np.atleast_2d(np.asarray(points, dtype=np.float32))
     if points.shape[1] != 2:
@@ -299,28 +270,14 @@ class BathymetryMap:
         and metres squared.
 
     Note:
-        ``observation_noise`` defaults to **True** here, against
-        :meth:`predict`'s False, and the difference is deliberate.
-        :meth:`predict`'s note argues that a caller asking how well the seabed
-        is *known* wants the latent variance -- right for a map-quality
-        question. The update step is asking something else: how far a sounding
-        of this seabed may legitimately fall from the map's mean. Seabed
-        roughness and the GP's own misfit both belong in that number, and on
-        this map they are most of it.
-
-    Note:
-        No ``fast_pred_var``, unlike :meth:`predict`. LOVE returns a low-rank
-        approximation of the covariance, which is fine for the marginal
-        variances that method wants and wrong for the off-diagonals this one
-        exists to provide.
+        No ``fast_pred_var``: its low-rank covariance gets the off-diagonals
+        wrong, and they are what this method is for.
     """
     points = np.asarray(points, dtype=np.float32)
     if points.shape[-1] != 2:
       raise ValueError(f"expected (..., b, 2) points, got {points.shape}")
 
-    batch = points.shape[:-1]
-    scaled = self.x_scaler.transform(points.reshape(-1, 2)).reshape(*batch, 2)
-    tensor = torch.as_tensor(scaled, dtype=torch.float32, device=self.device)
+    tensor = self._standardise(points)
 
     with torch.no_grad():
       latent = self.model(tensor)
@@ -344,31 +301,17 @@ class BathymetryMap:
         ``(n, 2)`` of ``d(depth)/dx, d(depth)/dy``.
 
     Note:
-        Summing the means before differentiating is exact, not an
-        approximation: each ``mean[i]`` depends only on ``points[i]``, so the
-        gradient of the sum is the stack of the individual gradients and one
-        backward pass does the work of ``n``.
-
-    Note:
-        The cache clearing is load-bearing. ``VariationalStrategy`` memoises
-        across calls, so a second ``autograd.grad`` through it raises *"Trying
-        to backward through the graph a second time"* -- with a traceback that
-        points at torch's autograd engine and says nothing about gpytorch.
-        ``detach_test_caches(False)`` does not fix it.
+        The cache is cleared first: ``VariationalStrategy`` memoises, and a
+        second backward pass through the memo raises.
     """
     points = np.atleast_2d(np.asarray(points, dtype=np.float32))
     if points.shape[-1] != 2:
       raise ValueError(f"expected (n, 2) points, got {points.shape}")
 
-    scaled = self.x_scaler.transform(points)
-    tensor = torch.as_tensor(
-      scaled, dtype=torch.float32, device=self.device
-    ).requires_grad_(True)
+    tensor = self._standardise(points).requires_grad_(True)
 
     clear_cache_hook(self.model.variational_strategy)
     (gradient,) = torch.autograd.grad(self.model(tensor).mean.sum(), tensor)
 
     # Out of the standardised input and target, back into metres per metre.
-    # ``train_map.py`` multiplies lengthscales by the same ``scale_``; this is
-    # the same conversion in the other direction.
-    return gradient.cpu().numpy() * self.y_std / self.x_scaler.scale_
+    return gradient.cpu().numpy() * self.y_std / self.x_scale

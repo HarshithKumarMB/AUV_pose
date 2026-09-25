@@ -13,10 +13,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
-from sklearn.preprocessing import StandardScaler
 
-from auv_pose.io.checkpoints import save_map, save_vecchia_map
+from auv_pose.io.checkpoints import save_map
 from auv_pose.io.soundings import load_soundings, soundings_to_arrays
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
 from auv_pose.mapping.vecchia import VecchiaMap, fit_vecchia
@@ -33,7 +31,7 @@ GRID = 200
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("surveys", nargs="+", type=Path, help="soundings CSVs")
-  parser.add_argument("--out", type=Path, default=Path("bathymetry.pkl"))
+  parser.add_argument("--out", type=Path, default=Path("bathymetry.npz"))
   parser.add_argument(
     "--method", choices=("vecchia", "svgp"), default="vecchia"
   )
@@ -77,24 +75,18 @@ def fit_vecchia_map(X, y, args) -> VecchiaMap:
   return fitted
 
 
-def fit_svgp_map(X, y, args) -> tuple[BathymetryMap, tuple]:
-  """The SVGP baseline, and what :func:`save_map` needs to write it."""
-  x_scaler = StandardScaler().fit(X)
-  y_mean, y_std = float(y.mean()), float(y.std())
-  model, likelihood, inducing = fit_svgp(
-    torch.tensor(x_scaler.transform(X), dtype=torch.float32),
-    torch.tensor((y - y_mean) / y_std, dtype=torch.float32),
+def fit_svgp_map(X, y, args) -> BathymetryMap:
+  fitted = fit_svgp(
+    X,
+    y,
     n_inducing=INDUCING,
     epochs=EPOCHS,
     batch_size=BATCH_SIZE,
     seed=0,
     device=args.device,
   )
-  print(f"negative ELBO last tenth {last_tenth(model.elbo_trace):+.4f}")
-  bathymetry = BathymetryMap(
-    model, likelihood, x_scaler, y_mean, y_std, device=model.fit_device
-  )
-  return bathymetry, (model, likelihood, inducing, x_scaler, y_mean, y_std)
+  print(f"negative ELBO last tenth {last_tenth(fitted.elbo_trace):+.4f}")
+  return fitted
 
 
 def render_surface(bathymetry, X: np.ndarray, path: Path) -> None:
@@ -126,12 +118,9 @@ def main() -> None:
 
   X, y = soundings_to_arrays(load_soundings(args.surveys))
   print(f"Fitting {args.method} on {len(y)} soundings")
-  if args.method == "vecchia":
-    bathymetry = fit_vecchia_map(X, y, args)
-    save_vecchia_map(args.out, bathymetry)
-  else:
-    bathymetry, checkpoint = fit_svgp_map(X, y, args)
-    save_map(args.out, *checkpoint)
+  fit = fit_vecchia_map if args.method == "vecchia" else fit_svgp_map
+  bathymetry = fit(X, y, args)
+  save_map(args.out, bathymetry)
   print(f"Wrote {args.out}")
 
   render_surface(bathymetry, X, plot)

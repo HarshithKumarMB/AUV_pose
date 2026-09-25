@@ -105,9 +105,9 @@
         dependencies = with python.pkgs; [
           numpy
           pandas
+          scipy
           torch
           gpytorch
-          scikit-learn
         ];
         nativeCheckInputs = with python.pkgs; [ pytestCheckHook ];
         pythonImportsCheck = [ "auv_pose.estimation" ];
@@ -120,7 +120,6 @@
         pandas
         torch
         gpytorch
-        scikit-learn
         posix-ipc
         tkinter # plt.show() needs a backend
         pytest

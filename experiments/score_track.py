@@ -1,22 +1,12 @@
 """Score maps on a test track the survey never saw.
 
-    python experiments/score_track.py track8_smoothed.csv \\
-        --track-log surveys_v3/track8 --survey-log surveys_v3/pass0 \\
-        --map spline.pkl spline --map plane.pkl "plane, two terms"
+    python experiments/score_track.py test0.csv --track-log test0 \
+        --survey-log pass0 pass90 --map vecchia.npz vecchia --map svgp.npz svgp
 
-The test that matches how the map is used. The track -- a figure eight from
-``survey.py --route figure8`` -- was flown after the survey, on its own
-navigation with its own drift, so its beams land between the survey's
-soundings on every heading and at two altitudes. Each map is asked for the
-seabed where every beam truly struck it, and scored against the depth there.
-
-**Frames.** Each flight's map frame is the world shifted by that flight's own
-surface-fix error. A map fitted on several passes sits at their mean offset,
-and the track's ``true_`` columns are in the track's own frame, so the track's
-truth is carried into the map's frame through the recorded start offsets
-before any map is queried. The passes' offsets differ from each other too --
-about a metre, as separate dives' fixes do -- and the map carries that as
-disagreement where passes overlap.
+Each map is asked for the seabed where every track beam truly struck it. The
+track's truth is carried into the map's frame through the flights' recorded
+start offsets, since each flight's frame is the world shifted by its own
+surface-fix error.
 """
 
 import argparse
