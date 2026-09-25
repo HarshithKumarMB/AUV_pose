@@ -243,11 +243,12 @@ def initial_covariance() -> np.ndarray:
 
 
 def build_scenario(
-  start: list[float], octree_min: float, yaw: float = 0.0
+  start: list[float], octree_min: float, yaw: float = 0.0, world: str = "Dam"
 ) -> dict:
   return ocean_scenario(
     "bathymetry_survey",
     start=start,
+    world=world,
     octree_min=octree_min,
     # Held for the whole run; nothing commands yaw. This is what turns the fan
     # across-track, so it must match the heading lawnmower() was built with.
@@ -297,6 +298,23 @@ def parse_args() -> argparse.Namespace:
       "keeps it across-track. Fly the same box at several headings -- 0 and 90 "
       "at least -- and fit the map on all of them: a pipeline shadows the "
       "seabed behind it from one direction and not from another"
+    ),
+  )
+  parser.add_argument(
+    "--world",
+    default="Dam",
+    help=(
+      "HoloOcean Ocean world. The Dam's seabed carries pipelines, a manifold "
+      "and a wall; OpenWater has natural sandy seabed about 280 m down"
+    ),
+  )
+  parser.add_argument(
+    "--depth",
+    type=float,
+    default=0.0,
+    help=(
+      "world z to fly the lawnmower at, metres. 0 is the Dam's survey depth, "
+      "about 70 m above its seabed"
     ),
   )
   parser.add_argument(
@@ -454,7 +472,7 @@ def main() -> None:
     )
   else:
     waypoints = lawnmower(
-      heading=args.yaw, box=tuple(args.box), spacing=args.spacing
+      heading=args.yaw, box=tuple(args.box), spacing=args.spacing, z=args.depth
     )
     print(
       f"lawnmower, heading {args.yaw:.0f} deg, {args.spacing:.1f} m spacing"
@@ -466,7 +484,9 @@ def main() -> None:
   )
 
   env = holoocean.make(
-    scenario_cfg=build_scenario(waypoints[0], args.octree_min, args.yaw),
+    scenario_cfg=build_scenario(
+      waypoints[0], args.octree_min, args.yaw, args.world
+    ),
     show_viewport=not args.headless,
   )
   ranges = range_bins(
@@ -533,6 +553,8 @@ def main() -> None:
     },
     "seed": args.seed,
     "yaw_deg": args.yaw,
+    "world": args.world,
+    "depth": args.depth,
     "route": args.route,
     "turn": args.turn,
     "box": list(args.box),
