@@ -11,10 +11,12 @@ soundings on every heading and at two altitudes. Each map is asked for the
 seabed where every beam truly struck it, and scored against the depth there.
 
 **Frames.** Each flight's map frame is the world shifted by that flight's own
-surface-fix error. Maps fitted from the survey live in the survey's frame, and
-the track's ``true_`` columns in the track's, so the track's truth is carried
-into the survey's frame through both logs' recorded start offsets before any
-map is queried.
+surface-fix error. A map fitted on several passes sits at their mean offset,
+and the track's ``true_`` columns are in the track's own frame, so the track's
+truth is carried into the map's frame through the recorded start offsets
+before any map is queried. The passes' offsets differ from each other too --
+about a metre, as separate dives' fixes do -- and the map carries that as
+disagreement where passes overlap.
 """
 
 from __future__ import annotations
@@ -38,7 +40,17 @@ def parse_args() -> argparse.Namespace:
     "track", type=Path, help="track soundings from georeference.py"
   )
   parser.add_argument("--track-log", type=Path, required=True)
-  parser.add_argument("--survey-log", type=Path, required=True)
+  parser.add_argument(
+    "--survey-log",
+    type=Path,
+    nargs="+",
+    required=True,
+    help=(
+      "raw log of each survey pass the map was fitted on. Each pass starts "
+      "from its own surface fix, so a map fitted on several sits at their "
+      "mean offset from the world, and that is where the track is carried"
+    ),
+  )
   parser.add_argument(
     "--map",
     nargs=2,
@@ -75,10 +87,15 @@ def main() -> None:
   args = parse_args()
   track = pd.read_csv(args.track)
   track_log = load_raw_survey(args.track_log.expanduser())
-  survey_log = load_raw_survey(args.survey_log.expanduser())
+  survey_offset = np.mean(
+    [
+      start_offset(load_raw_survey(log.expanduser())) for log in args.survey_log
+    ],
+    axis=0,
+  )
 
   # Track truth is in the track's frame; the maps are in the survey's.
-  shift = start_offset(survey_log) - start_offset(track_log)
+  shift = survey_offset - start_offset(track_log)
   where = track[["true_x", "true_y"]].to_numpy(float) + shift
   depth = track["true_z"].to_numpy(float)
 
