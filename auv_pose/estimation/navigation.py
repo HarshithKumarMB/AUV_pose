@@ -26,8 +26,10 @@ with the vehicle holding one attitude for a whole survey, the gyro alone gives
 heading no reference at all.
 """
 
+import operator
 from collections.abc import Callable, Sequence
-from typing import Any, Generic, NamedTuple
+from dataclasses import dataclass, replace
+from typing import Any, Generic
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -42,8 +44,6 @@ from auv_pose.estimation.inertial import (
 from auv_pose.estimation.manifold import (
   ManifoldGaussian,
   NavState,
-  boxminus,
-  boxplus,
   covariance_transport,
   manifold_mean,
 )
@@ -63,7 +63,8 @@ from auv_pose.estimation.unscented import (
 MAGNETIC_NORTH = np.array([1.0, 0.0, 0.0])
 
 
-class Update(NamedTuple, Generic[Belief]):
+@dataclass(frozen=True, eq=False)
+class Update(Generic[Belief]):
   """The result of conditioning on one measurement.
 
   :param posterior: Belief after the update.
@@ -79,7 +80,8 @@ class Update(NamedTuple, Generic[Belief]):
   innovation_cov: NumpyArray
 
 
-class Aiding(NamedTuple):
+@dataclass(frozen=True, eq=False)
+class Aiding:
   """One measurement to condition on: a reading, its model and its noise.
 
   :param z: The reading, shape ``(m,)``.
@@ -102,8 +104,8 @@ def unscented_predict(
   belief: Belief,
   motion: Callable[[Any], Any],
   process_cov: ArrayLike,
-  chart_plus: Callable = boxplus,
-  chart_minus: Callable = boxminus,
+  chart_plus: Callable = operator.add,
+  chart_minus: Callable = operator.sub,
   average: Callable | None = None,
   rule: SigmaRule = DEFAULT_RULE,
 ) -> tuple[Belief, NumpyArray]:
@@ -141,7 +143,7 @@ def unscented_predict(
   )
   cross_cov = cross_moments(offsets, spread, weights_cov)
 
-  prior = belief._replace(mean=mean, cov=0.5 * (predicted + predicted.T))
+  prior = replace(belief, mean=mean, cov=0.5 * (predicted + predicted.T))
   return prior, cross_cov
 
 
@@ -150,7 +152,7 @@ def unscented_update(
   observe: Callable[[Any], NumpyArray],
   z: ArrayLike,
   noise: ArrayLike,
-  chart_plus: Callable = boxplus,
+  chart_plus: Callable = operator.add,
   transport: Callable[[NumpyArray], NumpyArray] | None = covariance_transport,
   rule: SigmaRule = DEFAULT_RULE,
 ) -> Update[Belief]:
@@ -201,8 +203,10 @@ def unscented_update(
     jacobian = transport(correction)
     updated = jacobian @ updated @ jacobian.T
 
-  posterior = belief._replace(
-    mean=chart_plus(belief.mean, correction), cov=0.5 * (updated + updated.T)
+  posterior = replace(
+    belief,
+    mean=chart_plus(belief.mean, correction),
+    cov=0.5 * (updated + updated.T),
   )
   return Update(posterior, innovation, innovation_cov)
 
@@ -292,7 +296,8 @@ def inertial_step(
   return step, updates
 
 
-class AidingNoise(NamedTuple):
+@dataclass(frozen=True, eq=False)
+class AidingNoise:
   """Measurement noise of the three aiding sensors.
 
   :param dvl: Body-velocity covariance, ``(3, 3)``; see

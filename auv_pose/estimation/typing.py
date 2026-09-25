@@ -1,6 +1,7 @@
 """Types shared by the filter and the smoother."""
 
-from typing import Any, Generic, NamedTuple, Protocol, Self, TypeAlias, TypeVar
+from dataclasses import dataclass
+from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -9,7 +10,9 @@ NumpyArray: TypeAlias = NDArray[np.floating]
 
 
 class GaussianBelief(Protocol):
-  """A mean, a covariance, and a way to replace them."""
+  """A dataclass with a mean and a covariance."""
+
+  __dataclass_fields__: ClassVar[dict[str, Any]]
 
   @property
   def mean(self) -> Any: ...
@@ -17,13 +20,12 @@ class GaussianBelief(Protocol):
   @property
   def cov(self) -> NumpyArray: ...
 
-  def _replace(self, *, mean: Any = ..., cov: Any = ...) -> Self: ...
-
 
 Belief = TypeVar("Belief", bound=GaussianBelief)
 
 
-class SmootherStep(NamedTuple, Generic[Belief]):
+@dataclass(frozen=True, eq=False)
+class SmootherStep(Generic[Belief]):
   """One filter cycle, as the backward pass needs it.
 
   :param prior: Belief after the motion update.

@@ -17,7 +17,8 @@ for the filter built on it.
 """
 
 from collections.abc import Callable, Sequence
-from typing import NamedTuple, TypeVar
+from dataclasses import dataclass
+from typing import TypeVar
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -27,7 +28,8 @@ from auv_pose.estimation.typing import NumpyArray
 T = TypeVar("T")
 
 
-class SigmaRule(NamedTuple):
+@dataclass(frozen=True)
+class SigmaRule:
   """Placement and weighting of a scaled symmetric sigma-point set.
 
   :param alpha: Spread. The points sit at ``alpha * sqrt(n + kappa)`` standard

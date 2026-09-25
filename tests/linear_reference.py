@@ -4,23 +4,26 @@ On a linear-Gaussian problem the unscented filter and smoother must reproduce
 these to round-off, which is what the tests that import this check.
 """
 
-from typing import NamedTuple
+from dataclasses import dataclass
 
 import numpy as np
 
 
-class GaussianState(NamedTuple):
+@dataclass(frozen=True, eq=False)
+class GaussianState:
   mean: np.ndarray
   cov: np.ndarray
 
 
-class Measurement(NamedTuple):
+@dataclass(frozen=True, eq=False)
+class Measurement:
   z: np.ndarray
   H: np.ndarray
   R: np.ndarray
 
 
-class Step(NamedTuple):
+@dataclass(frozen=True, eq=False)
+class Step:
   prior: GaussianState
   posterior: GaussianState
   transition: np.ndarray

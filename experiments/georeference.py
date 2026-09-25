@@ -23,7 +23,6 @@ from auv_pose.estimation.manifold import (
   ROTATION,
   ManifoldGaussian,
   NavState,
-  boxminus,
 )
 from auv_pose.estimation.navigation import (
   AidingNoise,
@@ -172,7 +171,7 @@ def main() -> None:
     errors, nees = [], []
     for tick, state in truth.items():
       belief = poses[tick]
-      error = boxminus(state, belief.mean)[POSE]
+      error = (state - belief.mean)[POSE]
       error[:2] += start
       errors.append(np.linalg.norm(error[:2]))
       block = belief.cov[np.ix_(POSE, POSE)]

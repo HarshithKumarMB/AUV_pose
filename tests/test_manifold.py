@@ -7,13 +7,12 @@ transpose wrong in either one is silent in a single step and fatal over a run.
 """
 
 import numpy as np
+import pytest
 
 from auv_pose.estimation.manifold import (
   DOF,
   ROTATION,
   NavState,
-  boxminus,
-  boxplus,
   covariance_transport,
   manifold_mean,
 )
@@ -206,16 +205,14 @@ def test_boxminus_inverts_boxplus():
   for _ in range(50):
     state = random_state(rng)
     xi = rng.normal(size=DOF) * 0.3
-    np.testing.assert_allclose(
-      boxminus(boxplus(state, xi), state), xi, atol=1e-12
-    )
+    np.testing.assert_allclose(((state + xi) - state), xi, atol=1e-12)
 
 
 def test_boxplus_inverts_boxminus():
   rng = np.random.default_rng(5)
   for _ in range(50):
     a, b = random_state(rng), random_state(rng)
-    recovered = boxplus(b, boxminus(a, b))
+    recovered = b + (a - b)
 
     np.testing.assert_allclose(recovered.position, a.position, atol=1e-12)
     np.testing.assert_allclose(recovered.velocity, a.velocity, atol=1e-12)
@@ -231,7 +228,7 @@ def test_boxminus_of_a_state_with_itself_vanishes():
   second ``boxminus``.
   """
   state = random_state(np.random.default_rng(6))
-  delta = boxminus(state, state)
+  delta = state - state
 
   assert np.all(delta[:3] == 0.0)
   assert np.all(delta[6:] == 0.0)
@@ -247,9 +244,7 @@ def test_boxplus_perturbs_the_rotation_on_the_right():
   # Yaw 90 degrees: body +x points along world +y.
   state = NavState.at_rest(attitude=quat_exp(np.array([0.0, 0.0, np.pi / 2])))
   # A further quarter turn about *body* +x.
-  turned = boxplus(
-    state, np.concatenate([np.zeros(3), [np.pi / 2, 0, 0], np.zeros(9)])
-  )
+  turned = state + np.concatenate([np.zeros(3), [np.pi / 2, 0, 0], np.zeros(9)])
 
   # Body +x is unmoved by a rotation about body +x, so it still points at world +y.
   np.testing.assert_allclose(
@@ -261,12 +256,24 @@ def test_boxplus_perturbs_the_rotation_on_the_right():
   # turn about world +x, which moves body +x off world +y.
 
 
+def test_an_increment_on_the_left_is_refused_not_broadcast():
+  """NumPy would otherwise add the state to each element of the increment."""
+  with pytest.raises(TypeError):
+    _ = np.zeros(DOF) + NavState.at_rest()
+
+
+@pytest.mark.parametrize("shape", [(DOF - 1,), (1, DOF), ()])
+def test_an_increment_of_the_wrong_shape_is_refused(shape):
+  with pytest.raises(ValueError, match="increment"):
+    _ = NavState.at_rest() + np.zeros(shape)
+
+
 def test_boxplus_only_touches_the_blocks_it_is_given():
   state = random_state(np.random.default_rng(7))
   xi = np.zeros(DOF)
   xi[0] = 1.0
 
-  moved = boxplus(state, xi)
+  moved = state + xi
   np.testing.assert_allclose(moved.position, state.position + [1, 0, 0])
   np.testing.assert_allclose(moved.velocity, state.velocity)
   np.testing.assert_allclose(moved.gyro_bias, state.gyro_bias)
@@ -309,8 +316,8 @@ def test_mean_recovers_the_centre_of_a_symmetric_cloud():
   centre = random_state(rng)
 
   offsets = rng.normal(size=(8, DOF)) * 0.1
-  states = [boxplus(centre, xi) for xi in offsets] + [
-    boxplus(centre, -xi) for xi in offsets
+  states = [(centre + xi) for xi in offsets] + [
+    (centre + -xi) for xi in offsets
   ]
   weights = np.full(len(states), 1.0 / len(states))
 
@@ -344,15 +351,13 @@ def test_mean_gets_the_vector_blocks_right_in_one_pass():
   """
   rng = np.random.default_rng(11)
   centre = random_state(rng)
-  states = [boxplus(centre, xi) for xi in rng.normal(size=(6, DOF)) * 0.05]
+  states = [(centre + xi) for xi in rng.normal(size=(6, DOF)) * 0.05]
   weights = np.full(6, 1.0 / 6)
 
   seed = states[3]
   converged = manifold_mean(states, weights)
 
-  one_pass = boxplus(
-    seed, sum(w * boxminus(s, seed) for s, w in zip(states, weights))
-  )
+  one_pass = seed + sum(w * (s - seed) for s, w in zip(states, weights))
 
   np.testing.assert_allclose(one_pass.position, converged.position, atol=1e-12)
   np.testing.assert_allclose(one_pass.velocity, converged.velocity, atol=1e-12)

@@ -7,6 +7,7 @@ rotation-to-velocity coupling. Sampling the actual noisy propagation and
 comparing the empirical covariance to the analytic one does not.
 """
 
+from dataclasses import replace
 from itertools import pairwise
 
 import numpy as np
@@ -96,7 +97,7 @@ def test_a_constant_body_rate_integrates_to_the_closed_form_angle():
 
 def test_the_gyro_bias_is_subtracted_from_the_rate():
   bias = np.array([0.0, 0.0, 0.2])
-  start = NavState.at_rest()._replace(gyro_bias=bias)
+  start = replace(NavState.at_rest(), gyro_bias=bias)
   samples = ImuSamples.uniform(
     gyro=np.tile(bias, (30, 1)), accel=np.zeros((30, 3)), dt=DT
   )
@@ -108,7 +109,7 @@ def test_the_gyro_bias_is_subtracted_from_the_rate():
 
 def test_the_accel_bias_is_subtracted_from_the_specific_force():
   bias = np.array([0.1, -0.2, 0.3])
-  start = NavState.at_rest()._replace(accel_bias=bias)
+  start = replace(NavState.at_rest(), accel_bias=bias)
   reading = -quat_to_rotmat(start.attitude).T @ GRAVITY + bias
 
   samples = ImuSamples.uniform(
@@ -120,8 +121,10 @@ def test_the_accel_bias_is_subtracted_from_the_specific_force():
 
 def test_the_biases_are_held_through_propagation():
   """Their random walk has no mean, so it belongs in the covariance."""
-  start = NavState.at_rest()._replace(
-    gyro_bias=np.array([1.0, 2.0, 3.0]), accel_bias=np.array([4.0, 5.0, 6.0])
+  start = replace(
+    NavState.at_rest(),
+    gyro_bias=np.array([1.0, 2.0, 3.0]),
+    accel_bias=np.array([4.0, 5.0, 6.0]),
   )
   moved = propagate(start, resting_samples(start))
 

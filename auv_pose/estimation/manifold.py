@@ -6,7 +6,7 @@ over it is a mean *on* that manifold plus an error state in the tangent space at
 the mean -- ``chi = m [+] xi``, ``xi ~ N(0, P)`` -- following Hertzberg et al.,
 who introduce exactly this encapsulation and whose worked example is this state.
 
-:func:`boxplus` and :func:`boxminus` are the encapsulation. On velocity and the
+``state + xi`` and ``state - other`` are the encapsulation. On velocity and the
 biases they are ordinary addition and subtraction; on the pose they are
 
     x [+] xi  =  (p + xi_p,  R exp(xi_R))
@@ -15,7 +15,7 @@ biases they are ordinary addition and subtraction; on the pose they are
 which is a **right** perturbation -- the rotation increment is applied in the
 frame the orientation already describes. That matches
 :func:`~auv_pose.estimation.quaternion.quat_multiply`, whose Hamilton product
-composes left-to-right in the body frame, so ``boxplus`` is one multiply with no
+composes left-to-right in the body frame, so ``+`` is one multiply with no
 transposes to get backwards.
 
 Frames and signs are as :mod:`auv_pose.estimation` documents them: a z-up world,
@@ -23,7 +23,8 @@ attitude as a scalar-first quaternion rotating body into world.
 """
 
 from collections.abc import Sequence
-from typing import NamedTuple, Self
+from dataclasses import dataclass
+from typing import Self
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -54,7 +55,8 @@ DOF = 15
 _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
 
 
-class NavState(NamedTuple):
+@dataclass(frozen=True, eq=False)
+class NavState:
   """A point on the state manifold.
 
   :param position: World position, metres, shape ``(3,)``. The world is z-up,
@@ -63,7 +65,13 @@ class NavState(NamedTuple):
   :param velocity: World velocity, m/s, shape ``(3,)``.
   :param gyro_bias: Gyroscope bias in the body frame, rad/s, shape ``(3,)``.
   :param accel_bias: Accelerometer bias in the body frame, m/s^2, shape ``(3,)``.
+
+  ``state + xi`` applies a ``(15,)`` tangent increment and ``state - other``
+  is the increment taking ``other`` to ``state``.
   """
+
+  # Refuse NumPy's broadcasting, so ``xi + state`` fails rather than looping.
+  __array_ufunc__ = None
 
   position: NumpyArray
   attitude: NumpyArray
@@ -92,8 +100,35 @@ class NavState(NamedTuple):
       accel_bias=np.zeros(3),
     )
 
+  def __add__(self, xi: ArrayLike) -> Self:
+    xi = np.asarray(xi, dtype=float)
+    if xi.shape != (DOF,):
+      raise ValueError(f"expected a ({DOF},) increment, got {xi.shape}")
+    return type(self)(
+      position=self.position + xi[POSITION],
+      attitude=quat_normalize(
+        quat_multiply(self.attitude, quat_exp(xi[ROTATION]))
+      ),
+      velocity=self.velocity + xi[VELOCITY],
+      gyro_bias=self.gyro_bias + xi[GYRO_BIAS],
+      accel_bias=self.accel_bias + xi[ACCEL_BIAS],
+    )
 
-class ManifoldGaussian(NamedTuple):
+  def __sub__(self, other: "NavState") -> NumpyArray:
+    """Single-valued while the attitudes are less than a half turn apart."""
+    return np.concatenate(
+      [
+        self.position - other.position,
+        quat_log(quat_multiply(quat_conjugate(other.attitude), self.attitude)),
+        self.velocity - other.velocity,
+        self.gyro_bias - other.gyro_bias,
+        self.accel_bias - other.accel_bias,
+      ]
+    )
+
+
+@dataclass(frozen=True, eq=False)
+class ManifoldGaussian:
   """A Gaussian belief over :class:`NavState`.
 
   The covariance lives in the tangent space **at the mean**, so it is only
@@ -108,60 +143,8 @@ class ManifoldGaussian(NamedTuple):
   cov: NumpyArray
 
 
-def boxplus(state: NavState, xi: ArrayLike) -> NavState:
-  """Apply a tangent-space increment to a state.
-
-  :param state: Point to perturb.
-  :param xi: Increment, shape ``(15,)``, blocked by the module-level slices.
-  :return: The perturbed state.
-  """
-  xi = np.asarray(xi, dtype=float)
-  if xi.shape != (DOF,):
-    raise ValueError(f"expected a ({DOF},) increment, got {xi.shape}")
-
-  return NavState(
-    position=state.position + xi[POSITION],
-    attitude=quat_normalize(
-      quat_multiply(state.attitude, quat_exp(xi[ROTATION]))
-    ),
-    velocity=state.velocity + xi[VELOCITY],
-    gyro_bias=state.gyro_bias + xi[GYRO_BIAS],
-    accel_bias=state.accel_bias + xi[ACCEL_BIAS],
-  )
-
-
-def boxminus(state: NavState, reference: NavState) -> NumpyArray:
-  """The tangent-space increment taking ``reference`` to ``state``.
-
-  Inverse of :func:`boxplus`: ``boxplus(m, boxminus(x, m))`` is ``x`` and
-  ``boxminus(boxplus(m, xi), m)`` is ``xi``.
-
-  :param state: The state to express.
-  :param reference: The point whose tangent space to express it in.
-  :return: Increment, shape ``(15,)``.
-
-  Note:
-      Single-valued only while the two attitudes are less than a half turn
-      apart, which is what :func:`~auv_pose.estimation.quaternion.quat_log`
-      can invert. For a sigma-point cloud that holds as long as the attitude
-      covariance is sane; when it stops holding, the belief is already broken
-      and the caller should say so rather than smooth over it.
-  """
-  return np.concatenate(
-    [
-      state.position - reference.position,
-      quat_log(
-        quat_multiply(quat_conjugate(reference.attitude), state.attitude)
-      ),
-      state.velocity - reference.velocity,
-      state.gyro_bias - reference.gyro_bias,
-      state.accel_bias - reference.accel_bias,
-    ]
-  )
-
-
 def covariance_transport(xi: ArrayLike) -> NumpyArray:
-  """Jacobian carrying a covariance along a :func:`boxplus` correction.
+  """Jacobian carrying a covariance along a ``state + xi`` correction.
 
   A covariance computed in the tangent space at ``m`` is not the covariance in
   the tangent space at ``m [+] xi``; the two charts differ by the right
@@ -224,9 +207,9 @@ def manifold_mean(
   for _ in range(max_iter):
     delta = np.zeros(DOF)
     for state, weight in zip(states, weights):
-      delta += weight * boxminus(state, mean)
+      delta += weight * (state - mean)
 
-    mean = boxplus(mean, delta)
+    mean = mean + delta
 
     if np.max(np.abs(delta)) < tol:
       return mean

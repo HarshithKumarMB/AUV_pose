@@ -11,6 +11,7 @@ standing in for a surface fix.
 
 import argparse
 import subprocess
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import holoocean
@@ -21,7 +22,6 @@ from auv_pose.estimation.manifold import (
   DOF,
   ManifoldGaussian,
   NavState,
-  boxplus,
 )
 from auv_pose.estimation.navigation import (
   MAGNETIC_NORTH,
@@ -403,9 +403,9 @@ def main() -> None:
     attitude=rotmat_to_quat(true_rotation),
   )
   cov = initial_covariance()
-  mean = boxplus(truth, np.sqrt(np.diag(cov)) * rng.normal(size=DOF))
+  mean = truth + np.sqrt(np.diag(cov)) * rng.normal(size=DOF)
   velocity = np.zeros(3) if dvl is None else mean.rotation @ dvl
-  mean = mean._replace(velocity=velocity)
+  mean = replace(mean, velocity=velocity)
   initial = ManifoldGaussian(mean, cov)
 
   aiding_noise = AidingNoise(
@@ -426,7 +426,7 @@ def main() -> None:
     "bearings": bearings.tolist(),
     "swath_axis": list(PROFILER_SWATH_AXIS),
     "nadir_axis": list(PROFILER_NADIR_AXIS),
-    "imu_noise": SURVEY_IMU._asdict(),
+    "imu_noise": asdict(SURVEY_IMU),
     "dvl_beam_sigma": DVL_BEAM_SIGMA,
     "dvl_elevation_deg": DVL_ELEVATION,
     "depth_sigma": DEPTH_SIGMA,
@@ -441,7 +441,7 @@ def main() -> None:
       "attitude": truth.attitude.tolist(),
     },
     "initial_mean": {
-      k: np.asarray(v).tolist() for k, v in mean._asdict().items()
+      k: np.asarray(v).tolist() for k, v in asdict(mean).items()
     },
     "seed": args.seed,
     "yaw_deg": args.yaw,

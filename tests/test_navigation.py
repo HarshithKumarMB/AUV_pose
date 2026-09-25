@@ -13,6 +13,7 @@ simulated truth.
 """
 
 import operator
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -35,8 +36,6 @@ from auv_pose.estimation.manifold import (
   ROTATION,
   ManifoldGaussian,
   NavState,
-  boxminus,
-  boxplus,
 )
 from auv_pose.estimation.navigation import (
   MAGNETIC_NORTH,
@@ -229,9 +228,7 @@ def simulate(rng, prior, steps):
   The vehicle turns slowly and accelerates gently, so every state is excited,
   with biases walking as :class:`ImuNoise` says they do.
   """
-  truth = boxplus(
-    prior.mean, np.linalg.cholesky(prior.cov) @ rng.normal(size=DOF)
-  )
+  truth = prior.mean + np.linalg.cholesky(prior.cov) @ rng.normal(size=DOF)
   cycles = []
 
   for _ in range(steps):
@@ -243,7 +240,8 @@ def simulate(rng, prior, steps):
         rate + truth.gyro_bias, force + truth.accel_bias, DT
       )
       truth = propagate(truth, clean)
-      truth = truth._replace(
+      truth = replace(
+        truth,
         gyro_bias=truth.gyro_bias + rng.normal(scale=NOISE.gyro_bias, size=3),
         accel_bias=truth.accel_bias
         + rng.normal(scale=NOISE.accel_bias, size=3),
@@ -299,7 +297,7 @@ def monte_carlo():
   )
 
   def nees(truth, belief):
-    error = boxminus(truth, belief.mean)
+    error = truth - belief.mean
     return error @ np.linalg.solve(belief.cov, error)
 
   filtered = np.zeros((trials, steps))
@@ -429,7 +427,7 @@ def test_the_navigator_matches_calling_the_step_directly():
 
   np.testing.assert_allclose(nav.belief.cov, step.posterior.cov, atol=1e-15)
   np.testing.assert_allclose(
-    boxminus(nav.belief.mean, step.posterior.mean), 0.0, atol=1e-15
+    (nav.belief.mean - step.posterior.mean), 0.0, atol=1e-15
   )
 
 

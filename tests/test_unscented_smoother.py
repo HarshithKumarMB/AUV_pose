@@ -13,6 +13,7 @@ chart, and the covariance transport across it.
 """
 
 import operator
+from dataclasses import replace
 
 import numpy as np
 from linear_reference import ConstantVelocityKF, Measurement, rts_smooth
@@ -21,7 +22,6 @@ from auv_pose.estimation.manifold import (
   DOF,
   ManifoldGaussian,
   NavState,
-  boxminus,
   covariance_transport,
 )
 from auv_pose.estimation.quaternion import quat_angle, quat_exp
@@ -256,8 +256,8 @@ def test_it_agrees_with_the_vector_pass_when_nothing_rotates():
   flat = unscented_rts_smooth(
     initial,
     steps,
-    boxplus=lambda s, d: s._replace(
-      position=s.position + d[:3], velocity=s.velocity + d[6:9]
+    boxplus=lambda s, d: replace(
+      s, position=s.position + d[:3], velocity=s.velocity + d[6:9]
     ),
     boxminus=lambda a, b: np.concatenate(
       [
@@ -306,7 +306,7 @@ def test_the_correction_moves_the_mean_toward_the_future():
 
   filtered = [initial] + [s.posterior for s in steps]
   moved = [
-    np.linalg.norm(boxminus(got.mean, was.mean))
+    np.linalg.norm(got.mean - was.mean)
     for got, was in zip(smoothed[:-1], filtered[:-1])
   ]
   assert max(moved) > 1e-6

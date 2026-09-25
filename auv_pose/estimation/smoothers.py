@@ -1,15 +1,11 @@
 """Fixed-interval smoothing of a recorded filter run."""
 
+import operator
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 import numpy as np
 
-from auv_pose.estimation.manifold import (
-  boxminus as manifold_boxminus,
-)
-from auv_pose.estimation.manifold import (
-  boxplus as manifold_boxplus,
-)
 from auv_pose.estimation.manifold import (
   covariance_transport as manifold_transport,
 )
@@ -19,8 +15,8 @@ from auv_pose.estimation.typing import Belief, NumpyArray, SmootherStep
 def unscented_rts_smooth(
   initial: Belief,
   history: Sequence[SmootherStep[Belief]],
-  boxplus: Callable[..., object] = manifold_boxplus,
-  boxminus: Callable[..., NumpyArray] = manifold_boxminus,
+  boxplus: Callable[..., object] = operator.add,
+  boxminus: Callable[..., NumpyArray] = operator.sub,
   transport: Callable[..., NumpyArray] | None = manifold_transport,
 ) -> list[Belief]:
   """Fixed-interval smoothing for a filter that records no transition matrix.
@@ -39,8 +35,9 @@ def unscented_rts_smooth(
 
   :param initial: Belief before the first step.
   :param history: Recorded steps, oldest first.
-  :param boxplus: Applies a tangent increment to a mean. Defaults to the state
-      manifold's; pass ``operator.add`` to smooth in a vector space.
+  :param boxplus: Applies a tangent increment to a mean; ``+`` by default,
+      which serves both :class:`~auv_pose.estimation.manifold.NavState` and
+      plain vectors.
   :param boxminus: The tangent increment between two means.
   :param transport: Maps an increment to the Jacobian carrying a covariance
       along it. ``None`` to skip, which is what a flat chart wants -- see the
@@ -82,8 +79,10 @@ def unscented_rts_smooth(
       jacobian = transport(correction)
       cov = jacobian @ cov @ jacobian.T
 
-    smoothed[k] = filtered._replace(
-      mean=boxplus(filtered.mean, correction), cov=0.5 * (cov + cov.T)
+    smoothed[k] = replace(
+      filtered,
+      mean=boxplus(filtered.mean, correction),
+      cov=0.5 * (cov + cov.T),
     )
 
   return smoothed

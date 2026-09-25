@@ -17,7 +17,8 @@ is not optional: it is the form Forster's covariance recursion is derived for,
 and it is what puts the accelerometer's noise into the position block at all.
 """
 
-from typing import NamedTuple, Self
+from dataclasses import dataclass
+from typing import Self
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -53,7 +54,8 @@ _ACCEL_BIAS_WALK = slice(9, 12)
 _NOISE_DOF = 12
 
 
-class ImuSamples(NamedTuple):
+@dataclass(frozen=True, eq=False)
+class ImuSamples:
   """A run of IMU samples, as one smoother step consumes them.
 
   :param gyro: Body angular rate per sample, rad/s, shape ``(k, 3)``.
@@ -87,7 +89,8 @@ class ImuSamples(NamedTuple):
     return len(self.dt)
 
 
-class ImuNoise(NamedTuple):
+@dataclass(frozen=True)
+class ImuNoise:
   """Per-sample noise of the IMU.
 
   .. warning::
