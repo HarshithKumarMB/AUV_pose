@@ -8,6 +8,7 @@ shift, so flat seabed is refused rather than fitted to noise. The shifts are
 relative and returned summing to zero.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -141,7 +142,7 @@ def shift_to(
 
 
 def register_passes(
-  passes: list[tuple[NDArray[np.float64], NDArray[np.float64]]],
+  passes: Sequence[tuple[ArrayLike, ArrayLike]],
   cell: float = 1.0,
   rounds: int = 3,
   search: float = 6.0,

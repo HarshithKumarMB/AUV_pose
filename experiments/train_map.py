@@ -1,9 +1,9 @@
-"""Fit the bathymetry map on every sounding of every survey.
+"""Register survey passes to each other, then fit the map on every sounding.
 
     python experiments/train_map.py ~/data/auv_pose/surveys_v4/pass*_smoothed.csv
 
-Writes the checkpoint and a PNG render beside it. Vecchia GP by default;
-``--method svgp`` fits the SVGP baseline.
+Each CSV is one pass. Writes the checkpoint and a PNG render beside it. Vecchia
+GP by default; ``--method svgp`` fits the SVGP baseline.
 """
 
 import argparse
@@ -14,6 +14,7 @@ import numpy as np
 
 from auv_pose.io.checkpoints import save_map
 from auv_pose.io.soundings import load_soundings, soundings_to_arrays
+from auv_pose.mapping.registration import register_passes
 from auv_pose.mapping.svgp import BathymetryMap, fit_svgp
 from auv_pose.mapping.vecchia import VecchiaMap, fit_vecchia
 from experiments.cli import refuse_overwrite
@@ -28,7 +29,9 @@ GRID = 200
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("surveys", nargs="+", type=Path, help="soundings CSVs")
+  parser.add_argument(
+    "surveys", nargs="+", type=Path, help="soundings CSVs, one per pass"
+  )
   parser.add_argument("--out", type=Path, default=Path("bathymetry.npz"))
   parser.add_argument(
     "--method", choices=("vecchia", "svgp"), default="vecchia"
@@ -114,7 +117,16 @@ def main() -> None:
   refuse_overwrite(args.out, args.force)
   refuse_overwrite(plot, args.force)
 
-  X, y = soundings_to_arrays(load_soundings(args.surveys))
+  passes = [
+    soundings_to_arrays(load_soundings([path])) for path in args.surveys
+  ]
+  if len(passes) > 1:
+    shifts, biases = register_passes(passes)
+    for path, shift, bias in zip(args.surveys, shifts, biases):
+      print(f"{path.name}: shifted {np.round(shift, 3)} m, {bias:+.3f} m in z")
+    passes = [(xy + s, z + b) for (xy, z), s, b in zip(passes, shifts, biases)]
+  X = np.concatenate([xy for xy, _ in passes])
+  y = np.concatenate([z for _, z in passes])
   print(f"Fitting {args.method} on {len(y)} soundings")
   fit = fit_vecchia_map if args.method == "vecchia" else fit_svgp_map
   bathymetry = fit(X, y, args)
