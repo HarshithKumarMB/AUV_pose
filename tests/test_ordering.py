@@ -1,11 +1,4 @@
-"""Maximin ordering and predecessor neighbour sets.
-
-Both functions are optimised versions of things with obvious slow definitions,
-so both are checked against those definitions written out longhand here. That is
-the whole point: the lazy-greedy heap and the blocked tree builds are supposed
-to produce *identical* answers to the naive loops, not merely similar ones, and
-nothing else in the suite would notice if they did not.
-"""
+"""Maximin ordering and predecessor neighbour sets, against brute force."""
 
 from itertools import pairwise
 
@@ -19,7 +12,7 @@ def scatter(n, seed, spread=50.0):
 
 
 def brute_force_maximin(points, first):
-  """The definition, written out: repeatedly take the furthest point."""
+  """Repeatedly take the furthest point."""
   n = len(points)
   order = [first]
   remaining = [i for i in range(n) if i != first]
@@ -36,7 +29,7 @@ def brute_force_maximin(points, first):
 
 
 def brute_force_neighbours(points, m):
-  """The definition: for each point, the m nearest among its predecessors."""
+  """For each point, the m nearest among its predecessors."""
   n = len(points)
   out = np.full((n, m), -1, dtype=np.int64)
   for i in range(1, n):
@@ -50,7 +43,6 @@ def brute_force_neighbours(points, m):
 
 
 def test_it_matches_a_brute_force_greedy():
-  """The pin on the lazy-greedy heap. Identical, not similar."""
   for seed in (0, 1, 2):
     points = scatter(200, seed)
     np.testing.assert_array_equal(
@@ -59,12 +51,6 @@ def test_it_matches_a_brute_force_greedy():
 
 
 def test_the_selection_distances_never_increase():
-  """The defining property: each point is further out than the next.
-
-  Catches an ordering that is a valid permutation but not actually maximin --
-  which is the failure the KL test downstream would see only as "slightly worse
-  accuracy", if at all.
-  """
   points = scatter(400, 3)
   order = maximin_order(points)
 
@@ -95,7 +81,6 @@ def test_the_default_start_is_nearest_the_centroid():
 
 
 def test_it_is_deterministic_on_tied_distances():
-  """A decimated survey is nearly a grid, so exact ties are the common case."""
   grid = np.stack(
     np.meshgrid(np.arange(12) * 0.25, np.arange(12) * 0.25), axis=-1
   ).reshape(-1, 2)
@@ -112,11 +97,7 @@ def test_it_handles_degenerate_inputs():
 
 
 def test_it_spreads_before_it_fills_in():
-  """The property the approximation actually relies on.
-
-  The first handful of points should span the survey, not huddle. Compare the
-  spread of the first eight against the spread of eight consecutive arrivals.
-  """
+  """The first eight span more than eight consecutive arrivals."""
   points = scatter(500, 7)
   order = maximin_order(points)
 
@@ -142,7 +123,6 @@ def test_they_match_a_brute_force_search():
 
 
 def test_the_block_size_does_not_change_the_answer():
-  """Blocking is an optimisation, not a model choice."""
   points = scatter(400, 10)
   reference = ordered_neighbours(points, m=8, block=4096)
 
@@ -153,7 +133,7 @@ def test_the_block_size_does_not_change_the_answer():
 
 
 def test_every_neighbour_is_earlier_in_the_order():
-  """The Vecchia condition. Violating it would not be an approximation at all."""
+  """Neighbours are distinct predecessors."""
   points = scatter(600, 11)
   neighbours = ordered_neighbours(points, m=12, block=128)
 
@@ -183,7 +163,7 @@ def test_a_neighbour_set_larger_than_the_data_still_works():
 
 
 def test_the_nearest_predecessor_really_is_nearest():
-  """Independent of the brute-force helper, in case that is wrong too."""
+  """Checked without the brute-force helper."""
   points = scatter(300, 14)
   neighbours = ordered_neighbours(points, m=5, block=32)
 
@@ -212,7 +192,6 @@ def test_it_rejects_a_nonsense_conditioning_size():
 
 
 def test_all_nearest_is_the_default():
-  """`near=m` must reproduce the plain nearest-neighbour sets exactly."""
   points = scatter(400, 20)
   np.testing.assert_array_equal(
     ordered_neighbours(points, m=10),
@@ -221,17 +200,14 @@ def test_all_nearest_is_the_default():
 
 
 def test_the_nearest_part_is_still_exactly_nearest():
-  """Splitting the set must not disturb the neighbours it does keep."""
   points = scatter(500, 21)
   reference = brute_force_neighbours(points, m=6)
   mixed = ordered_neighbours(points, m=10, near=6)
 
-  # The first `near` columns are the nearest, in the same order.
   np.testing.assert_array_equal(mixed[:, :6], reference)
 
 
 def test_the_far_points_are_predecessors_and_distinct():
-  """The Vecchia condition still has to hold for the spread members."""
   points = scatter(600, 22)
   neighbours = ordered_neighbours(points, m=12, near=8)
 
@@ -242,12 +218,6 @@ def test_the_far_points_are_predecessors_and_distinct():
 
 
 def test_the_far_points_really_are_further_away():
-  """The property the design exists for.
-
-  Averaged over rows with a full conditioning set, the spread members must sit
-  substantially further from the point than the nearest members do. Without
-  this the change is cosmetic.
-  """
   points = scatter(800, 23)
   near, m = 8, 12
   neighbours = ordered_neighbours(points, m=m, near=near)
@@ -264,7 +234,7 @@ def test_the_far_points_really_are_further_away():
 
 
 def test_the_conditioning_set_stays_full():
-  """A collision with the nearest set must not silently shrink the row."""
+  """Collisions with the nearest set do not shrink the row."""
   points = scatter(700, 24)
   neighbours = ordered_neighbours(points, m=15, near=10)
 
@@ -300,7 +270,6 @@ def test_it_rejects_a_nonsense_split():
 
 
 def test_the_head_still_takes_everything_it_can():
-  """Early rows have too few predecessors to split; they take all of them."""
   points = scatter(60, 28)
   neighbours = ordered_neighbours(points, m=12, near=8)
 

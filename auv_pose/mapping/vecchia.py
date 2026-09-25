@@ -1,34 +1,21 @@
 """The Vecchia approximation: a Gaussian process that scales to a whole survey.
 
-An exact GP over ``N`` soundings costs ``O(N^3)``, which a multibeam survey puts
-out of reach within an afternoon of flying. Vecchia's approximation replaces the
-joint density by a chain in which each sounding conditions on only its ``m``
-nearest **predecessors** under some ordering::
+Each sounding conditions on its ``m`` nearest predecessors under a maximin
+ordering::
 
     p(z) = prod_i p(z_i | z_{g(i)}),    g(i) subset of {1..i-1},  |g(i)| <= m
 
-which is exact when ``g(i)`` is every predecessor and an approximation
-otherwise. It is linear in ``N`` in both time and memory, and -- unlike an
-inducing-point method -- it conditions *locally*, so fine structure survives
-rather than being averaged into a few hundred global basis functions.
+The map is ``z = phi(q)^T beta + zeta(q) + eps``; this module models the
+residual ``zeta`` of the mean, so targets and inputs are never standardised.
 
-**Everything here works on the residual of a linear mean.** The map is
-``z = phi(q)^T beta + zeta(q) + eps`` with ``phi(q) = (1, n, e)``; ``beta``
-absorbs the regional depth and slope, and this module models ``zeta`` alone.
-That is why there is no target standardisation anywhere: the mean does the job
-the centring used to, and the per-axis lengthscales do the job the input scaler
-used to, with the advantage that both come out in metres.
+Shared parameters: ``log_amplitude`` is ``log(sigma_f^2)``, ``log_lengthscale``
+the ``log`` of the per-axis lengthscale in metres, ``noise`` the per-sounding
+variance (a scalar broadcasts), ``jitter`` a diagonal regulariser relative to
+the amplitude, and ``chunk``/``chunk_size`` a batch size that bounds memory
+only. Arrays are in the structure's order unless stated.
 
-**float64, throughout, deliberately.** After decimation to 0.25 m against a
-lengthscale of metres, a block of neighbouring soundings is strongly correlated
-and its kernel matrix is correspondingly ill-conditioned -- measured condition
-numbers around 3.7e6 at 0.25 m spacing. float32 carries about 1e7 of dynamic
-range, so it sits at the edge of failing; float64 has room to spare and the
-batched Cholesky is fast enough either way.
-
-See Vecchia (1988) for the original, Katzfuss and Guinness (2021) for the
-framework, and Rambelli and Sigrist (2026) for why this rather than the
-alternatives.
+Everything is float64: soundings 0.25 m apart under a metre-scale kernel give
+kernel blocks too ill-conditioned for float32.
 """
 
 import math
@@ -49,11 +36,7 @@ from auv_pose.mapping.ordering import maximin_order, ordered_neighbours
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:
-  """CUDA when it is genuinely there, else the CPU.
-
-  Mirrors :func:`auv_pose.mapping.svgp.resolve_device`; duplicated rather than
-  imported so this module does not pull in gpytorch.
-  """
+  """CUDA when available, else the CPU. Local copy to avoid importing gpytorch."""
   if device is not None:
     return torch.device(device)
   return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -61,32 +44,23 @@ def _resolve_device(device: str | torch.device | None) -> torch.device:
 
 _LOG_2PI = math.log(2.0 * math.pi)
 
-#: Added to every kernel block's diagonal before factorising. A regulariser,
-#: **not** a nugget with a physical meaning: soundings 0.25 m apart under a
-#: metre-scale kernel have covariances indistinguishable from their variance,
-#: and the Cholesky fails on the resulting singularity. Scaled by the amplitude
-#: so it stays proportionate when the fit moves.
+#: Diagonal regulariser for every kernel block, relative to the amplitude. Not
+#: a physical nugget: it keeps near-coincident soundings factorisable.
 DEFAULT_JITTER = 1e-8
 
 
 @dataclass(frozen=True)
 class VecchiaStructure:
-  """The part of the approximation that depends only on *where* the soundings are.
-
-  Held apart from the hyperparameters on purpose. The ordering and the
-  conditioning sets are functions of position alone, so they are computed once
-  and reused across every step of the hyperparameter fit -- which is what makes
-  each step cost one batched Cholesky rather than a neighbour search.
+  """Ordering and conditioning sets: the position-only part, reused across a fit.
 
   :param points: Sounding positions **in the approximation's own order**,
       shape ``(N, 2)``, metres.
-  :param neighbours: Indices into :attr:`points` of each sounding's ``m``
-      nearest predecessors, shape ``(N, m)``, padded with ``-1`` where there
-      are fewer. Rows below :attr:`n0` are unused.
+  :param neighbours: Indices into :attr:`points` of each sounding's
+      conditioning set, shape ``(N, m)``, padded with ``-1``. Rows below
+      :attr:`n0` are unused.
   :param order: The permutation taking the caller's ordering to this one.
-  :param n0: Soundings handled by a single dense Cholesky rather than by the
-      chain. Must be at least ``m`` so the batched rows all have exactly ``m``
-      neighbours and stay rectangular.
+  :param n0: Size of the dense head block. At least ``m``, so every batched
+      row has exactly ``m`` neighbours.
   """
 
   points: np.ndarray
@@ -119,20 +93,10 @@ def build_structure(
   :param n0: Size of the dense head block. Defaults to ``max(m, 64)``, capped
       at ``N``.
   :param first: Passed to :func:`~auv_pose.mapping.ordering.maximin_order`.
-  :param near: How many of the ``m`` are nearest neighbours; the rest are
-      spread across the ordering. See
+  :param near: How many of the ``m`` are nearest neighbours; see
       :func:`~auv_pose.mapping.ordering.ordered_neighbours`. Defaults to all
       nearest, which is right for prediction and wrong for fitting.
   :return: The structure, with ``points`` permuted into maximin order.
-
-  Note:
-      ``n0`` is not merely bookkeeping to keep the batched rows rectangular.
-      The head block conditions each of its soundings on *all* its
-      predecessors, so it is locally exact, and enlarging it buys accuracy for
-      a dense factorisation of a few dozen points -- which costs nothing. The
-      same observation is made in GraphGP (Dodge, Frank and Clark, 2026), who
-      use a dense block of 100 "to avoid small initial batches and increase
-      accuracy".
   """
   points = np.asarray(points, dtype=float)
   if points.ndim != 2 or points.shape[1] != 2:
@@ -158,18 +122,8 @@ def build_structure(
 
 @dataclass(frozen=True)
 class MeanBasis:
-  """The mean function's basis: a polynomial in position, §3.2's plane by default.
+  """The mean function's basis: a polynomial in position, the plane by default.
 
-  A tensor B-spline mean was tried and retired. It won on a gap-filling test
-  -- 8 m squares withheld, where the posterior falls back on the mean -- but
-  its coefficients had no prior, so wherever soundings were thin they swung,
-  by 20 m inside held-out squares at 0.25 m cells, and keeping them in check
-  took pruning, an intercept and a density-dependent threshold. On the test
-  that matches how the map is used -- soundings between the survey's, from an
-  independent track -- the plane scored the same (0.818 against 0.820 m). The
-  kernel carries the structure; the mean only has to not get in its way.
-
-  :param kind: ``"polynomial"``.
   :param degree: Total degree; 1 is the plane.
   """
 
@@ -177,16 +131,9 @@ class MeanBasis:
   degree: int = 1
 
   @classmethod
-  def build(
-    cls,
-    points: ArrayLike,
-    kind: str = "linear",
-    degree: int | None = None,
-  ) -> Self:
+  def build(cls, kind: str = "linear", degree: int | None = None) -> Self:
     """Choose a basis.
 
-    :param points: The survey the mean is fitted on; unused by a polynomial,
-        kept so the call reads the same as it always has.
     :param kind: ``"linear"``, ``"quadratic"``, ``"cubic"`` or ``"polynomial"``.
     :param degree: Overrides the degree implied by ``kind``.
     """
@@ -195,12 +142,6 @@ class MeanBasis:
       return cls(kind="polynomial", degree=degree or named[kind])
     if kind == "polynomial":
       return cls(kind="polynomial", degree=degree or 1)
-    if kind == "spline":
-      raise ValueError(
-        "the spline mean was retired: its unconstrained coefficients swung "
-        "where soundings were thin, and the plane scored the same on an "
-        "independent track. Use kind='linear'"
-      )
     raise ValueError(
       f"kind must be one of {sorted(named) + ['polynomial']}, got {kind!r}"
     )
@@ -211,11 +152,7 @@ class MeanBasis:
     return (self.degree + 1) * (self.degree + 2) // 2
 
   def __call__(self, points: ArrayLike) -> np.ndarray:
-    """Evaluate the basis.
-
-    :param points: Positions, shape ``(N, 2)``.
-    :return: Shape ``(N, p)``.
-    """
+    """Evaluate the basis at ``(N, 2)`` positions. Shape ``(N, p)``."""
     points = np.asarray(points, dtype=float)
     if points.ndim != 2 or points.shape[1] != 2:
       raise ValueError(f"expected (N, 2) points, got {points.shape}")
@@ -227,16 +164,7 @@ class MeanBasis:
     return np.column_stack(columns)
 
   def gradient(self, points: ArrayLike) -> np.ndarray:
-    """Derivative of the basis with respect to position.
-
-    :param points: Positions, shape ``(N, 2)``.
-    :return: Shape ``(N, p, 2)``, basis value per metre.
-
-    Note:
-        Needed because the map's mean gradient is ``d(phi)/dq . beta``, and the
-        terrain update carries the sonar's range noise through it. For the
-        plane this is the constant ``(0, 1, 0), (0, 0, 1)``.
-    """
+    """Derivative of the basis with respect to position. Shape ``(N, p, 2)``."""
     points = np.asarray(points, dtype=float)
     if points.ndim != 2 or points.shape[1] != 2:
       raise ValueError(f"expected (N, 2) points, got {points.shape}")
@@ -261,47 +189,30 @@ class MeanBasis:
     return np.stack(columns, axis=1)
 
 
-#: §3.2's mean, kept as the default so nothing changes without being asked for.
+#: The default mean, ``phi(q) = (1, n, e)``.
 LINEAR_MEAN = MeanBasis(kind="polynomial", degree=1)
 
 
 def design_matrix(
   points: ArrayLike, basis: MeanBasis | None = None
 ) -> np.ndarray:
-  """Evaluate a mean basis, defaulting to §3.2's ``phi(q) = (1, n, e)``.
-
-  :param points: Positions, shape ``(N, 2)``.
-  :param basis: The basis to use. Defaults to the linear one.
-  :return: Shape ``(N, p)``.
-  """
+  """Evaluate a mean basis, :data:`LINEAR_MEAN` by default. Shape ``(N, p)``."""
   return (basis or LINEAR_MEAN)(points)
 
 
 def _gather_block(values: Tensor, neighbours: Tensor, rows: Tensor) -> Tensor:
   """Gather a per-sounding quantity over ``(g(i), i)`` -- neighbours, self last.
 
-  Putting the sounding itself in the final row is what lets one Cholesky yield
-  both the conditional mean and the conditional variance: for ``L = chol(K)``
-  over ``(g(i), i)``, the last row holds ``L_gg^-1 K_gi`` and the conditional
-  standard deviation, so no second solve is needed. GraphGP's ``refine``
-  arrives at the same arrangement independently.
+  Self last means the last row of ``chol(K)`` holds the regression weights and
+  the conditional standard deviation, so one Cholesky gives both.
 
-  :param values: Per-sounding values, shape ``(N,)`` or ``(N, d)``.
-  :param neighbours: Conditioning indices for these rows, shape ``(b, m)``.
-  :param rows: The soundings themselves, shape ``(b,)``.
   :return: Shape ``(b, m+1)`` or ``(b, m+1, d)``.
   """
   return torch.cat([values[neighbours], values[rows][:, None]], dim=1)
 
 
 def _cholesky(blocks: Tensor, where: str) -> Tensor:
-  """Batched Cholesky that reports *which* block failed.
-
-  ``torch.linalg.cholesky_ex`` returns a status rather than raising, which is
-  what this package needs: ``pyproject.toml`` promotes ``RuntimeWarning`` to an
-  error, so a silent NaN would surface later as an unrelated test failure
-  rather than here.
-  """
+  """Batched Cholesky that raises, naming which block failed, instead of NaNs."""
   factor, info = torch.linalg.cholesky_ex(blocks)
 
   if torch.any(info != 0):
@@ -326,9 +237,7 @@ def _gram_chunk(
 ) -> tuple[Tensor, Tensor]:
   """One chunk's contribution to ``(U^T V)^T (U^T V)`` and ``sum log U_ii``.
 
-  Kept as its own function so it can be wrapped in gradient checkpointing: the
-  ``(b, m+1, m+1)`` factors are the whole memory cost, and they are cheaper to
-  recompute in the backward pass than to keep.
+  A separate function so it can be gradient-checkpointed.
   """
   width = block_values.shape[1] - 1
 
@@ -354,41 +263,14 @@ def whiten_gram(
   jitter: float = DEFAULT_JITTER,
   chunk: int = 8192,
 ) -> tuple[Tensor, Tensor]:
-  """``(U^T V)^T (U^T V)`` and ``sum_i log U_ii``, in bounded memory.
+  """``(U^T V)^T (U^T V)`` and ``sum_i log U_ii``, in memory bounded by ``chunk``.
 
-  Both objectives need only **cross-products** of the whitened columns, never
-  the whitened columns themselves: the plain likelihood wants ``||U^T r||^2``,
-  and REML wants ``W'W``, ``W'u`` and ``u'u``, which stacking ``[H | z]``
-  delivers as one ``(p+1) x (p+1)`` gram. Every one of those is a sum over
-  soundings, so they accumulate chunk by chunk.
-
-  :param structure: Ordering and conditioning sets.
   :param values: Shape ``(N, p)``, in the structure's order.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
-  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
-  :param jitter: Diagonal regulariser, relative to the amplitude.
-  :param chunk: Soundings per factorisation.
   :return: ``(gram, sum_i log U_ii)`` of shapes ``(p, p)`` and ``()``.
 
   Note:
-      **Accumulating the gram is not by itself enough to bound memory**, and
-      assuming otherwise cost a twenty-minute fit. Chunking bounds the working
-      set, but autograd keeps every chunk's ``(b, m+1, m+1)`` factor alive for
-      the backward pass, so peak memory stays proportional to ``N``. At the
-      real survey's 424k training soundings that is 3.3 GB per intermediate and
-      over 22 GB in total -- an out-of-memory error on a 24 GB card.
-
-      The per-chunk ``backward()`` this plan originally called for does not
-      rescue it either: REML's loss does not decompose over chunks, because
-      ``beta`` depends on the whole of ``H' K^-1 H``.
-
-      What does work is **gradient checkpointing**: store only each chunk's
-      inputs and outputs and recompute its interior during the backward pass.
-      Memory then follows ``chunk`` rather than ``N``, at the cost of one extra
-      forward. That is the right trade here -- the forward is a batched
-      Cholesky the GPU does in milliseconds, and the alternative is not fitting
-      at all.
+      Chunking alone does not bound memory: autograd would keep every chunk's
+      factor for the backward pass. Each chunk is gradient-checkpointed instead.
   """
   device, dtype = values.device, values.dtype
   points = torch.as_tensor(structure.points, dtype=dtype, device=device)
@@ -448,23 +330,10 @@ def whiten(
 ) -> tuple[Tensor, Tensor]:
   """Apply ``U^T`` to one or more vectors, and report ``sum_i log U_ii``.
 
-  ``U`` is the sparse upper-triangular factor of the approximated precision,
-  ``K^-1 = U U^T``. It is never assembled: the ``i``-th row of ``U^T v`` is the
-  last entry of ``L_i^-1 v[c_i]`` for the block factor ``L_i``, and the head
-  block contributes its whole dense solve. So whitening is exactly the work the
-  likelihood already does, and applying it to a matrix rather than a vector
-  costs only a wider triangular solve against Cholesky factors that are shared.
+  ``U`` is the sparse upper-triangular factor with ``K^-1 = U U^T``; it is
+  never assembled.
 
-  That is what makes REML affordable: every quantity it needs beyond the plain
-  likelihood is a product against this same ``U``.
-
-  :param structure: Ordering and conditioning sets.
   :param values: Shape ``(N,)`` or ``(N, p)``, in the structure's order.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
-  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
-  :param jitter: Diagonal regulariser, relative to the amplitude.
-  :param chunk: Blocks factorised at once. Memory only.
   :return: ``(U^T values, sum_i log U_ii)``, the first with the shape of
       ``values`` and the second a scalar.
   """
@@ -529,31 +398,12 @@ def sparse_factor(
 ):
   """Assemble ``U`` explicitly, the sparse factor with ``K^-1 = U U^T``.
 
-  The likelihood never needs this -- :func:`whiten` applies ``U^T`` without
-  forming it, which is the whole reason the fit is cheap. Drawing from the
-  model needs the opposite operation, ``solve(U^T, z)``, and a triangular solve
-  does need the entries.
-
-  :param structure: Ordering and conditioning sets.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
-  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
-  :param jitter: Diagonal regulariser, relative to the amplitude.
-  :param chunk: Blocks factorised at once. Memory only.
   :return: ``U`` as a ``scipy.sparse`` CSC matrix, shape ``(N, N)``, upper
       triangular, in the **structure's** order.
 
   Note:
-      Column ``i`` holds the coefficients of the ``i``-th conditional. Writing
-      ``w`` for the regression of sounding ``i`` on its conditioning set and
-      ``d`` for the conditional standard deviation, ``U[i, i] = 1/d`` and
-      ``U[g(i), i] = -w/d``, because the whitened residual is
-      ``(x_i - w' x_g) / d``. Both fall out of the block Cholesky that
-      :func:`whiten` already computes: with ``L`` over ``(g(i), i)``,
-      ``w = solve(L_gg^T, L[m, :m])`` and ``d = L[m, m]``.
-
-      The head block is the same statement for a dense exact factorisation:
-      ``K = L L^T`` gives ``K^-1 = L^-T L^-1``, so its corner of ``U`` is
+      With regression weights ``w`` and conditional standard deviation ``d``,
+      ``U[i, i] = 1/d`` and ``U[g(i), i] = -w/d``. The head block's corner is
       ``L^-T``.
   """
   device, dtype = log_amplitude.device, log_amplitude.dtype
@@ -650,30 +500,13 @@ def draw(
 ) -> np.ndarray:
   """Draw realisations of the field at the structure's points.
 
-  :param structure: Ordering and conditioning sets.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
-  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
-  :param count: How many independent realisations.
-  :param seed: Seed for the white noise.
-  :param jitter: Diagonal regulariser, relative to the amplitude.
-  :param chunk: Blocks factorised at once. Memory only.
   :return: Shape ``(N,)`` when ``count`` is 1, else ``(N, count)``, in the
-      **caller's** order -- the inverse of ``structure.order``, so it lines up
-      with whatever positions were handed to :func:`build_structure`.
+      **caller's** order, matching the positions given to
+      :func:`build_structure`.
 
   Note:
-      ``x = U^-T z`` for white ``z`` has covariance ``U^-T U^-1 = K``, so one
-      sparse triangular solve is the whole draw.
-
-  Note:
-      **What this is for, and the trap in it.** A draw from a field whose
-      hyperparameters are known is the only way to ask whether a fit *recovers*
-      them, as opposed to merely converging. But generating and fitting with
-      the same conditioning set is circular -- the data is then an exact sample
-      from the model being fitted, and recovery tests the optimiser rather than
-      the approximation. Generate with a conditioning set several times larger
-      than the one being tested.
+      To test hyperparameter recovery, draw with a conditioning set several
+      times larger than the one being fitted; the same ``m`` is circular.
   """
   factor = sparse_factor(
     structure,
@@ -705,21 +538,12 @@ def vecchia_loglik(
 ) -> Tensor:
   """Log marginal likelihood of a residual whose mean is already fixed.
 
-  ``log p = -N/2 log 2pi + sum_i log U_ii - 1/2 ||U^T r||^2``, both terms from
-  :func:`whiten`.
+  ``log p = -N/2 log 2pi + sum_i log U_ii - 1/2 ||U^T r||^2``.
 
-  This is maximum likelihood with a **plug-in** mean. Prefer
-  :func:`vecchia_reml` unless the plug-in is what you specifically want --
-  estimating the mean from the data shortens the residual, and this objective
-  reads that as a smaller amplitude.
+  With a mean estimated from the same data this underestimates the amplitude;
+  prefer :func:`vecchia_reml`.
 
-  :param structure: Ordering and conditioning sets.
   :param residual: ``z - phi(q)^T beta`` in the structure's order, shape ``(N,)``.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
-  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
-  :param jitter: Diagonal regulariser, relative to the amplitude.
-  :param chunk: Blocks factorised at once.
   :return: Scalar, differentiable in the hyperparameters and in ``noise``.
   """
   gram, log_determinant = whiten_gram(
@@ -750,55 +574,19 @@ def vecchia_reml(
   ``ell_R = -(N-p)/2 log 2pi + sum_i log U_ii - 1/2 log|H' K^-1 H|
             - 1/2 (z - H beta)' K^-1 (z - H beta)``
 
-  **Why not plain maximum likelihood.** Estimating ``beta`` from the data
-  projects variance out of the residual at a rate ``tr(HK)/tr(K)`` -- measured
-  here at 8-13% for a 12 m lengthscale over an 80 m box -- and a plug-in
-  likelihood reads that shortfall as a smaller amplitude. Note the culprit is
-  the *projection*, not the estimator: ordinary least squares is unbiased for
-  ``beta``, and switching it for generalised least squares changes nothing,
-  measured at -10.6% against OLS's -9.7%. REML instead scores the error
-  contrasts orthogonal to ``H``, which is what the extra log-determinant term
-  is, and comes in at -3.0% on the same problem.
-
-  That direction matters here: an amplitude fitted low understates the map's
-  own uncertainty, which is what the smoother's update would then be too
-  confident about.
-
-  **Why it is cheap.** Everything beyond the plain likelihood is a product
-  against the same ``U``: ``H' K^-1 H = (U'H)' (U'H)`` and
-  ``beta = (H' K^-1 H)^-1 (U'H)' (U'z)``. So ``H`` and ``z`` whiten together in
-  one pass, the Cholesky factors are shared, and what is left is a ``3 x 3``
-  solve and log-determinant. A few per cent per evaluation.
-
-  :param structure: Ordering and conditioning sets.
   :param depth: Seabed elevation in the structure's order, shape ``(N,)``.
   :param basis: The linear mean's design matrix ``phi(q)``, shape ``(N, p)``,
       in the same order.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(2,)``.
-  :param noise: Per-sounding variance, shape ``(N,)``; a scalar broadcasts.
-  :param jitter: Diagonal regulariser, relative to the amplitude.
-  :param chunk: Blocks factorised at once.
-  :return: ``(restricted log likelihood, beta)``.
+  :return: ``(restricted log likelihood, beta)``, with ``beta`` the GLS
+      estimate under the current kernel.
 
   Note:
-      ``beta`` is recomputed here at **every** hyperparameter value, from the
-      current kernel. Holding it fixed from an earlier fit would make this
-      maximum likelihood with a plug-in mean again, which is the thing the
-      objective exists to avoid.
+      ``beta`` must be recomputed at every hyperparameter value; holding it
+      fixed turns this back into plug-in maximum likelihood.
 
   Note:
-      Because ``K^-1`` is itself the Vecchia approximation, this is
-      Vecchia-REML -- the same thing GpGp and GPvecchia do for covariates. It
-      is consistent with the rest of the pipeline, so there is no exactness
-      mismatch between the objective and the map it fits.
-
-  Note:
-      The constant ``+1/2 log|H'H|`` that makes REML invariant to the
-      parametrisation of ``H`` is omitted: it does not depend on the
-      hyperparameters, so it shifts the objective without moving its maximum.
-      Restricted likelihoods are comparable across kernels, **not** across
-      different designs.
+      The constant ``+1/2 log|H'H|`` is omitted, so values are comparable
+      across kernels but **not** across designs ``H``.
   """
   stacked = torch.cat([basis, depth[:, None]], dim=1)
   gram, log_determinant = whiten_gram(
@@ -832,15 +620,8 @@ def vecchia_reml(
 
 @dataclass(frozen=True)
 class VecchiaHyperparameters:
-  """Kernel parameters, held in logs because that is how they are fitted.
+  """Kernel parameters, held in logs as they are fitted.
 
-  Log-parameterised so the optimiser cannot step them negative and so a step
-  means the same proportional change wherever it starts -- an amplitude of
-  0.01 and one of 100 both move by the same factor per step.
-
-  :param log_amplitude: ``log(sigma_f^2)``, the marginal variance of the
-      seabed about its linear trend, in metres squared.
-  :param log_lengthscale: ``log`` of the per-axis correlation length, metres.
   :param log_noise: ``log(sigma_z^2)``, the base per-sounding variance.
   """
 
@@ -864,7 +645,7 @@ class VecchiaHyperparameters:
 
   @property
   def lengthscale(self) -> np.ndarray:
-    """Per-axis correlation length, **metres** -- readable as a distance."""
+    """Per-axis correlation length, metres."""
     return np.exp(np.asarray(self.log_lengthscale, dtype=float))
 
   @property
@@ -877,27 +658,13 @@ class VecchiaHyperparameters:
 class VecchiaMap:
   """A fitted seabed map.
 
-  Everything needed to answer a query, and nothing that has to be recomputed:
-  the ordering and conditioning sets are in :attr:`structure`, the linear trend
-  in :attr:`beta`, and what the GP models is :attr:`residual` -- the survey
-  with that trend removed.
-
-  :param structure: Ordering and conditioning sets.
   :param residual: ``z - phi(q)^T beta`` in the structure's order, shape ``(N,)``.
-  :param beta: Linear-mean coefficients ``(intercept, d/dn, d/de)``.
-  :param hyper: Fitted kernel parameters.
-  :param noise: Per-sounding variance ``sigma_j^2``, shape ``(N,)``, in the
-      structure's order. Equal to ``hyper.noise`` everywhere until the
-      input-noise pass inflates it.
-  :param loglik_trace: Log likelihood at each optimiser step, so convergence is
-      observable rather than assumed.
-  :param fit_device: Where the fit actually ran.
-  :param information: ``H' K^-1 H``, shape ``(p, p)``. Kept from the fit
-      because prediction needs it to propagate the uncertainty in ``beta``, and
-      recomputing it would mean whitening the whole survey again.
-  :param basis: The mean's basis. Carried on the map because a spline basis is
-      pinned to the extent it was fitted on, so prediction must evaluate the
-      same one; see :class:`MeanBasis`.
+  :param beta: Mean coefficients, ``(intercept, d/dn, d/de)`` for the plane.
+  :param noise: Per-sounding variance, shape ``(N,)``, in the structure's
+      order.
+  :param loglik_trace: Objective at each optimiser step.
+  :param information: ``H' K^-1 H``, shape ``(p, p)``; prediction needs it to
+      propagate the uncertainty in ``beta``.
   """
 
   structure: VecchiaStructure
@@ -933,27 +700,16 @@ class VecchiaMap:
   ) -> tuple[np.ndarray, np.ndarray]:
     """Joint Gaussian over the seabed at a set of horizontal positions.
 
-    Implements :class:`~auv_pose.estimation.terrain.DepthMap`, which is what
-    the smoother's update consumes. The queries condition on each other as well
-    as on the survey, so the off-diagonals are real: they are what stop a fan of
-    adjacent beams being counted as that many independent constraints.
+    Implements :class:`~auv_pose.estimation.terrain.DepthMap`. Queries condition
+    on each other as well as on the survey, so the covariance is full.
 
-    :param points: ``(..., b, 2)`` of ``(x, y)`` in metres. Leading axes are
-        batch dimensions, so a whole sigma-point cloud is answered at once.
+    :param points: ``(..., b, 2)`` of ``(x, y)`` in metres; leading axes are
+        batch dimensions. ``b`` must not exceed ``m``.
     :param observation_noise: Include ``sigma_z^2``, giving the spread of a
         *sounding* rather than of the seabed.
-    :param jitter: Diagonal regulariser, relative to the amplitude.
-    :param beta_uncertainty: Propagate the uncertainty in the linear mean.
-        Leave on: ``beta`` was estimated, and omitting its contribution
-        understates the map exactly where queries sit far from the survey.
+    :param beta_uncertainty: Propagate the uncertainty in the mean. Leave on.
     :return: ``(mean, cov)`` of shapes ``(..., b)`` and ``(..., b, b)``, metres
         and metres squared. Depth is **z-up**: a seabed 65 m down is ``-65``.
-
-    Note:
-        The queries are reordered internally -- maximin, predictions last --
-        and put back before returning. For a multibeam fan that matters: in
-        beam order every predecessor of a beam lies to one side of it, so
-        conditioning tells it little about the other.
     """
     points = np.asarray(points, dtype=float)
     if points.ndim < 2 or points.shape[-1] != 2:
@@ -988,42 +744,19 @@ class VecchiaMap:
     chunk_size: int = 5000,
     jitter: float = DEFAULT_JITTER,
   ) -> np.ndarray:
-    """Slope of the map's mean, in metres per metre.
+    """Slope of the map's mean, in metres per metre, one point at a time.
 
-    Implements :class:`~auv_pose.estimation.terrain.DepthMap`. Used to carry
-    the sonar's range noise through the shift in *where* the map is queried,
-    and, during fitting, to carry the survey's own positional uncertainty into
-    the per-sounding noise.
-
-    Analytic, by differentiating the kernel with respect to the query position.
-    For a single query conditioning on its ``m`` nearest soundings the mean is
-    ``phi(q)' beta + k(q, g) K_gg^-1 r_g``, so::
+    Implements :class:`~auv_pose.estimation.terrain.DepthMap`. Analytic::
 
         grad mu(q) = [d phi(q)/dq]' beta + [dk(q, g)/dq]' K_gg^-1 r_g
 
     :param points: ``(n, 2)`` of ``(x, y)`` in metres.
-    :param chunk_size: Points per batch, to bound memory.
-    :param jitter: Diagonal regulariser, relative to the amplitude.
     :return: ``(n, 2)`` of ``d(elevation)/dx, d(elevation)/dy``.
 
     Note:
-        **Per point**, matching the contract and matching :meth:`predict`: each
-        query conditions on the survey alone, not on the other points in the
-        call. :meth:`predict_joint` deliberately does condition queries on each
-        other; this does not, because a gradient is a property of one location.
-
-    Note:
-        Unlike the conditional variance, this needs a full solve against the
-        block rather than only the last row of its factor -- the whole of
-        ``K_gg^-1 r_g`` appears, not just the standardised residual.
-
-    Note:
-        The mean is only **piecewise** smooth: the conditioning set changes
-        discontinuously as a query crosses between soundings, so this analytic
-        gradient and a central difference taken across such a boundary will
-        disagree. Both are right about their own side of it. Comparisons
-        against finite differences belong at full conditioning, where there is
-        no boundary to cross.
+        The mean is only piecewise smooth: the conditioning set jumps between
+        soundings, so compare against finite differences only at full
+        conditioning.
     """
     points = np.atleast_2d(np.asarray(points, dtype=float))
     if points.shape[-1] != 2:
@@ -1095,23 +828,15 @@ class VecchiaMap:
   ):
     """Predict seabed elevation at horizontal positions, one point at a time.
 
-    Signature-compatible with :meth:`auv_pose.mapping.svgp.BathymetryMap.predict`.
-
     :param points: ``(n, 2)`` of ``(x, y)`` in metres.
-    :param chunk_size: Points per batch, to bound memory.
     :param with_std: Also return the posterior standard deviation, in metres.
     :param observation_noise: Add ``sigma_z^2``, giving the spread of a
         sounding rather than of the seabed.
-    :param jitter: Diagonal regulariser, relative to the amplitude.
     :return: Elevations ``(n,)``, or ``(elevation, std)`` when ``with_std``.
 
     Note:
-        This is the **per-point** prediction: each query conditions on the
-        survey alone, not on the other points in the call. It therefore does
-        not agree exactly with the diagonal of :meth:`predict_joint`, which
-        conditions each query on those before it and so is a little tighter.
-        Both are honest; they answer different questions, and this is the one
-        a filter asks at tick rate.
+        Each query conditions on the survey alone, so this differs slightly
+        from the diagonal of :meth:`predict_joint`.
     """
     points = np.atleast_2d(np.asarray(points, dtype=float))
     if points.shape[-1] != 2:
@@ -1141,17 +866,11 @@ class VecchiaMap:
 def initial_hyperparameters(
   points: ArrayLike, residual: ArrayLike, ard: bool = True
 ) -> VecchiaHyperparameters:
-  """A starting point for the fit, taken from the data rather than guessed.
-
-  With no input standardisation the optimiser sees parameters in metres, so
-  where it starts matters more than it would otherwise -- a poor initialisation
-  is the usual way a hand-rolled marginal-likelihood fit fails. These three
-  lines carry the weight a scaler used to.
+  """A data-driven starting point for the fit.
 
   :param points: Sounding positions, shape ``(N, 2)``.
-  :param residual: Survey depths with the linear trend removed, shape ``(N,)``.
-  :param ard: Per-axis lengthscales. When ``False`` both axes start together
-      and the fit keeps them so.
+  :param residual: Survey depths with the mean removed, shape ``(N,)``.
+  :param ard: Per-axis lengthscales; when ``False`` both axes start equal.
   :return: Amplitude from the residual's variance, lengthscales from a tenth of
       the survey extent, and a nugget at one per cent of the amplitude.
   """
@@ -1192,40 +911,19 @@ def fit_vecchia(
 ) -> VecchiaMap:
   """Fit the mean and the kernel hyperparameters to a survey.
 
-  Under the default ``method="reml"`` the mean is *profiled out* rather than
-  fitted once up front: ``beta`` is the generalised-least-squares estimate
-  recomputed at every hyperparameter value, and what is scored is the error
-  contrasts orthogonal to the design. §3.2's two-stage description -- ``beta``
-  by least squares, then hyperparameters by marginal likelihood -- is
-  ``method="ml"``, kept for the comparison that motivated the change.
+  ``method="reml"`` profiles ``beta`` out by GLS at every step;
+  ``method="ml"`` fixes ``beta`` by least squares first.
 
   :param points: Sounding positions, shape ``(N, 2)``, metres, any order.
   :param depth: Seabed elevation at each, shape ``(N,)``. **z-up**, so a seabed
       65 m down is ``-65``.
-  :param m: Conditioning-set size.
   :param n0: Dense head-block size; see :func:`build_structure`.
-  :param steps: Adam steps.
   :param learning_rate: Adam step size, on the log parameters.
-  :param ard: Fit a lengthscale per axis. ``False`` ties them together.
   :param method: ``"reml"`` or ``"ml"``; see :func:`vecchia_reml`.
-  :param device: Where to fit. Defaults to CUDA when available -- the cost is
-      one batched Cholesky per step, which is where the GPU pays.
-  :param jitter: Diagonal regulariser, relative to the amplitude.
-  :param chunk: Blocks factorised at once.
-  :param near: How many of the ``m`` conditioning points are nearest
-      neighbours; the remainder are spread across the ordering. ``None`` is
-      all-nearest. On every sounding of a survey, all-nearest sets lie within
-      centimetres and cannot see the seabed's metre-scale structure: fitted
-      that way, pass0 came back with 42 m lengthscales and a 1.5 m^2 nugget.
-      Stein, Chi and Welty (2004) is the reference for spreading some.
-  :param mean: Mean basis; ``"linear"`` is §3.2's plane. See :class:`MeanBasis`.
-  :return: The fitted map.
-
-  Note:
-      Deterministic. There is no subsampling and no random initialisation, so
-      the same survey and settings give the same map -- which matters because
-      the ordering is stored in the checkpoint and a refit that disagreed with
-      it would be a confusing thing to debug.
+  :param near: How many of the ``m`` are nearest neighbours; ``None`` is
+      all. On a dense survey all-nearest sets misfit the lengthscale.
+  :param mean: Mean basis; see :meth:`MeanBasis.build`.
+  :return: The fitted map. Deterministic for a given survey and settings.
   """
   points = np.asarray(points, dtype=float)
   depth = np.asarray(depth, dtype=float)
@@ -1238,7 +936,7 @@ def fit_vecchia(
   ordered_points = structure.points
   ordered_depth = depth[structure.order]
 
-  mean_basis = MeanBasis.build(ordered_points, kind=mean)
+  mean_basis = MeanBasis.build(kind=mean)
   basis = design_matrix(ordered_points, mean_basis)
   # Only ever a starting point under REML, where the objective refits it.
   beta = np.linalg.lstsq(basis, ordered_depth, rcond=None)[0]
@@ -1341,25 +1039,11 @@ def fit_vecchia(
 
 
 def _query_order(queries: np.ndarray) -> np.ndarray:
-  """Maximin order for each group of query positions, predictions last overall.
+  """Maximin order within each group of queries, shape ``(G, B, 2)`` -> ``(G, B)``.
 
-  Matters for a multibeam fan. In beam order the queries run along a line, so
-  every predecessor of a beam sits on one side of it and conditioning on them
-  says little about the other. Maximin spreads them, so each beam is bracketed.
-
-  ``B`` is a few dozen, so the naive ``O(B^2)`` greedy is the right
-  implementation and needs no tree.
-
-  Note:
-      Ordered **per group**, not once for the batch. Sharing one ordering was
-      tempting -- the groups of a sigma-point cloud are near-identical in
-      geometry, and any ordering gives a valid approximation -- but it makes
-      the answer depend on how the caller batched the call. Measured at 0.06 m
-      of disagreement in the mean between a batched and an unbatched query of
-      the same points, which is not a difference a map should have.
-
-  :param queries: Shape ``(G, B, 2)``.
-  :return: Shape ``(G, B)``.
+  Ordered per group, not once per batch, so results do not depend on how the
+  caller batched them. Maximin keeps a fan's beams from conditioning only on
+  one side.
   """
   return np.stack([maximin_order(group) for group in queries])
 
@@ -1372,10 +1056,6 @@ def _conditioning_sets(
   width: int,
 ) -> tuple[np.ndarray, np.ndarray]:
   """The ``m`` nearest of (survey soundings, earlier queries) for one query.
-
-  This is what makes the scheme RF-full rather than plain kriging: a query
-  conditions on the queries ordered before it as well as on the survey, which
-  is what puts the off-diagonal structure into ``cov_M``.
 
   :return: ``(indices, is_survey)``, each ``(G, m)``. Indices are into the
       survey where ``is_survey``, and into the ordered queries otherwise.
@@ -1415,13 +1095,8 @@ def _sparse_columns(
 ) -> tuple[Tensor, Tensor, np.ndarray, np.ndarray]:
   """The nonzero entries of ``U``'s query columns, one block at a time.
 
-  Under the response-first ordering of Katzfuss et al. (2020) the joint is
-  ``x = (z_o, y_p)`` and ``U`` is block upper triangular, so the factor the
-  conditional needs is ``V = U_pp`` -- a *submatrix* of ``U``, not something to
-  be recomputed. Its entries are filled here directly from each query's own
-  block factor. Forming ``W = U U^T`` and factorising that instead would be
-  both wasteful and numerically worse; the paper warns of the spurious
-  nonzeros it produces.
+  With survey first and queries last, the conditional's factor ``V = U_pp`` is
+  a submatrix of ``U``; do not form and refactorise ``U U^T`` instead.
 
   :return: ``(V, survey_weight, survey_index, order)`` -- the ``(G, B, B)``
       upper-triangular factor, the ``(G, B, m)`` entries of ``U`` at survey
@@ -1471,9 +1146,8 @@ def _sparse_columns(
     block_points[:, beam, :width] = position
     block_points[:, beam, width] = ordered[:, beam]
 
-    # RF-full conditions on the latent wherever it can: a survey neighbour is a
-    # response and carries its sounding noise, an earlier query is a latent and
-    # carries none. The query itself is latent too.
+    # Survey neighbours carry sounding noise; earlier queries and the query
+    # itself are latent and carry none.
     block_noise[:, beam, :width] = np.where(
       survey, fitted.noise[np.clip(picked, 0, structure.size - 1)], 0.0
     )
@@ -1574,9 +1248,7 @@ def _predict_joint_array(
   covariance = inverse.transpose(-1, -2) @ inverse
 
   if beta_uncertainty and fitted.information is not None:
-    # Universal kriging: beta was estimated, so its uncertainty belongs in the
-    # prediction. Without this the map understates itself exactly where the
-    # queries sit far from the survey's centre of mass.
+    # Universal kriging: add the uncertainty of the estimated beta.
     residual_basis = query_basis + torch.linalg.solve_triangular(
       lower, weighted_basis, upper=False
     )

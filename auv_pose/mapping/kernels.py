@@ -1,22 +1,7 @@
-"""Covariance functions for the bathymetry map, and their spatial derivatives.
+"""Matérn-5/2 covariance for the bathymetry map, and its spatial gradient.
 
-Separate from the map that uses them because they are pure mathematics with a
-closed form, so they can be checked against an independent implementation and
-against finite differences without fitting anything.
-
-**Matérn-5/2 rather than squared exponential.** A squared-exponential kernel
-assumes the seabed is infinitely differentiable, which smooths over ridges and
-then reports a small variance for having done so -- the exact combination that
-makes a map dangerous to a filter, since the update trusts what the map says
-most confidently. Matérn-5/2 admits a twice-differentiable surface, which is
-rough enough for a seabed and smooth enough that the mean still has the gradient
-the range-noise term needs.
-
-Lengthscales are **per axis and in metres**. The isotropic alternative is not
-the neutral choice it looks like: over a survey box that is not square it is
-implicitly anisotropic by the ratio of the sides, which is a fact about the
-survey rather than about the seabed. See :class:`~auv_pose.mapping.svgp.SVGPModel`,
-whose docstring records the fit that discovered this.
+Lengthscales are per axis and in metres. Matérn-5/2 rather than squared
+exponential, which over-smooths ridges while reporting a small variance.
 """
 
 import math
@@ -33,23 +18,11 @@ def _scaled_offsets(
   """Pairwise offsets and the Matérn radius, both in lengthscale units.
 
   :return: ``(offsets, r)`` of shapes ``(..., p, q, d)`` and ``(..., p, q)``,
-      where ``offsets`` is ``(a - b) / lengthscale^2`` -- already carrying one
-      factor of the lengthscale that the gradient needs -- and ``r`` is the
-      Mahalanobis distance under the diagonal lengthscale metric.
+      where ``offsets`` is ``(a - b) / lengthscale^2``.
 
-  Note:
-      The square root is masked, and it has to be. ``sqrt`` is finite at zero
-      but its *derivative* is not, and every kernel block this module builds has
-      a zero on its diagonal where a point meets itself. Differentiating the
-      likelihood with respect to the lengthscales therefore produces ``NaN``
-      from a forward pass that looked perfectly healthy.
-
-      Clamping the input would bias every covariance. Masking after the fact
-      with a single ``torch.where`` does not work either: both branches are
-      evaluated, so the infinite derivative still reaches the sum. The fix is
-      the double ``where`` below -- feed ``sqrt`` a harmless ``1`` wherever the
-      true value is zero, then discard those entries. The gradient of a
-      discarded branch never contributes, so the ``inf`` is never formed.
+  The double ``where`` around ``sqrt`` is required: its derivative is infinite
+  at the zero diagonal, and a single ``where`` still lets that ``inf`` reach the
+  gradient as ``NaN``.
   """
   lengthscale = torch.exp(log_lengthscale)
 
@@ -80,9 +53,8 @@ def matern52(
 
   :param a: Positions, shape ``(..., p, d)``, metres.
   :param b: Positions, shape ``(..., q, d)``, metres.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(d,)``,
-      metres.
+  :param log_amplitude: ``log(sigma_f^2)``.
+  :param log_lengthscale: ``log`` of the per-axis lengthscale, ``(d,)``.
   :return: Covariances, shape ``(..., p, q)``.
   """
   _, radius = _scaled_offsets(a, b, log_lengthscale)
@@ -103,27 +75,10 @@ def matern52_gradient(
 
   ``dk/da_d = -(5/3) sigma_f^2 (1 + sqrt5 r) exp(-sqrt5 r) (a_d - b_d) / l_d^2``
 
-  This is what the map's mean gradient is built from, and what carries the
-  sonar's range noise through the shift in where the map gets queried.
+  Arguments as for :func:`matern52`; returns shape ``(..., p, q, d)``.
 
-  :param a: Positions to differentiate at, shape ``(..., p, d)``, metres.
-  :param b: The other positions, shape ``(..., q, d)``, metres.
-  :param log_amplitude: ``log(sigma_f^2)``, scalar.
-  :param log_lengthscale: ``log`` of the per-axis lengthscale, shape ``(d,)``.
-  :return: Gradients, shape ``(..., p, q, d)``, covariance per metre.
-
-  Note:
-      **The closed form above is the cancelled one, and that matters.** Writing
-      it as (radial derivative) times ``dr/da_d`` leaves a ``1/r`` from
-      ``dr/da_d = (a_d - b_d) / (l_d^2 r)``, which is ``0/0`` wherever ``a``
-      and ``b`` coincide -- on every diagonal of every kernel block the map
-      builds. The ``r`` cancels analytically against the ``r`` in the radial
-      term, and the result is finite everywhere and correctly zero at ``r = 0``,
-      where the covariance is at its maximum and so has no slope.
-
-      This is not a tidiness point. ``pyproject.toml`` sets
-      ``filterwarnings = ["error::RuntimeWarning"]``, so the uncancelled form
-      does not return a NaN to be noticed later -- it fails the test suite.
+  Keep this analytically cancelled form: the chain-rule form has ``1/r``,
+  which is ``0/0`` on every kernel diagonal.
   """
   offsets, radius = _scaled_offsets(a, b, log_lengthscale)
   root5r = _SQRT5 * radius

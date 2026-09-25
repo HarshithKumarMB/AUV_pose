@@ -1,4 +1,4 @@
-"""Sparse variational GP bathymetry map: the baseline the Vecchia map is scored against."""
+"""Sparse variational GP bathymetry map, the baseline for the Vecchia map."""
 
 from collections.abc import Iterator
 from typing import Literal, cast, overload
@@ -21,8 +21,7 @@ def resolve_device(device: str | torch.device | None) -> torch.device:
 class SVGPModel(gpytorch.models.ApproximateGP):
   """Variational GP, constant mean, RBF kernel with a lengthscale per axis.
 
-  Per axis because inputs are standardised: one shared lengthscale would be
-  anisotropic in metres by the survey box's aspect ratio.
+  Per axis because inputs are standardised per axis.
   """
 
   def __init__(self, inducing_points: torch.Tensor) -> None:
@@ -47,8 +46,7 @@ class SVGPModel(gpytorch.models.ApproximateGP):
   def forward(
     self, x: torch.Tensor
   ) -> gpytorch.distributions.MultivariateNormal:
-    # gpytorch types every Module call as Tensor | Distribution | LinearOperator;
-    # a ConstantMean returns a Tensor.
+    # A ConstantMean returns a Tensor; gpytorch's typing does not say so.
     return gpytorch.distributions.MultivariateNormal(
       cast(torch.Tensor, self.mean_module(x)), self.covar_module(x)
     )
@@ -66,17 +64,11 @@ def fit_svgp(
 ) -> "BathymetryMap":
   """Fit the map to soundings by maximising the variational ELBO.
 
-  Inputs and depths are standardised for the fit; the returned map takes and
-  gives metres.
-
   Args:
       points: ``(n, 2)`` sounding positions, metres.
       depth: ``(n,)`` seabed elevations, metres.
       n_inducing: Inducing points, drawn from the soundings.
       epochs: Passes over the data; check ``elbo_trace`` for convergence.
-      batch_size: Minibatch size.
-      learning_rate: Adam step size.
-      seed: Seed for the inducing point draw and the minibatch order.
       device: Where to fit; CUDA when available.
   """
   points = np.asarray(points, dtype=np.float64)
@@ -93,9 +85,7 @@ def fit_svgp(
   train_y = torch.as_tensor((depth - y_mean) / y_std, dtype=torch.float32)
   train_x, train_y = train_x.to(device), train_y.to(device)
 
-  # Every random draw -- inducing points, the variational mean's initial jitter,
-  # the minibatch order -- comes from torch's generator, seeded for the fit
-  # alone so the caller's global state is left as it was.
+  # Seed torch's generator for the fit alone, leaving the caller's state.
   with torch.random.fork_rng(enabled=seed is not None):
     if seed is not None:
       torch.manual_seed(seed)
@@ -153,8 +143,7 @@ class BathymetryMap:
 
   :param x_mean: Per-axis mean the inputs were standardised by.
   :param x_scale: Per-axis standard deviation, likewise.
-  :param device: Where to evaluate. CPU by default: single-point queries cost
-      more in transfer than a GPU saves.
+  :param device: Where to evaluate; CPU suits small queries.
   """
 
   elbo_trace: list[float]
@@ -221,10 +210,9 @@ class BathymetryMap:
 
     Args:
         points: ``(n, 2)`` array of ``(x, y)`` in metres.
-        chunk_size: Points per forward pass, to bound memory on large grids.
+        chunk_size: Points per forward pass, to bound memory.
         with_std: Also return the posterior standard deviation, in metres.
-        observation_noise: Add the likelihood's noise to that standard
-            deviation: the spread of a sounding rather than of the seabed.
+        observation_noise: Add the likelihood's noise to that std.
 
     Returns:
         Depths ``(n,)``, or ``(depths, stds)`` when ``with_std``.
@@ -255,23 +243,17 @@ class BathymetryMap:
   ) -> tuple[NDArray, NDArray]:
     """Joint Gaussian over the seabed at a set of horizontal positions.
 
-    Implements :class:`~auv_pose.estimation.terrain.DepthMap`, which is what
-    the smoother's update step consumes.
+    Implements :class:`~auv_pose.estimation.terrain.DepthMap`.
 
     Args:
-        points: ``(..., b, 2)`` of ``(x, y)`` in metres. Leading axes are batch
-            dimensions -- a ``(31, 32, 2)`` sigma-point cloud comes back as
-            ``(31, 32)`` and ``(31, 32, 32)`` from one forward pass.
-        observation_noise: Include the likelihood's noise, giving the spread of
-            a *sounding* rather than of the seabed.
+        points: ``(..., b, 2)`` of ``(x, y)`` in metres; leading axes batch.
+        observation_noise: Include the likelihood's noise: the spread of a
+            sounding rather than of the seabed.
 
     Returns:
-        ``(mean, cov)`` of shapes ``(..., b)`` and ``(..., b, b)``, in metres
-        and metres squared.
+        ``(mean, cov)`` of shapes ``(..., b)`` and ``(..., b, b)``.
 
-    Note:
-        No ``fast_pred_var``: its low-rank covariance gets the off-diagonals
-        wrong, and they are what this method is for.
+    No ``fast_pred_var``: it gets the off-diagonals wrong.
     """
     points = np.asarray(points, dtype=np.float32)
     if points.shape[-1] != 2:
@@ -294,15 +276,11 @@ class BathymetryMap:
   def mean_gradient(self, points: ArrayLike) -> NDArray:
     """Slope of the map's mean, in metres per metre.
 
-    Args:
-        points: ``(n, 2)`` of ``(x, y)`` in metres.
-
     Returns:
         ``(n, 2)`` of ``d(depth)/dx, d(depth)/dy``.
 
-    Note:
-        The cache is cleared first: ``VariationalStrategy`` memoises, and a
-        second backward pass through the memo raises.
+    Clears the ``VariationalStrategy`` memo first; a second backward pass
+    through it raises.
     """
     points = np.atleast_2d(np.asarray(points, dtype=np.float32))
     if points.shape[-1] != 2:

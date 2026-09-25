@@ -42,7 +42,6 @@ def test_handles_peaks_at_the_array_ends(index):
 
 
 def test_a_flat_beam_is_not_a_sounding():
-  """A beam with no contrast carries no echo; bin 0 would be a false reading."""
   image = image_with_peaks([10, 20, 30])
   image[:, 1] = 0.0
   image[:, 2] = 7.0
@@ -52,7 +51,7 @@ def test_a_flat_beam_is_not_a_sounding():
 
 
 def test_first_peak_wins_on_a_tie():
-  """argmax semantics: the nearer of two equal returns is the seabed."""
+  """The nearer of two equal returns is the seabed."""
   image = image_with_peaks([200])
   image[100, 0] = 1.0
   assert bottom_return_ranges(image, RANGES)[0] == pytest.approx(RANGES[100])
@@ -102,7 +101,7 @@ def test_the_nadir_beam_lands_along_the_rotated_nadir_axis():
 
 
 def test_mirrored_bearings_land_mirrored_across_the_track():
-  """At level attitude the fan is symmetric about the vertical plane of travel."""
+  """At level attitude the fan is symmetric about the plane of travel."""
   R = rotation(1.2)
   ranges = np.full(BEARINGS.size, 40.0)
   points = seabed_points(np.zeros(3), R, ranges, BEARINGS)

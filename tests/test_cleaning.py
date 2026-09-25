@@ -23,7 +23,6 @@ def test_a_flat_seabed_has_no_objects():
 
 
 def test_a_sloping_seabed_has_no_objects():
-  """An opening passes a plane through unchanged, whatever its slope."""
   points, z = seabed(np.random.default_rng(1), slope=(0.08, -0.05))
   assert object_soundings(points, z).mean() < 0.001
 
@@ -45,14 +44,12 @@ def test_the_ground_under_a_pipe_is_the_seabed():
 
 
 def test_an_object_wider_than_the_window_is_ground():
-  """The window is the definition of an object: wider than it is terrain."""
   points, z = seabed(np.random.default_rng(4))
   mound = pipe(points, width=40.0, height=3.0)
   assert not object_soundings(points, z + mound, window=15.0)[mound > 0].any()
 
 
 def test_isolated_soundings_are_left_alone():
-  """Nothing within the window to compare against is not evidence of an object."""
   points = np.array([[0.0, 0.0], [500.0, 500.0]])
   z = np.array([-68.0, -60.0])
   assert not object_soundings(points, z).any()
@@ -72,7 +69,7 @@ def test_a_mounds_cap_is_seabed_even_where_the_opening_clips_it():
 
 
 def test_a_pipes_flanks_go_with_it():
-  """Below core height but beside a core: part of the pipe, not the seabed."""
+  """Below core height but beside a core: part of the pipe."""
   points, z = seabed(np.random.default_rng(6))
   bump = pipe(points)
   flanks = (bump > 0.6) & (bump < 3.0)

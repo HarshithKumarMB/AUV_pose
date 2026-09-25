@@ -35,11 +35,7 @@ def test_concatenates_in_order(survey):
 
 
 def test_elevation_reaches_the_gp_unchanged(survey):
-  """z is already an upward-increasing elevation; nothing flips its sign.
-
-  The old schema stored a downward range and negated it here. Negating an
-  elevation would put the seabed 70 m above the surface.
-  """
+  """z is an upward elevation; nothing flips its sign."""
   path = survey("a.csv", [[1.0, 2.0, -70.0]])
   X, y = soundings_to_arrays(load_soundings([path]))
 
@@ -48,7 +44,6 @@ def test_elevation_reaches_the_gp_unchanged(survey):
 
 
 def test_arrays_are_float32(survey):
-  """gpytorch is fitted in single precision."""
   path = survey("a.csv", [[1.0, 2.0, -70.0]])
   X, y = soundings_to_arrays(load_soundings([path]))
   assert X.dtype == np.float32
@@ -56,7 +51,7 @@ def test_arrays_are_float32(survey):
 
 
 def test_drops_rows_with_no_echo(survey):
-  """survey.py records NaN when the sonar returned nothing usable."""
+  """NaN marks a beam with no echo."""
   path = survey(
     "a.csv", [[0.0, 0.0, -70.0], [1.0, 1.0, np.nan], [2.0, 2.0, -72.0]]
   )
@@ -142,7 +137,6 @@ def test_optional_columns_ride_along_and_unknown_ones_do_not(tmp_path):
 
 
 def test_a_column_only_some_files_carry_is_dropped(survey, tmp_path):
-  """Filling it with a made-up value would pair soundings with fake truth."""
   frame = load_soundings(
     [placed(tmp_path, "a.csv"), survey("b.csv", [[5.0, 5.0, -68.0]])]
   )

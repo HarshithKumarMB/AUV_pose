@@ -1,30 +1,14 @@
-"""The Vecchia log marginal likelihood.
+"""The Vecchia approximation.
 
-Correctness rests on two tests that chain together, and neither is sufficient
-alone.
-
-The first says the **approximation is exact when it conditions on everything**.
-With every sounding conditioning on all its predecessors the factorisation is
-the chain rule, so the answer must equal a dense GP's log density to machine
-precision. That pins the block assembly, the noise handling, the ``(g, i)``
-arrangement, the last-row identity and the linear mean -- against a reference
-that is unambiguously right.
-
-The second says the **batched path equals the naive definition** at realistic
-sizes, where exactness no longer holds. The reference is a Python loop over
-soundings computing each conditional density straight from the formula.
-
-Together: the code equals the definition, and the definition at full
-conditioning equals the truth. Either on its own leaves a gap -- the first only
-ever exercises a single batched row, and the second would pass just as happily
-if the definition itself had been transcribed wrongly.
+Two pins chain together: at full conditioning the approximation equals a dense
+GP, and at realistic sizes the batched code equals a naive loop over the
+definition. Neither alone is enough.
 """
 
 import math
 from itertools import pairwise
 
 import numpy as np
-import pytest
 import torch
 from scipy.spatial import KDTree
 
@@ -61,7 +45,7 @@ def survey(n, seed, spread=40.0):
 
 
 def dense_loglik(points, residual, noise, jitter=0.0):
-  """The exact GP log density. A few lines, and unambiguously right."""
+  """The exact GP log density."""
   a = torch.tensor(points, dtype=torch.float64)
   kernel = matern52(a, a, LOG_AMPLITUDE, LOG_LENGTHSCALE).numpy()
   kernel = kernel + np.diag(np.broadcast_to(noise, len(points)) + jitter)
@@ -77,12 +61,7 @@ def dense_loglik(points, residual, noise, jitter=0.0):
 
 
 def naive_loglik(structure, points, residual, noise, jitter=0.0):
-  """The Vecchia definition, written out: one conditional density per sounding.
-
-  Deliberately a slow Python loop over the formula, with no batching and no
-  Cholesky trickery, so it shares nothing with the implementation but the
-  kernel.
-  """
+  """The Vecchia definition as a plain loop, sharing only the kernel."""
   noise = np.broadcast_to(np.asarray(noise, dtype=float), len(points))
   total = 0.0
 
@@ -124,12 +103,7 @@ def naive_loglik(structure, points, residual, noise, jitter=0.0):
 
 
 def test_it_reproduces_a_dense_gp_when_it_conditions_on_everything():
-  """The pin. At ``m = N - 1`` the approximation is the chain rule.
-
-  ``n0`` is set to ``m`` so the final sounding goes through the *batched* path
-  rather than the dense head, which is what makes this a test of the block
-  assembly and not only of the head block.
-  """
+  """``n0 = m`` so the last sounding goes through the batched path."""
   for n in (8, 20, 41):
     points, residual = survey(n, seed=n)
     noise = 0.3
@@ -152,7 +126,6 @@ def test_it_reproduces_a_dense_gp_when_it_conditions_on_everything():
 
 
 def test_a_wholly_dense_head_reproduces_a_dense_gp():
-  """``n0 = N`` short-circuits the chain entirely; it must still be the GP."""
   points, residual = survey(60, seed=1)
   structure = build_structure(points, m=10, n0=60)
 
@@ -170,7 +143,6 @@ def test_a_wholly_dense_head_reproduces_a_dense_gp():
 
 
 def test_exactness_holds_for_per_sounding_noise():
-  """A noise per sounding must keep the exactness too."""
   n = 30
   points, residual = survey(n, seed=2)
   noise = np.random.default_rng(3).uniform(0.1, 2.0, size=n)
@@ -197,7 +169,6 @@ def test_exactness_holds_for_per_sounding_noise():
 
 
 def test_it_matches_the_naive_definition_at_realistic_sizes():
-  """Where the approximation is a real approximation, and batching is real."""
   for n, m in ((200, 10), (400, 25), (150, 5)):
     points, residual = survey(n, seed=n + m)
     noise = 0.4
@@ -219,7 +190,6 @@ def test_it_matches_the_naive_definition_at_realistic_sizes():
 
 
 def test_chunking_does_not_change_the_answer():
-  """The likelihood is a sum over soundings, so chunking must be exact."""
   points, residual = survey(300, seed=4)
   structure = build_structure(points, m=15, n0=32)
 
@@ -244,7 +214,6 @@ def test_chunking_does_not_change_the_answer():
 
 
 def test_it_approaches_the_exact_likelihood_as_m_grows():
-  """The accuracy claim, and the test that catches a plausible-but-wrong g(i)."""
   points, residual = survey(250, seed=5)
   noise = 0.4
   ordered = build_structure(points, m=2, n0=2)
@@ -272,11 +241,7 @@ def test_it_approaches_the_exact_likelihood_as_m_grows():
 
 
 def test_maximin_beats_an_arbitrary_ordering_at_the_same_m():
-  """Why the ordering is stated in the paper rather than left implicit.
-
-  A bad ordering still yields a valid, positive-definite Gaussian -- just a
-  worse approximation of the intended one. Nothing else in the suite notices.
-  """
+  """A bad ordering is still valid, just less accurate; nothing else notices."""
   points, residual = survey(400, seed=6)
   noise = 0.4
   m = 8
@@ -308,7 +273,6 @@ def test_maximin_beats_an_arbitrary_ordering_at_the_same_m():
 
 
 def test_it_is_differentiable_in_the_hyperparameters():
-  """Autograd through the batched Cholesky is what the fit rests on."""
   points, residual = survey(200, seed=8)
   structure = build_structure(points, m=10, n0=16)
 
@@ -330,14 +294,12 @@ def test_it_is_differentiable_in_the_hyperparameters():
     assert gradient is not None
     assert torch.all(torch.isfinite(gradient)), gradient
 
-  # Regression: the lengthscale gradient came back NaN, from ``sqrt(0)`` on the
-  # diagonal of every kernel block. The forward value was finite throughout.
+  # sqrt(0) on each block's diagonal can make this NaN while the value is fine.
   assert lengthscale.grad is not None
   assert float(torch.abs(lengthscale.grad).max()) > 0.0
 
 
 def test_the_likelihood_peaks_near_the_truth():
-  """A draw from a known GP should score best at the hyperparameters it used."""
   rng = np.random.default_rng(9)
   points = rng.uniform(-30, 30, size=(300, 2))
 
@@ -378,7 +340,6 @@ def test_the_structure_reorders_into_maximin_order():
 
 
 def test_the_head_block_is_never_smaller_than_the_conditioning_set():
-  """Otherwise the batched rows would be ragged."""
   points, _ = survey(200, seed=11)
   assert build_structure(points, m=30, n0=5).n0 == 30
   assert build_structure(points, m=30).n0 == 64
@@ -415,7 +376,7 @@ def test_it_rejects_malformed_inputs():
 
 
 def gp_draw(points, log_amplitude, log_lengthscale, noise, seed):
-  """An exact draw from the GP the fit is supposed to recover."""
+  """An exact dense draw from the GP."""
   a = torch.tensor(points, dtype=torch.float64)
   kernel = matern52(a, a, log_amplitude, log_lengthscale).numpy()
   factor = np.linalg.cholesky(kernel + noise * np.eye(len(points)))
@@ -423,12 +384,6 @@ def gp_draw(points, log_amplitude, log_lengthscale, noise, seed):
 
 
 def test_it_recovers_the_hyperparameters_of_a_known_draw():
-  """The statistical test, and the counterpart of the SVGP's lengthscale check.
-
-  Draw a field with known amplitude, lengthscales and nugget; fit; see whether
-  the fit finds them. This replaces reaching into a library's internals with a
-  question the model can actually be wrong about.
-  """
   rng = np.random.default_rng(20)
   points = rng.uniform(-40, 40, size=(700, 2))
 
@@ -453,12 +408,6 @@ def test_it_recovers_the_hyperparameters_of_a_known_draw():
 
 
 def test_it_learns_a_lengthscale_per_axis():
-  """A field stretched along one axis must come back with unequal lengthscales.
-
-  The direct counterpart of ``test_lengthscales_are_learned_per_axis`` in the
-  SVGP suite, but read off a fitted parameter in metres rather than out of
-  gpytorch's internals.
-  """
   rng = np.random.default_rng(22)
   points = rng.uniform(-40, 40, size=(600, 2))
   depth = gp_draw(
@@ -488,17 +437,12 @@ def test_the_likelihood_climbs_over_the_fit():
 
   assert len(fitted.loglik_trace) == 120
   assert fitted.loglik_trace[-1] > fitted.loglik_trace[0]
-  # And the last tenth should be flattening out, not still climbing steeply.
+  # The last tenth should be flattening out.
   tail = fitted.loglik_trace[-12:]
   assert tail[-1] - tail[0] < fitted.loglik_trace[12] - fitted.loglik_trace[0]
 
 
 def test_the_fit_is_deterministic():
-  """No subsampling, no random initialisation, so a refit must agree exactly.
-
-  Which matters because the ordering is stored in a checkpoint, and a refit
-  that disagreed with it would be a confusing thing to chase.
-  """
   points, depth = survey(300, seed=26)
   kwargs = {"m": 12, "steps": 40, "device": "cpu"}
 
@@ -512,7 +456,6 @@ def test_the_fit_is_deterministic():
 
 
 def test_the_linear_mean_absorbs_a_plane():
-  """``beta`` is the regional trend, so a plane should leave nothing behind."""
   rng = np.random.default_rng(27)
   points = rng.uniform(-30, 30, size=(400, 2))
   depth = -60.0 + 0.3 * points[:, 0] - 0.15 * points[:, 1]
@@ -571,7 +514,7 @@ def test_it_rejects_mismatched_inputs():
 
 
 def dense_reml(points, depth, noise):
-  """Restricted log likelihood and GLS mean, computed densely. The reference."""
+  """Restricted log likelihood and GLS mean, computed densely."""
   a = torch.tensor(points, dtype=torch.float64)
   kernel = matern52(a, a, LOG_AMPLITUDE, LOG_LENGTHSCALE).numpy()
   kernel = kernel + np.diag(np.broadcast_to(noise, len(points)))
@@ -596,12 +539,7 @@ def dense_reml(points, depth, noise):
 
 
 def test_whitening_reproduces_the_precision_it_stands_for():
-  """``H' K^-1 H = (U'H)' (U'H)`` -- the identity REML is built on.
-
-  At ``m = N - 1`` the approximation is exact, so the whitened form must equal
-  a dense solve. This is what makes the extra REML terms cost three matvecs
-  rather than an inverse.
-  """
+  """``H' K^-1 H = (U'H)' (U'H)`` at full conditioning."""
   n = 40
   points, _ = survey(n, seed=40)
   noise = 0.3
@@ -647,7 +585,6 @@ def test_whitening_treats_a_vector_and_a_one_column_matrix_alike():
 
 
 def test_reml_reproduces_a_dense_reml_at_full_conditioning():
-  """The exactness pin, carried over to the restricted likelihood."""
   for n in (20, 35):
     points, depth = survey(n, seed=42 + n)
     noise = 0.3
@@ -671,12 +608,6 @@ def test_reml_reproduces_a_dense_reml_at_full_conditioning():
 
 
 def test_reml_recovers_the_amplitude_better_than_plain_likelihood():
-  """The reason REML is the default.
-
-  Estimating the mean shortens the residual, and a plug-in likelihood reads
-  that as a smaller amplitude. Measured over eight draws from a known field:
-  about -9% under ML against about -3% under REML.
-  """
   rng = np.random.default_rng(44)
   truth = 9.0
 
@@ -707,7 +638,6 @@ def test_reml_recovers_the_amplitude_better_than_plain_likelihood():
 
 
 def test_reml_refits_beta_rather_than_keeping_the_least_squares_one():
-  """What makes it REML and not maximum likelihood with a plug-in mean."""
   rng = np.random.default_rng(45)
   points = rng.uniform(-40, 40, size=(300, 2))
   depth = gp_draw(
@@ -726,8 +656,7 @@ def test_reml_refits_beta_rather_than_keeping_the_least_squares_one():
     rcond=None,
   )[0]
 
-  # A long lengthscale correlates the residuals strongly, which is exactly
-  # where generalised and ordinary least squares part company.
+  # A long lengthscale is where GLS and OLS differ.
   assert not np.allclose(fitted.beta, ordinary, rtol=1e-3)
 
 
@@ -780,11 +709,7 @@ def test_the_fit_rejects_an_unknown_method():
 
 
 def dense_kriging(points, depth, noise, queries, observation_noise=False):
-  """Universal kriging, computed densely. The reference for prediction.
-
-  GLS mean, the usual conditional covariance, and the term that accounts for
-  ``beta`` having been estimated rather than known.
-  """
+  """Universal kriging, computed densely."""
   a = torch.tensor(points, dtype=torch.float64)
   b = torch.tensor(queries, dtype=torch.float64)
 
@@ -819,7 +744,7 @@ LOG_NOISE = math.log(0.3)
 
 
 def fitted_at(points, depth, noise, m, n0=None):
-  """A map with hyperparameters pinned, so prediction is tested on its own."""
+  """A map with hyperparameters pinned rather than fitted."""
   structure = build_structure(points, m=m, n0=n0)
   basis = design_matrix(structure.points)
   ordered_depth = depth[structure.order]
@@ -860,13 +785,6 @@ def fitted_at(points, depth, noise, m, n0=None):
 
 
 def test_a_single_query_at_full_conditioning_is_exact_kriging():
-  """The prediction pin.
-
-  With ``m = N`` and one query, the query conditions on the whole survey, so
-  there is no approximation left -- the answer must be universal kriging. This
-  pins the block assembly, the latent-versus-response noise mask, the mean, the
-  conditional variance and the ``beta``-uncertainty term together.
-  """
   for n in (18, 30):
     points, depth = survey(n, seed=60 + n)
     noise = 0.3
@@ -901,7 +819,6 @@ def test_the_observation_noise_adds_the_nugget_to_the_diagonal():
 
 
 def test_the_beta_uncertainty_term_widens_the_map():
-  """It is the difference between knowing the trend and having estimated it."""
   points, depth = survey(40, seed=63)
   fitted = fitted_at(points, depth, 0.3, m=20)
 
@@ -923,11 +840,7 @@ def test_the_joint_covariance_is_symmetric_and_positive_definite():
 
 
 def test_permuting_the_queries_permutes_the_answer():
-  """Guards the internal maximin reorder and its inverse.
-
-  The queries are reordered before conditioning and must be put back. Getting
-  the inverse permutation wrong scrambles which beam is which, silently.
-  """
+  """Guards the internal query reorder and its inverse."""
   points, depth = survey(300, seed=67)
   fitted = fitted_at(points, depth, 0.3, m=25)
 
@@ -944,7 +857,6 @@ def test_permuting_the_queries_permutes_the_answer():
 
 
 def test_nearby_queries_covary_and_distant_ones_do_not():
-  """The off-diagonals are why the joint exists rather than a set of marginals."""
   points, depth = survey(400, seed=70)
   fitted = fitted_at(points, depth, 0.3, m=25)
 
@@ -1012,7 +924,6 @@ def test_uncertainty_grows_away_from_the_survey():
 
 
 def test_more_queries_than_the_conditioning_set_is_refused():
-  """Beyond ``m`` the queries stop conditioning on each other, silently."""
   points, depth = survey(300, seed=80)
   fitted = fitted_at(points, depth, 0.3, m=10)
 
@@ -1063,13 +974,11 @@ def dense_gradient(points, residual, noise, beta, queries):
 
 
 def test_it_satisfies_the_depth_map_contract():
-  """Structural, not nominal -- nothing declares the Protocol as a base."""
   points, depth = survey(200, seed=90)
   assert isinstance(fitted_at(points, depth, 0.3, m=20), DepthMap)
 
 
 def test_the_gradient_is_exact_at_full_conditioning():
-  """The pin: with ``m = N`` the local GP is the whole GP."""
   for n in (20, 32):
     points, depth = survey(n, seed=91 + n)
     noise = 0.3
@@ -1079,22 +988,14 @@ def test_the_gradient_is_exact_at_full_conditioning():
     expected = dense_gradient(
       fitted.structure.points, fitted.residual, noise, fitted.beta, queries
     )
-    # jitter=0.0 so this compares like with like. At the default 1e-8 the two
-    # agree only to ~1e-6 relative, which is the regulariser doing its job
-    # rather than an error -- worth knowing it is not a no-op.
+    # The default jitter shifts the answer at ~1e-6 relative; compare without.
     np.testing.assert_allclose(
       fitted.mean_gradient(queries, jitter=0.0), expected, rtol=1e-9
     )
 
 
 def test_the_gradient_matches_central_differences_at_full_conditioning():
-  """Where the conditioning set cannot change, so the mean really is smooth.
-
-  Away from full conditioning the mean is only piecewise smooth -- a query
-  crossing between soundings swaps a neighbour -- so a difference taken across
-  such a boundary would disagree with the analytic slope and neither would be
-  wrong.
-  """
+  """Only at full conditioning is the mean smooth enough to compare."""
   n = 30
   points, depth = survey(n, seed=93)
   fitted = fitted_at(points, depth, 0.3, m=n, n0=n)
@@ -1115,7 +1016,6 @@ def test_the_gradient_matches_central_differences_at_full_conditioning():
 
 
 def test_the_gradient_recovers_a_plane_exactly():
-  """A plane is entirely the linear mean, so the residual carries nothing."""
   rng = np.random.default_rng(95)
   points = rng.uniform(-30, 30, size=(400, 2))
   depth = -60.0 + 0.2 * points[:, 0] - 0.07 * points[:, 1]
@@ -1131,12 +1031,7 @@ def test_the_gradient_recovers_a_plane_exactly():
 
 
 def test_the_gradient_is_in_metres_per_metre():
-  """Double the slope of the surface and the gradient must double.
-
-  The check that catches a missing or spurious scale factor, which no shape or
-  finiteness test would see. There is no input standardisation here to get
-  wrong, which is part of why the map fits in physical units.
-  """
+  """Doubling the surface's slope doubles the gradient: no stray scale factor."""
   rng = np.random.default_rng(96)
   points = rng.uniform(-30, 30, size=(500, 2))
   probe = rng.uniform(-20, 20, size=(6, 2))
@@ -1150,7 +1045,7 @@ def test_the_gradient_is_in_metres_per_metre():
 
 
 def test_the_gradient_follows_a_known_ridge():
-  """Sign and magnitude against a surface whose slope is known in closed form."""
+  """Sign and magnitude against a closed-form slope."""
   rng = np.random.default_rng(97)
   points = rng.uniform(-30, 30, size=(1200, 2))
   depth = -60.0 + 3.0 * np.sin(points[:, 0] / 7.0)
@@ -1166,12 +1061,6 @@ def test_the_gradient_follows_a_known_ridge():
 
 
 def test_the_gradient_can_be_taken_twice():
-  """Trivially true without autograd, and worth pinning that it stays so.
-
-  The SVGP needed a cache clear between calls or the second one raised. This
-  implementation is analytic and holds no graph, so the property is free --
-  but it is the kind of thing a later rewrite could quietly lose.
-  """
   points, depth = survey(200, seed=98)
   fitted = fitted_at(points, depth, 0.3, m=20)
   queries = np.random.default_rng(99).uniform(-20, 20, size=(5, 2))
@@ -1211,7 +1100,6 @@ def test_the_gradient_rejects_points_of_the_wrong_width():
 
 
 def test_the_survey_tree_is_built_once_and_kept():
-  """``navigate.py`` calls the map every ping; a rebuilt tree would dominate."""
   points, depth = survey(300, seed=104)
   fitted = fitted_at(points, depth, 0.3, m=20)
 
@@ -1225,13 +1113,7 @@ def test_the_survey_tree_is_built_once_and_kept():
 
 
 def test_the_factor_applies_like_whiten():
-  """The pin on ``sparse_factor``.
-
-  ``whiten`` applies ``U^T`` without ever forming ``U``, by a different route
-  -- a triangular solve against each block. If the assembled matrix is right,
-  multiplying by it must give the same answer. Two independent derivations of
-  the same operator, which is the only reason either is trustworthy.
-  """
+  """``sparse_factor`` and ``whiten`` derive ``U^T`` independently; they agree."""
   points, residual = survey(400, 60)
   structure = build_structure(points, m=12, n0=20)
 
@@ -1247,7 +1129,6 @@ def test_the_factor_applies_like_whiten():
 
 
 def test_the_factor_is_upper_triangular():
-  """The Vecchia condition, read off the matrix itself."""
   points, _ = survey(300, 61)
   structure = build_structure(points, m=10, n0=16)
 
@@ -1260,7 +1141,7 @@ def test_the_factor_is_upper_triangular():
 
 
 def test_the_factor_inverts_the_kernel_when_it_conditions_on_everything():
-  """``U U^T = K^-1`` exactly, once nothing is approximated away."""
+  """``U U^T = K^-1`` at full conditioning."""
   n = 45
   points, _ = survey(n, 62, spread=12.0)
   structure = build_structure(points, m=n - 1, n0=n - 1)
@@ -1285,11 +1166,7 @@ def test_the_factor_inverts_the_kernel_when_it_conditions_on_everything():
 
 
 def test_draws_have_the_covariance_they_should():
-  """Monte Carlo against the kernel the draw was asked for.
-
-  This is what makes the generator usable as a reference: it validates the
-  covariance of what comes out, not merely that something came out.
-  """
+  """Monte Carlo covariance of the draws matches the kernel."""
   n = 60
   points, _ = survey(n, 63, spread=15.0)
   structure = build_structure(points, m=n - 1, n0=n - 1)
@@ -1319,7 +1196,6 @@ def test_draws_have_the_covariance_they_should():
 
 
 def test_a_draw_comes_back_in_the_callers_order():
-  """The permutation, which is silent and wrong-looking when inverted."""
   points, _ = survey(200, 64)
   structure = build_structure(points, m=10, n0=16)
 
@@ -1333,9 +1209,7 @@ def test_a_draw_comes_back_in_the_callers_order():
   )
   assert values.shape == (200,)
 
-  # Nearby points must have similar values; that is only true in the right
-  # order. Compare the spread of differences between neighbours in the
-  # caller's frame against the spread over arbitrary pairs.
+  # In the caller's order, nearest neighbours differ less than random pairs.
   _, partner = KDTree(points).query(points, k=2)
   partner = np.asarray(partner)
   close = np.abs(values - values[partner[:, 1]]).mean()
@@ -1364,7 +1238,6 @@ def basis_points(n=400, seed=70, spread=50.0):
 
 
 def test_the_default_basis_is_still_the_linear_one():
-  """Nothing may change for a map that did not ask for a richer mean."""
   points = basis_points(20)
   np.testing.assert_allclose(design_matrix(points), LINEAR_MEAN(points))
   np.testing.assert_allclose(
@@ -1374,18 +1247,15 @@ def test_the_default_basis_is_still_the_linear_one():
 
 
 def test_each_basis_has_the_size_it_claims():
-  """``size`` must match what the basis actually produces, and be full rank."""
-  fitted = basis_points()
+  """``size`` matches the basis output, which is full rank."""
   for kind, extra, expected in (
     ("linear", {}, 3),
     ("quadratic", {}, 6),
     ("cubic", {}, 10),
   ):
-    basis = MeanBasis.build(fitted, kind=kind, **extra)
+    basis = MeanBasis.build(kind=kind, **extra)
     assert basis.size == expected
 
-    # Comfortably more points than basis functions, or the rank check below
-    # is bounded by the sample rather than by the basis.
     sample = max(2000, 8 * expected)
     values = basis(basis_points(sample, seed=71, spread=49.0))
     assert values.shape == (sample, basis.size)
@@ -1393,13 +1263,6 @@ def test_each_basis_has_the_size_it_claims():
 
 
 def test_the_basis_gradient_matches_finite_differences():
-  """The pin on ``gradient``. A wrong derivative is otherwise silent.
-
-  It would not show up as an error -- only as a terrain update that pulls the
-  vehicle slightly the wrong way, which is the hardest kind of bug to find
-  downstream.
-  """
-  fitted = basis_points()
   queries = basis_points(40, seed=72, spread=40.0)
   step = 1e-5
 
@@ -1408,7 +1271,7 @@ def test_the_basis_gradient_matches_finite_differences():
     ("quadratic", {}),
     ("cubic", {}),
   ):
-    basis = MeanBasis.build(fitted, kind=kind, **extra)
+    basis = MeanBasis.build(kind=kind, **extra)
     analytic = basis.gradient(queries)
 
     numeric = np.stack(
@@ -1423,23 +1286,16 @@ def test_the_basis_gradient_matches_finite_differences():
 
 
 def test_the_linear_gradient_reduces_to_the_slope_coefficients():
-  """The identity the map used to hardcode, now a consequence rather than an
-  assumption."""
-  basis = MeanBasis.build(basis_points(), kind="linear")
+  basis = MeanBasis.build(kind="linear")
   beta = np.array([3.0, -0.7, 0.4])
 
   slope = np.einsum("npd,p->nd", basis.gradient(basis_points(6, seed=73)), beta)
   np.testing.assert_allclose(slope, np.broadcast_to(beta[1:], (6, 2)))
 
 
-def test_the_retired_spline_mean_is_refused_with_its_reason():
-  with pytest.raises(ValueError, match="retired"):
-    MeanBasis.build(basis_points(10), kind="spline")
-
-
 def test_it_rejects_an_unknown_basis():
   try:
-    MeanBasis.build(basis_points(10), kind="fourier")
+    MeanBasis.build(kind="fourier")
   except ValueError as error:
     assert "fourier" in str(error)
     return

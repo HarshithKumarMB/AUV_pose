@@ -1,10 +1,4 @@
-"""Matérn-5/2 and its spatial derivative.
-
-Both are checked against something written by someone else: the covariance
-against gpytorch's ``MaternKernel(nu=2.5)``, which is already a dependency, and
-the gradient against central differences of this module's own covariance. A
-closed form checked only against its own rearrangement proves nothing.
-"""
+"""Matérn-5/2 against gpytorch, and its gradient against finite differences."""
 
 import gpytorch
 import numpy as np
@@ -26,7 +20,6 @@ def points(n, seed, spread=20.0):
 
 
 def test_it_matches_gpytorchs_matern_kernel():
-  """An independent implementation of the same closed form."""
   a, b = points(9, 0), points(6, 1)
 
   kernel = gpytorch.kernels.MaternKernel(nu=2.5, ard_num_dims=2).double()
@@ -69,7 +62,6 @@ def test_covariance_decays_with_separation():
 
 
 def test_the_lengthscales_act_per_axis():
-  """A step along the long axis must decorrelate less than along the short."""
   origin = torch.zeros(1, 2, dtype=torch.float64)
   along_x = torch.tensor([[4.0, 0.0]])
   along_y = torch.tensor([[0.0, 4.0]])
@@ -129,12 +121,7 @@ def test_the_gradient_matches_central_differences():
 
 
 def test_the_gradient_is_exactly_zero_at_zero_separation():
-  """And computes it without a RuntimeWarning, which is the real point.
-
-  The uncancelled form -- radial derivative times ``dr/da`` -- divides by ``r``
-  here. ``pyproject.toml`` promotes RuntimeWarning to an error, so writing it
-  that way fails the suite rather than quietly returning NaN.
-  """
+  """Also without a RuntimeWarning, which the suite promotes to an error."""
   a = points(6, 10)
   gradient = matern52_gradient(a, a, LOG_AMPLITUDE, LOG_LENGTHSCALE).numpy()
 
@@ -144,7 +131,6 @@ def test_the_gradient_is_exactly_zero_at_zero_separation():
 
 
 def test_the_gradient_is_finite_for_coincident_points_in_general_position():
-  """A duplicated sounding is ordinary in a survey, not an edge case."""
   a = torch.tensor([[1.0, 2.0], [1.0, 2.0], [4.0, -1.0]])
   gradient = matern52_gradient(a, a, LOG_AMPLITUDE, LOG_LENGTHSCALE).numpy()
 
@@ -153,7 +139,6 @@ def test_the_gradient_is_finite_for_coincident_points_in_general_position():
 
 
 def test_the_gradient_points_away_from_the_other_point():
-  """Covariance falls off with distance, so its slope points back inward."""
   origin = torch.zeros(1, 2, dtype=torch.float64)
   other = torch.tensor([[5.0, 0.0]])
 
@@ -161,14 +146,13 @@ def test_the_gradient_points_away_from_the_other_point():
     origin, other, LOG_AMPLITUDE, LOG_LENGTHSCALE
   ).numpy()[0, 0]
 
-  # Moving ``origin`` further from ``other`` (negative x) must lower k, so the
-  # derivative with respect to x is positive.
+  # Moving away from ``other`` (negative x) lowers k.
   assert gradient[0] > 0.0
   assert gradient[1] == 0.0
 
 
 def test_the_gradient_is_antisymmetric_in_its_arguments():
-  """``dk/da = -dk/db``, since ``k`` depends only on the difference."""
+  """``dk/da = -dk/db``."""
   a, b = points(5, 11), points(5, 12)
 
   forward = matern52_gradient(a, b, LOG_AMPLITUDE, LOG_LENGTHSCALE).numpy()
@@ -189,7 +173,6 @@ def test_the_gradient_batches_over_leading_axes():
 
 @pytest.mark.parametrize("separation", [1e-8, 1e-4, 1e-2])
 def test_the_gradient_is_well_behaved_just_off_the_diagonal(separation):
-  """Where an uncancelled 1/r would blow up rather than merely divide by zero."""
   origin = torch.zeros(1, 2, dtype=torch.float64)
   near = torch.tensor([[separation, 0.0]])
 
@@ -198,5 +181,4 @@ def test_the_gradient_is_well_behaved_just_off_the_diagonal(separation):
   ).numpy()
 
   assert np.all(np.isfinite(gradient))
-  # The slope vanishes linearly as the separation closes.
   assert abs(gradient[0, 0, 0]) < 1.0

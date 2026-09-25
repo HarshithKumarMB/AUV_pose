@@ -1,7 +1,4 @@
-"""Extracting ranges from sonar returns.
-
-Pure numpy -- no simulator dependency, so this is testable offline.
-"""
+"""Extracting ranges and seabed points from multibeam sonar images."""
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -12,30 +9,18 @@ def range_bins(
 ) -> NDArray[np.float64]:
   """Range corresponding to each bin of a sonar intensity profile.
 
-  Bin *endpoints*, where :func:`azimuth_angles` uses bin *centres*. The
-  inconsistency is deliberate rather than overlooked: measured against altitude
-  read from the octree, over three fan configurations, neither convention wins.
-  Endpoints came out -0.039, -0.027 and -0.020 m; centres, which are half a bin
-  higher, +0.011, +0.023 and +0.030 m. The truth sits between them at about a
-  quarter of a bin, both are well inside the 0.0996 m quantisation, and every
-  number measured so far was measured under this one. Changing it on symmetry
-  alone would shift every range by 0.05 m to no benefit.
+  Bin *endpoints*, where :func:`azimuth_angles` uses centres. Deliberate:
+  neither convention fits better, and switching shifts every range by half a
+  bin.
   """
   return np.linspace(range_min, range_max, n_bins)
 
 
 def azimuth_angles(azimuth: float, n_bins: int) -> NDArray[np.float64]:
-  """Bearing of each beam in a multibeam fan, radians from nadir.
-
-  Bin centres rather than edges, so beam ``i`` is the direction the ``i``-th
-  column of the intensity image looked along.
+  """Bearing of each beam's bin centre in a multibeam fan, radians from nadir.
 
   Args:
       azimuth: Total swath width in degrees.
-      n_bins: Number of azimuth bins.
-
-  Returns:
-      Bearings in radians, ascending, symmetric about zero.
   """
   half = np.radians(azimuth) / 2.0
   edges = np.linspace(-half, half, n_bins + 1)
@@ -45,26 +30,15 @@ def azimuth_angles(azimuth: float, n_bins: int) -> NDArray[np.float64]:
 def bottom_return_ranges(
   image: ArrayLike, ranges: ArrayLike
 ) -> NDArray[np.float64]:
-  """Bottom range for every beam of a multibeam image.
-
-  The image is ``(range_bins, azimuth_bins)``, so each column is one beam's
-  intensity profile and the strongest return in it is that beam's echo.
+  """Bottom range for every beam: the strongest return in each column.
 
   Args:
       image: Intensity, shape ``(range_bins, azimuth_bins)``.
       ranges: Range for each row, length ``range_bins``.
 
   Returns:
-      Range per beam in metres, NaN where a beam has no discernible echo. Beams
-      angled far off nadir routinely fall beyond ``RangeMax`` and come back
-      flat, so NaN is the normal case at the edges of the swath rather than a
-      fault.
-
-  Note:
-      Against a ray-cast through the simulator's octree these ranges agree to a
-      0.035 m MAD-std, inside the 0.0996 m quantisation. Where they disagree,
-      by 4-5 m, the sonar is right: it sees pipelines on the Dam seabed that the
-      octree omits.
+      Range per beam in metres, NaN where a column is flat (no echo), which is
+      normal at the swath edges.
   """
   image = np.asarray(image, dtype=float)
   ranges = np.asarray(ranges, dtype=float)
@@ -93,23 +67,16 @@ def seabed_points(
 ) -> NDArray[np.float64]:
   """Where each beam struck the seabed, in world coordinates.
 
-  A multibeam only measures range along a bearing; turning that into a sounding
-  needs the vehicle's position *and* attitude, because every beam except nadir
-  lands at a horizontal offset of ``range * sin(bearing)`` from the vehicle.
-  Recording a sounding at the vehicle's own ``(x, y)`` -- which is what a
-  singlebeam survey can get away with -- misplaces every other beam.
-
   Args:
-      position: Vehicle position in the world, shape ``(3,)``.
       rotation: Body-to-world rotation, shape ``(3, 3)``.
-      beam_ranges: Range per beam in metres; NaN beams pass through as NaN.
-      bearings: Bearing per beam in radians from nadir, same length.
+      beam_ranges: Range per beam in metres; NaN gives a NaN row.
+      bearings: Bearing per beam in radians from nadir.
       swath_axis: Body-frame unit vector the fan opens along.
-      nadir_axis: Body-frame unit vector the fan is centred on. Defaults to
-          body ``+z``, which is down for a sensor in HoloOcean's ``IMUSocket``.
+      nadir_axis: Body-frame unit vector the fan is centred on; body ``+z`` is
+          down in HoloOcean's ``IMUSocket``.
 
   Returns:
-      Seabed points, shape ``(n, 3)``, NaN rows where the beam had no echo.
+      Seabed points, shape ``(n, 3)``.
   """
   beam_ranges = np.asarray(beam_ranges, dtype=float)
   bearings = np.asarray(bearings, dtype=float)

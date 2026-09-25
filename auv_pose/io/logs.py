@@ -11,8 +11,8 @@ class CsvWriter:
 
   Use as a context manager::
 
-      with CsvWriter("navigation.csv", NAVIGATION_COLUMNS) as log:
-          log.write(step=0, x=1.0, ...)
+      with CsvWriter("run.csv", ("step", "x")) as log:
+          log.write(step=0, x=1.0)
 
   Line-buffered, so a run killed partway leaves every finished row on disk.
   """

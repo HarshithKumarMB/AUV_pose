@@ -259,7 +259,7 @@ def test_boxplus_perturbs_the_rotation_on_the_right():
 def test_an_increment_on_the_left_is_refused_not_broadcast():
   """NumPy would otherwise add the state to each element of the increment."""
   with pytest.raises(TypeError):
-    _ = np.zeros(DOF) + NavState.at_rest()
+    _ = np.zeros(DOF) + NavState.at_rest()  # pyright: ignore[reportOperatorIssue]
 
 
 @pytest.mark.parametrize("shape", [(DOF - 1,), (1, DOF), ()])

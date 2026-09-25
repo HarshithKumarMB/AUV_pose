@@ -1,19 +1,7 @@
-"""Loading sonar survey data.
+"""Loading sonar survey CSVs.
 
-Survey CSVs have columns ``x, y, z``: the **world-frame position of the seabed**
-where a beam struck it. ``z`` increases upward, so the seabed is negative and the
-GP models it directly with no sign flip.
-
-.. note::
-
-   This replaced an older ``x, y, sonar_depth`` schema in which ``sonar_depth``
-   was a positive *range* from the vehicle, recorded at the vehicle's own
-   ``(x, y)`` and with the vehicle's ``z`` never written down at all. That works
-   only for a single downward beam over a survey that happens to fly at
-   ``z = 0``, and it cannot express a multibeam at all: every beam but nadir
-   lands ``range * sin(bearing)`` away from the vehicle. Surveys written under
-   the old schema cannot be converted, because the depth they were taken from
-   was not recorded.
+Columns ``x, y, z`` are the world-frame seabed point a beam struck; ``z`` is
+up, so the seabed is negative.
 """
 
 from collections.abc import Iterable
@@ -25,11 +13,8 @@ from numpy.typing import NDArray
 
 SOUNDING_COLUMNS = ("x", "y", "z")
 
-#: Written by ``georeference.py`` and optional on read. ``ping`` groups the
-#: beams of one ping; ``true_`` is where the
-#: same range would have landed from the true pose, **in the map's frame** --
-#: shifted by the survey's shared start offset, so it can be compared with the
-#: map directly. Scoring only.
+#: Optional on read. ``ping`` groups the beams of one ping; ``true_*`` is where
+#: the range lands from the true pose, in the map's frame. Scoring only.
 OPTIONAL_COLUMNS = ("ping", "true_x", "true_y", "true_z")
 
 
@@ -39,18 +24,12 @@ def load_soundings(
   """Read one or more survey CSVs into a single frame.
 
   Args:
-      paths: Survey CSV paths, concatenated in order.
-      drop_invalid: Drop rows with a missing or non-finite value in any of the
-          sounding columns. Survey runs record NaN whenever the sonar returned no
-          usable echo, and those rows must not reach the GP.
+      drop_invalid: Drop rows with a missing or non-finite ``x``, ``y`` or
+          ``z`` (beams with no echo).
 
   Returns:
-      A frame with columns ``x, y, z``, plus whichever of
-      :data:`OPTIONAL_COLUMNS` every file carries. A column only some files
-      have is dropped, not filled with a made-up value.
-
-  Raises:
-      ValueError: If no paths are given, or a file lacks the expected columns.
+      Columns ``x, y, z`` plus whichever :data:`OPTIONAL_COLUMNS` every file
+      carries.
   """
   paths = [Path(p) for p in paths]
   if not paths:
@@ -88,10 +67,7 @@ def soundings_to_arrays(
   """Split a sounding frame into GP training arrays.
 
   Returns:
-      ``(X, y)`` where ``X`` is ``(n, 2)`` of horizontal position and ``y`` is
-      ``(n,)`` of seabed elevation, taken as recorded. The old schema needed a
-      sign flip here because it stored a downward range; an elevation already
-      points the way the GP models it.
+      ``(X, y)``: ``(n, 2)`` horizontal positions and ``(n,)`` elevations.
   """
   X = frame[["x", "y"]].to_numpy(dtype=np.float32)
   y = frame["z"].to_numpy(dtype=np.float32)

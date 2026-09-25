@@ -1,26 +1,8 @@
-"""The raw survey log: every sensor reading, before anything is placed.
+"""The raw survey log: every sensor reading, before soundings are placed.
 
-A survey flown on the vehicle's own navigation cannot write soundings as it
-goes, because where a sounding lies depends on a pose that the smoother only
-settles once the whole run is in. So the survey writes what the sensors said,
-and :mod:`experiments.georeference` places the soundings afterwards -- which is
-also how a real survey is processed.
-
-A log is a directory holding three files:
-
-``ticks.csv``
-    One row per simulator tick: the IMU, whichever aiding sensors reported
-    that tick (``nan`` otherwise), and **ground truth**, logged for scoring
-    only. Nothing in the navigation reads a ``true_`` column.
-``pings.csv``
-    One row per sonar ping: the tick it was taken at, and the picked range of
-    every beam (``nan`` for a beam with no echo).
-``meta.npz``
-    What is needed to interpret the other two: tick rate, beam bearings and
-    axes, sensor noise, and the initial belief navigation started from.
-
-Both CSVs are streamed row by row, so a run that dies partway keeps everything
-up to that point.
+A log directory holds ``ticks.csv`` (sensors, ``nan`` when silent, plus
+scoring-only ``true_*`` columns), ``pings.csv`` (tick and range per beam) and
+``meta.npz``.
 """
 
 from dataclasses import dataclass
@@ -123,10 +105,7 @@ class RawSurveyWriter:
   Use as a context manager. ``meta.npz`` is written on entry, so a log that
   dies partway is still interpretable.
 
-  :param directory: Where to write; created if absent.
-  :param n_beams: Beams per ping.
-  :param meta: Everything needed to interpret the log: nested dicts of
-      numbers, strings and arrays.
+  :param meta: Nested dicts of numbers, strings and arrays.
   """
 
   def __init__(
@@ -197,8 +176,6 @@ class RawSurveyWriter:
 class RawSurvey:
   """A raw survey log, read back.
 
-  :param ticks: ``ticks.csv`` as a frame, one row per tick.
-  :param ping_ticks: Tick of each ping, ``(n_pings,)``.
   :param ranges: Picked range per beam, ``(n_pings, n_beams)``.
   :param meta: ``meta.npz``, as nested dicts.
   """
@@ -210,12 +187,9 @@ class RawSurvey:
 
   @property
   def start_offset(self) -> NDArray[np.float64]:
-    """The flight's horizontal surface-fix error: believed start minus true.
+    """Believed start minus true start, horizontal: the map frame's offset.
 
-    Nothing below the surface observes horizontal position, so this one error
-    shifts every sounding the flight places: it is the offset of the flight's
-    map frame from the world. Logs from before the true start was recorded
-    fall back to the first tick's truth, one tick later -- centimetres.
+    Falls back to the first tick's truth when ``initial_truth`` is absent.
     """
     believed = np.asarray(self.meta["initial_mean"]["position"][:2], float)
     recorded = self.meta.get("initial_truth")
@@ -236,8 +210,7 @@ def _meta(path: Path) -> dict[str, Any]:
 def load_raw_survey(directory: str | Path) -> RawSurvey:
   """Read a raw survey log written by :class:`RawSurveyWriter`.
 
-  :raises FileNotFoundError: If the directory lacks one of its three files --
-      most likely a soundings CSV passed where a raw log was expected.
+  :raises FileNotFoundError: If the directory lacks one of its three files.
   """
   directory = Path(directory)
   missing = [
