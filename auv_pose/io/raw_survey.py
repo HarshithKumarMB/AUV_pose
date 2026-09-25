@@ -15,7 +15,7 @@ A log is a directory holding three files:
 ``pings.csv``
     One row per sonar ping: the tick it was taken at, and the picked range of
     every beam (``nan`` for a beam with no echo).
-``meta.json``
+``meta.npz``
     What is needed to interpret the other two: tick rate, beam bearings and
     axes, sensor noise, and the initial belief navigation started from.
 
@@ -23,7 +23,6 @@ Both CSVs are streamed row by row, so a run that dies partway keeps everything
 up to that point.
 """
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
@@ -73,12 +72,50 @@ TICK_COLUMNS = (
   "true_accel_bias_z",
 )
 
-TICKS, PINGS, META = "ticks.csv", "pings.csv", "meta.json"
+TICKS, PINGS, META = "ticks.csv", "pings.csv", "meta.npz"
 
 
 def ping_columns(n_beams: int) -> tuple[str, ...]:
   """Columns of ``pings.csv`` for a fan of ``n_beams``."""
   return ("tick", *(f"range_{i}" for i in range(n_beams)))
+
+
+def _flatten(tree: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+  """Nested metadata as flat arrays keyed ``outer/inner``."""
+  flat: dict[str, Any] = {}
+  for key, value in tree.items():
+    if "/" in key:
+      raise ValueError(f"metadata key {key!r} contains '/'")
+    name = prefix + key
+    if name in ("file", "allow_pickle"):
+      raise ValueError(f"metadata key {name!r} is reserved by np.savez")
+    if isinstance(value, dict):
+      if not value:
+        raise ValueError(f"metadata {name!r} is an empty dict")
+      flat |= _flatten(value, name + "/")
+      continue
+    array = np.asarray(value)
+    # NumPy turns a list mixing numbers and strings into strings, silently.
+    mixed = array.dtype.kind == "U" and not all(
+      isinstance(item, str) for item in np.asarray(value, dtype=object).ravel()
+    )
+    if array.dtype == object or mixed:
+      raise ValueError(f"metadata {name!r} is not a plain array: {value!r}")
+    flat[name] = array
+  return flat
+
+
+def _unflatten(stored: Any) -> dict[str, Any]:
+  """Inverse of :func:`_flatten`; 0-d arrays come back as plain values."""
+  tree: dict[str, Any] = {}
+  for key in stored.files:
+    *outer, leaf = key.split("/")
+    node = tree
+    for part in outer:
+      node = node.setdefault(part, {})
+    value = stored[key]
+    node[leaf] = value.item() if value.ndim == 0 else value
+  return tree
 
 
 def _triple(prefix: str, values: ArrayLike | None) -> dict[str, float]:
@@ -91,12 +128,13 @@ def _triple(prefix: str, values: ArrayLike | None) -> dict[str, float]:
 class RawSurveyWriter:
   """Stream a raw survey log into a directory.
 
-  Use as a context manager. ``meta.json`` is written on entry, so a log that
+  Use as a context manager. ``meta.npz`` is written on entry, so a log that
   dies partway is still interpretable.
 
   :param directory: Where to write; created if absent.
   :param n_beams: Beams per ping.
-  :param meta: Everything needed to interpret the log; must be JSON-able.
+  :param meta: Everything needed to interpret the log: nested dicts of
+      numbers, strings and arrays.
   """
 
   def __init__(
@@ -110,7 +148,7 @@ class RawSurveyWriter:
 
   def __enter__(self) -> Self:
     self.directory.mkdir(parents=True, exist_ok=True)
-    (self.directory / META).write_text(json.dumps(self.meta, indent=2))
+    np.savez(self.directory / META, **_flatten(self.meta))
     self._ticks.__enter__()
     self._pings.__enter__()
     return self
@@ -170,7 +208,7 @@ class RawSurvey:
   :param ticks: ``ticks.csv`` as a frame, one row per tick.
   :param ping_ticks: Tick of each ping, ``(n_pings,)``.
   :param ranges: Picked range per beam, ``(n_pings, n_beams)``.
-  :param meta: ``meta.json``.
+  :param meta: ``meta.npz``, as nested dicts.
   """
 
   ticks: pd.DataFrame
@@ -196,6 +234,11 @@ class RawSurvey:
   def readings(self, prefix: str) -> NDArray[np.float64]:
     """An ``(n_ticks, 3)`` block of one sensor, ``nan`` where it was silent."""
     return self.ticks[[f"{prefix}_{axis}" for axis in "xyz"]].to_numpy(float)
+
+
+def _meta(path: Path) -> dict[str, Any]:
+  with np.load(path, allow_pickle=False) as stored:
+    return _unflatten(stored)
 
 
 def load_raw_survey(directory: str | Path) -> RawSurvey:
@@ -224,5 +267,5 @@ def load_raw_survey(directory: str | Path) -> RawSurvey:
     ticks=ticks,
     ping_ticks=pings["tick"].to_numpy(np.int64),
     ranges=pings.drop(columns="tick").to_numpy(float),
-    meta=json.loads((directory / META).read_text()),
+    meta=_meta(directory / META),
   )

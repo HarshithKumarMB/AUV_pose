@@ -15,8 +15,28 @@ TRUTH: dict[str, Any] = {
 }
 
 
+META: dict[str, Any] = {
+  "commit": "abc123-dirty",
+  "tick_rate_hz": 30,
+  "depth_sigma": 0.05,
+  "sonar": {"azimuth": 60.0, "azimuth_bins": 240},
+  "initial_mean": {"position": [1.0, 2.0, -0.4], "attitude": [1, 0, 0, 0]},
+  "waypoints": [[0.0, 0.0, 0.0], [5.0, 0.0, -1.0]],
+}
+
+
+def assert_same_tree(read, written):
+  assert set(read) == set(written)
+  for key, value in written.items():
+    if isinstance(value, dict):
+      assert_same_tree(read[key], value)
+    else:
+      np.testing.assert_array_equal(read[key], value)
+      assert type(read[key]) is type(value) or isinstance(read[key], np.ndarray)
+
+
 def write(directory, n_beams=4):
-  meta = {"tick_rate_hz": 30, "bearings": [0.1, 0.2, 0.3, 0.4][:n_beams]}
+  meta = {**META, "bearings": [0.1, 0.2, 0.3, 0.4][:n_beams]}
   with RawSurveyWriter(directory, n_beams, meta) as log:
     log.tick(0, gyro=[0, 0, 0.1], accel=[0, 0, -9.81], **TRUTH)
     log.tick(
@@ -36,7 +56,7 @@ def test_it_round_trips(tmp_path):
   meta = write(tmp_path / "pass0")
   survey = load_raw_survey(tmp_path / "pass0")
 
-  assert survey.meta == meta
+  assert_same_tree(survey.meta, meta)
   np.testing.assert_array_equal(survey.ping_ticks, [1])
   np.testing.assert_array_equal(survey.ranges, [[70.0, np.nan, 71.5, 72.0]])
   np.testing.assert_array_equal(survey.readings("gyro")[:, 2], [0.1, 0.2])
@@ -64,3 +84,27 @@ def test_a_soundings_file_is_not_mistaken_for_a_log(tmp_path):
   (tmp_path / "pass0.csv").write_text("x,y,z\n0,0,-70\n")
   with pytest.raises(FileNotFoundError, match="not a raw survey log"):
     load_raw_survey(tmp_path / "pass0.csv")
+
+
+@pytest.mark.parametrize(
+  "meta",
+  [
+    {"a/b": 1.0},
+    {"x": None},
+    {"x": {}},
+    {"x": [1.0, "two"]},
+    {"file": 1.0},
+    {"allow_pickle": False},
+  ],
+  ids=[
+    "slash in key",
+    "None",
+    "empty dict",
+    "mixed list",
+    "file",
+    "allow_pickle",
+  ],
+)
+def test_metadata_that_cannot_round_trip_is_refused(tmp_path, meta):
+  with pytest.raises(ValueError), RawSurveyWriter(tmp_path / "pass0", 1, meta):
+    pass
